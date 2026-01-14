@@ -1,0 +1,83 @@
+# Primality Test via Witness Pattern
+#
+# Problem: Is N factorable? Find a non-trivial factor.
+# Instead of checking ALL numbers (slow), we ask the Oracle for a factor F.
+# We verify if F divides N. If yes, we stabilize. If no, we search.
+#
+# Demonstrates:
+# - Temporal witness pattern for factorization
+# - Reusable procedures with effect annotations
+# - TEMPORAL variables for oracle access
+# - Clean separation of verification logic
+#
+# Target: 15 (factors are 3, 5)
+# Complexity: O(1) verification per epoch
+
+# ════ Configuration ════
+MANIFEST TARGET = 15;
+MANIFEST ADDR_FACTOR = 0;
+
+# ════ Temporal Variables ════
+# Note: TEMPORAL syntax requires literal address (not MANIFEST)
+TEMPORAL factor @ 0 DEFAULT 2;
+
+# ════ Pure Verification Procedures ════
+
+# Check if value is in valid range (1 < val < limit)
+PROCEDURE in_range PURE {
+    # Stack: val limit -- bool
+    SWAP           # limit val
+    DUP 1 GT       # limit val (val > 1)
+    ROT            # val (val > 1) limit
+    ROT            # (val > 1) limit val
+    LT             # (val > 1) (val < limit)
+    AND            # result
+}
+
+# Check if d divides n (n mod d == 0)
+PROCEDURE divides PURE {
+    # Stack: n d -- bool
+    SWAP DUP       # d n n
+    ROT            # n n d
+    MOD            # n (n mod d)
+    0 EQ           # n divides?
+    SWAP DROP      # divides?
+}
+
+# Check if f is a valid factor of TARGET
+PROCEDURE is_valid_factor PURE {
+    # Stack: f -- bool
+    DUP TARGET in_range   # f in_range?
+    SWAP                   # in_range? f
+    TARGET SWAP divides    # in_range? divides?
+    AND                    # both conditions
+}
+
+# ════ Temporal Procedures ════
+
+# Main factorization procedure
+PROCEDURE find_factor {
+    # Stack: factor
+    DUP is_valid_factor IF {
+        # Found a valid factor!
+        # Write back to create fixed point
+        DUP ADDR_FACTOR PROPHECY
+        "Factor of " OUTPUT TARGET OUTPUT " found: " OUTPUT
+        OUTPUT NEWLINE
+    } ELSE {
+        # Not valid, try next candidate
+        # Increment and wrap around if needed
+        1 ADD
+        DUP TARGET GTE IF {
+            DROP 2  # Reset to 2 if we exceed TARGET
+        }
+        ADDR_FACTOR PROPHECY
+    }
+}
+
+# ════ Main Program ════
+# Read candidate factor from oracle
+factor
+
+# Find the factor
+find_factor

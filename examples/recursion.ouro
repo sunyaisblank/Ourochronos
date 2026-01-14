@@ -1,0 +1,84 @@
+# Recursion Example
+#
+# Demonstrates recursive computation using quotations and the REC combinator.
+# REC allows a quotation to call itself, enabling recursive algorithms.
+#
+# Demonstrates:
+# - Quotation syntax [ ... ]
+# - REC combinator for recursion
+# - ROLL and other stack manipulation for complex recursion
+# - ASSERT for testing
+#
+# Computes: 5! = 120
+
+# ════ Configuration ════
+MANIFEST FACTORIAL_INPUT = 5;
+MANIFEST EXPECTED_RESULT = 120;
+
+# ════ Test Header ════
+"Recursion Test Suite" OUTPUT NEWLINE
+"====================" OUTPUT NEWLINE
+
+# ════ Test 1: Factorial ════
+"Test: Factorial(" OUTPUT FACTORIAL_INPUT OUTPUT ")" OUTPUT NEWLINE
+
+# Initialize: accumulator=1, n=5
+1 FACTORIAL_INPUT
+
+# Recursive factorial using quotation + REC
+[
+    # Stack: acc n quote
+    # Move quote out of the way for cleaner stack access
+    ROT          # n quote acc
+    SWAP         # n acc quote
+
+    # Check base case
+    ROT          # acc quote n
+    DUP 1 LTE IF {
+        # Base case: n <= 1
+        # Stack: acc quote n
+        DROP DROP  # Return accumulator
+    } ELSE {
+        # Recursive case: acc' = acc * n, n' = n - 1
+        # Stack: acc quote n
+        DUP        # acc quote n n
+        3 ROLL     # quote n n acc
+        MUL        # quote n acc'
+        SWAP       # quote acc' n
+        1 SUB      # quote acc' n-1
+        ROT        # acc' n-1 quote
+        REC        # Recurse
+    }
+]
+REC
+
+# Verify result
+DUP EXPECTED_RESULT EQ ASSERT "Factorial computation failed"
+"  Result: " OUTPUT OUTPUT NEWLINE
+"  Expected: " OUTPUT EXPECTED_RESULT OUTPUT NEWLINE
+"  Status: PASSED" OUTPUT NEWLINE
+
+# ════ Test 2: Sum to N using recursion ════
+"Test: Sum(1 to 10)" OUTPUT NEWLINE
+
+# Sum 1+2+...+10 = 55
+0 10  # acc n
+[
+    ROT SWAP ROT
+    DUP 0 EQ IF {
+        DROP DROP  # Return accumulator
+    } ELSE {
+        DUP 3 ROLL ADD SWAP  # acc' = acc + n
+        1 SUB               # n' = n - 1
+        ROT REC
+    }
+]
+REC
+
+DUP 55 EQ ASSERT "Sum computation failed"
+"  Result: " OUTPUT OUTPUT NEWLINE
+"  Expected: 55" OUTPUT NEWLINE
+"  Status: PASSED" OUTPUT NEWLINE
+
+"====================" OUTPUT NEWLINE
+"All recursion tests passed!" OUTPUT NEWLINE

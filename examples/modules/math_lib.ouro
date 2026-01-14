@@ -1,0 +1,149 @@
+# Math Library Module
+#
+# A collection of pure mathematical procedures for reuse across programs.
+# All procedures in this module are PURE - they have no side effects.
+#
+# Import this module with: IMPORT "examples/modules/math_lib.ouro"
+
+# ════ Unary Operations ════
+
+# Absolute value: returns |n|
+# Stack effect: ( n -- |n| )
+PROC ABS PURE {
+    DUP 0 LT IF {
+        NEG  # Use built-in NEG for cleaner code
+    }
+}
+
+# Sign function: returns -1, 0, or 1
+# Stack effect: ( n -- sign )
+PROC SIGN PURE {
+    DUP 0 GT IF {
+        DROP 1
+    } ELSE {
+        0 LT IF {
+            0 1 SUB  # -1
+        } ELSE {
+            0
+        }
+    }
+}
+
+# Square: returns n^2
+# Stack effect: ( n -- n^2 )
+PROC SQUARE PURE {
+    DUP MUL
+}
+
+# Cube: returns n^3
+# Stack effect: ( n -- n^3 )
+PROC CUBE PURE {
+    DUP DUP MUL MUL
+}
+
+# ════ Binary Operations ════
+
+# Add then multiply: (a + b) * c
+# Stack effect: ( a b c -- result )
+PROC ADDMUL PURE {
+    ROT ROT ADD MUL
+}
+
+# Multiply then add: (a * b) + c
+# Stack effect: ( a b c -- result )
+PROC MULADD PURE {
+    ROT ROT MUL ADD
+}
+
+# Maximum of two numbers
+# Stack effect: ( a b -- max )
+PROC MAX2 PURE {
+    OVER OVER GT IF {
+        DROP
+    } ELSE {
+        SWAP DROP
+    }
+}
+
+# Minimum of two numbers
+# Stack effect: ( a b -- min )
+PROC MIN2 PURE {
+    OVER OVER LT IF {
+        DROP
+    } ELSE {
+        SWAP DROP
+    }
+}
+
+# Absolute difference: |a - b|
+# Stack effect: ( a b -- |a-b| )
+PROC ABSDIFF PURE {
+    OVER OVER GT IF {
+        SUB
+    } ELSE {
+        SWAP SUB
+    }
+}
+
+# ════ Predicates ════
+
+# Check if n is even
+# Stack effect: ( n -- bool )
+PROC IS_EVEN PURE {
+    2 MOD 0 EQ
+}
+
+# Check if n is odd
+# Stack effect: ( n -- bool )
+PROC IS_ODD PURE {
+    2 MOD 1 EQ
+}
+
+# Check if n is zero
+# Stack effect: ( n -- bool )
+PROC IS_ZERO PURE {
+    0 EQ
+}
+
+# Check if n is positive (> 0)
+# Stack effect: ( n -- bool )
+PROC IS_POSITIVE PURE {
+    0 GT
+}
+
+# Check if n is negative (< 0)
+# Stack effect: ( n -- bool )
+PROC IS_NEGATIVE PURE {
+    0 LT
+}
+
+# Check if value is in range [lo, hi)
+# Stack effect: ( val lo hi -- bool )
+PROC IN_RANGE PURE {
+    ROT DUP       # lo hi val val
+    ROT           # lo val val hi
+    LT            # lo val (val < hi)
+    ROT ROT       # (val < hi) lo val
+    SWAP          # (val < hi) val lo
+    GTE           # (val < hi) (val >= lo)
+    AND
+}
+
+# ════ Arithmetic Sequences ════
+
+# Sum from 1 to n: n*(n+1)/2
+# Stack effect: ( n -- sum )
+PROC SUM_TO_N PURE {
+    DUP 1 ADD MUL 2 DIV
+}
+
+# Sum of squares from 1 to n: n*(n+1)*(2n+1)/6
+# Stack effect: ( n -- sum )
+PROC SUM_SQUARES_TO_N PURE {
+    DUP DUP           # n n n
+    1 ADD             # n n (n+1)
+    ROT               # n (n+1) n
+    2 MUL 1 ADD       # n (n+1) (2n+1)
+    MUL MUL           # n*(n+1)*(2n+1)
+    6 DIV
+}

@@ -1,0 +1,23 @@
+# Temporal Variables Example
+#
+# TEMPORAL variables provide syntactic sugar for oracle-backed data.
+# Instead of manually managing ORACLE/PROPHECY, you declare temporal
+# variables that automatically read from fixed addresses.
+#
+# Syntax: TEMPORAL name @ address DEFAULT default_value;
+#
+# When you reference the variable, it generates ORACLE(address).
+# This makes temporal programs more readable!
+
+# Declare a temporal variable at address 0 with default 2
+TEMPORAL factor @ 0 DEFAULT 2;
+
+# Read the temporal variable (generates ORACLE(0))
+factor OUTPUT
+
+# Write back a new value
+factor 1 ADD  # factor + 1
+0 PROPHECY    # write to address 0
+
+# The program will find a fixed point where factor reads back
+# the same value it writes

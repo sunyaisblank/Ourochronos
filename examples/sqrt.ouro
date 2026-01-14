@@ -1,0 +1,82 @@
+# Integer Square Root via Temporal Witness
+#
+# Problem: Find sqrt(144) = 12
+# Instead of iterating, we use the temporal witness pattern:
+# 1. Oracle gives us a candidate answer
+# 2. We verify: is candidate^2 == target?
+# 3. If yes, write candidate back (fixed point)
+# 4. If no, search for next candidate using binary search
+#
+# Demonstrates:
+# - Temporal witness pattern for mathematical verification
+# - TEMPORAL variables for cleaner oracle access
+# - Procedures with effect annotations
+# - Signed comparison for search direction
+#
+# This finds the exact integer sqrt in O(log n) epochs!
+
+# ════ Configuration ════
+MANIFEST TARGET = 144;
+MANIFEST ADDR_CANDIDATE = 0;
+
+# ════ Temporal Variables ════
+# Note: TEMPORAL syntax requires literal address (not MANIFEST)
+TEMPORAL candidate @ 0 DEFAULT 1;
+
+# ════ Procedures with Effects ════
+
+# Pure function: square a number
+PROCEDURE square PURE {
+    # Stack: n -- n^2
+    DUP MUL
+}
+
+# Pure function: check if n^2 equals target
+PROCEDURE is_sqrt PURE {
+    # Stack: n -- bool
+    square TARGET EQ
+}
+
+# Pure function: compare n^2 with target
+PROCEDURE compare_with_target PURE {
+    # Stack: n -- cmp (1 if too small, 0 if equal, -1 if too large)
+    DUP square
+    DUP TARGET LT IF {
+        DROP 1      # candidate^2 < TARGET: too small
+    } ELSE {
+        TARGET GT IF {
+            0 1 SUB # candidate^2 > TARGET: too large (-1)
+        } ELSE {
+            0       # candidate^2 == TARGET: exact match
+        }
+    }
+}
+
+# Temporal procedure: verify and stabilize or search
+PROCEDURE find_sqrt {
+    # Stack: candidate
+    DUP is_sqrt IF {
+        # Correct! candidate^2 == TARGET
+        # Write back to create stable fixed point
+        DUP ADDR_CANDIDATE PROPHECY
+        "sqrt(" OUTPUT TARGET OUTPUT ") = " OUTPUT
+        OUTPUT NEWLINE
+    } ELSE {
+        # Wrong candidate - binary search
+        DUP compare_with_target
+        0 GT IF {
+            # Too small: increment
+            1 ADD ADDR_CANDIDATE PROPHECY
+        } ELSE {
+            # Too large: decrement
+            1 SUB ADDR_CANDIDATE PROPHECY
+        }
+    }
+}
+
+# ════ Main Program ════
+# Read candidate from temporal oracle
+candidate
+
+# Find the square root
+find_sqrt

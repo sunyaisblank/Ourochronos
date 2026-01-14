@@ -1,0 +1,93 @@
+# Procedure Example
+#
+# This demonstrates the PROCEDURE syntax for reusable functions.
+# Procedures take values from the stack and leave results on the stack.
+#
+# Demonstrates:
+# - PROCEDURE definition with effect annotations
+# - Stack effect documentation (Forth-style comments)
+# - TEMPORAL variables for oracle-backed data
+# - LET bindings for named values
+# - Reusable pure and temporal procedures
+
+# ════ Configuration ════
+MANIFEST TARGET = 15;
+MANIFEST ADDR_FACTOR = 0;
+
+# ════ Temporal Variables ════
+# Note: TEMPORAL syntax requires literal address (not MANIFEST)
+TEMPORAL factor @ 0 DEFAULT 2;
+
+# ════ Pure Procedures ════
+
+# Check if a value is in range (1, limit)
+# Stack effect: ( value limit -- bool )
+PROCEDURE in_range PURE {
+    SWAP           # limit value
+    DUP 1 GT       # limit value (value > 1)
+    ROT            # value (value > 1) limit
+    ROT            # (value > 1) limit value
+    LT             # (value > 1) (value < limit)
+    AND            # result
+}
+
+# Check if n is divisible by d (d divides n evenly)
+# Stack effect: ( n d -- bool )
+PROCEDURE divides PURE {
+    SWAP DUP       # d n n
+    ROT            # n n d
+    MOD            # n (n mod d)
+    0 EQ           # d divides n?
+}
+
+# Calculate absolute difference between two numbers
+# Stack effect: ( a b -- |a-b| )
+PROCEDURE abs_diff PURE {
+    OVER OVER      # a b a b
+    GT IF {
+        SUB        # a > b: a - b
+    } ELSE {
+        SWAP SUB   # a <= b: b - a
+    }
+}
+
+# ════ Temporal Procedures ════
+
+# Attempt to stabilize the factor if valid
+# Stack effect: ( factor -- )
+PROCEDURE try_stabilize {
+    DUP ADDR_FACTOR PROPHECY
+    "Found factor: " OUTPUT OUTPUT NEWLINE
+}
+
+# Perturb to next candidate
+# Stack effect: ( factor -- )
+PROCEDURE next_candidate {
+    1 ADD
+    DUP TARGET GTE IF {
+        DROP 2  # Wrap around to 2
+    }
+    ADDR_FACTOR PROPHECY
+}
+
+# ════ Main Program ════
+LET n = TARGET;
+
+# Read factor from oracle
+factor
+
+# Check if factor is in valid range
+DUP n in_range IF {
+    # Check if factor divides n
+    DUP n SWAP divides IF {
+        # Found a factor!
+        try_stabilize
+    } ELSE {
+        # Not a factor, try next
+        next_candidate
+    }
+} ELSE {
+    # Out of range, reset to 2
+    DROP
+    2 ADDR_FACTOR PROPHECY
+}

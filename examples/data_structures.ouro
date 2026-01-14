@@ -1,0 +1,188 @@
+# Data Structures Example
+#
+# Demonstrates the built-in data structures added in Phase 3:
+# - Vectors: Dynamic arrays with O(1) amortized append
+# - Hash Tables: Key-value stores with O(1) average lookup
+# - Sets: Unordered collections with membership testing
+#
+# These structures enable practical programming patterns
+# that were previously difficult with raw memory operations.
+
+# ════ Procedures ════
+
+PROCEDURE section_header PURE {
+    # Stack: title --
+    NEWLINE
+    "════ " OUTPUT OUTPUT " ════" OUTPUT NEWLINE
+}
+
+# ════ Vector Examples ════
+"Vectors" section_header
+
+# Create a new vector
+VEC_NEW
+"Created empty vector" OUTPUT NEWLINE
+
+# Push some values
+10 VEC_PUSH
+20 VEC_PUSH
+30 VEC_PUSH
+"Pushed: 10, 20, 30" OUTPUT NEWLINE
+
+# Get the length
+DUP VEC_LEN
+"Length: " OUTPUT OUTPUT NEWLINE
+DROP  # Drop the vector reference, keep working with original
+
+# Access by index
+DUP 0 VEC_GET
+"vec[0] = " OUTPUT OUTPUT NEWLINE
+DROP
+
+DUP 1 VEC_GET
+"vec[1] = " OUTPUT OUTPUT NEWLINE
+DROP
+
+DUP 2 VEC_GET
+"vec[2] = " OUTPUT OUTPUT NEWLINE
+DROP
+
+# Pop a value
+DUP VEC_POP
+"Popped: " OUTPUT OUTPUT NEWLINE
+DROP
+
+# Check new length
+DUP VEC_LEN
+"Length after pop: " OUTPUT OUTPUT NEWLINE
+DROP
+
+# Set a value at index
+DUP 0 100 VEC_SET
+"Set vec[0] = 100" OUTPUT NEWLINE
+
+DUP 0 VEC_GET
+"vec[0] now = " OUTPUT OUTPUT NEWLINE
+DROP
+
+DROP  # Clean up vector
+
+# ════ Hash Table Examples ════
+"Hash Tables" section_header
+
+# Create a new hash table
+HASH_NEW
+"Created empty hash table" OUTPUT NEWLINE
+
+# Put some key-value pairs
+DUP "name" 42 HASH_PUT
+"Put: \"name\" -> 42" OUTPUT NEWLINE
+DROP
+
+DUP "score" 100 HASH_PUT
+"Put: \"score\" -> 100" OUTPUT NEWLINE
+DROP
+
+DUP "level" 5 HASH_PUT
+"Put: \"level\" -> 5" OUTPUT NEWLINE
+DROP
+
+# Get the length
+DUP HASH_LEN
+"Hash table size: " OUTPUT OUTPUT NEWLINE
+DROP
+
+# Check if keys exist
+DUP "name" HASH_HAS
+"Has \"name\": " OUTPUT OUTPUT NEWLINE
+DROP
+
+DUP "missing" HASH_HAS
+"Has \"missing\": " OUTPUT OUTPUT NEWLINE
+DROP
+
+# Get values
+DUP "name" HASH_GET
+"Get \"name\": " OUTPUT
+IF {
+    OUTPUT NEWLINE
+} ELSE {
+    DROP "not found" OUTPUT NEWLINE
+}
+
+DUP "score" HASH_GET
+"Get \"score\": " OUTPUT
+IF {
+    OUTPUT NEWLINE
+} ELSE {
+    DROP "not found" OUTPUT NEWLINE
+}
+
+# Delete a key
+DUP "level" HASH_DEL
+"Deleted \"level\"" OUTPUT NEWLINE
+DROP
+
+DUP HASH_LEN
+"Size after delete: " OUTPUT OUTPUT NEWLINE
+DROP
+
+DROP  # Clean up hash table
+
+# ════ Set Examples ════
+"Sets" section_header
+
+# Create a new set
+SET_NEW
+"Created empty set" OUTPUT NEWLINE
+
+# Add some elements
+DUP 10 SET_ADD
+"Added: 10" OUTPUT NEWLINE
+DROP
+
+DUP 20 SET_ADD
+"Added: 20" OUTPUT NEWLINE
+DROP
+
+DUP 30 SET_ADD
+"Added: 30" OUTPUT NEWLINE
+DROP
+
+# Try adding duplicate
+DUP 20 SET_ADD
+"Added: 20 (duplicate)" OUTPUT NEWLINE
+DROP
+
+# Get the length
+DUP SET_LEN
+"Set size: " OUTPUT OUTPUT NEWLINE
+DROP
+
+# Check membership
+DUP 20 SET_HAS
+"Has 20: " OUTPUT OUTPUT NEWLINE
+DROP
+
+DUP 99 SET_HAS
+"Has 99: " OUTPUT OUTPUT NEWLINE
+DROP
+
+# Delete an element
+DUP 20 SET_DEL
+"Deleted: 20" OUTPUT NEWLINE
+DROP
+
+DUP 20 SET_HAS
+"Has 20 after delete: " OUTPUT OUTPUT NEWLINE
+DROP
+
+DUP SET_LEN
+"Size after delete: " OUTPUT OUTPUT NEWLINE
+DROP
+
+DROP  # Clean up set
+
+# ════ Summary ════
+NEWLINE
+"Data structure examples complete!" OUTPUT NEWLINE

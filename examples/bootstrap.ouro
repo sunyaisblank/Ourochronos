@@ -1,0 +1,98 @@
+# Bootstrap Paradox (Information from Nowhere)
+#
+# We want to print "HELLO".
+# We don't have "HELLO" in the code.
+# We read it from the future.
+# If the future contains "HELLO", we write "HELLO" back (Stable Loop).
+#
+# Where did the information come from? Nowhere. It is a self-sustaining loop.
+#
+# Demonstrates:
+# - Bootstrap paradox pattern (the canonical temporal pattern)
+# - MANIFEST constants for ASCII encoding
+# - TEMPORAL variables for oracle-backed data
+# - Procedures with effect annotations
+# - Verification and stabilization phases
+
+# ════ ASCII Constants ════
+# ASCII: H=72, E=69, L=76, L=76, O=79
+MANIFEST CHAR_H = 72;
+MANIFEST CHAR_E = 69;
+MANIFEST CHAR_L = 76;
+MANIFEST CHAR_O = 79;
+
+# ════ Temporal Variables ════
+TEMPORAL c0 @ 0 DEFAULT 0;
+TEMPORAL c1 @ 1 DEFAULT 0;
+TEMPORAL c2 @ 2 DEFAULT 0;
+TEMPORAL c3 @ 3 DEFAULT 0;
+TEMPORAL c4 @ 4 DEFAULT 0;
+
+# ════ Procedures ════
+
+# Pure: Check if the string matches "HELLO"
+PROCEDURE is_hello PURE {
+    # Stack: c0 c1 c2 c3 c4 -- bool
+    # Verify: c0=H, c1=E, c2=L, c3=L, c4=O
+    4 PICK CHAR_H EQ    # c0 == 'H'?
+    4 PICK CHAR_E EQ    # c1 == 'E'?
+    AND
+    3 PICK CHAR_L EQ    # c2 == 'L'?
+    AND
+    2 PICK CHAR_L EQ    # c3 == 'L'?
+    AND
+    1 PICK CHAR_O EQ    # c4 == 'O'?
+    AND
+}
+
+# Temporal: Write the string back to stabilize the loop
+PROCEDURE stabilize {
+    # Stack: c0 c1 c2 c3 c4 --
+    4 PROPHECY  # c4 -> addr 4
+    3 PROPHECY  # c3 -> addr 3
+    2 PROPHECY  # c2 -> addr 2
+    1 PROPHECY  # c1 -> addr 1
+    0 PROPHECY  # c0 -> addr 0
+}
+
+# Pure: Output the string using EMIT
+PROCEDURE print_hello PURE {
+    # Read from PRESENT memory and emit
+    0 PRESENT EMIT
+    1 PRESENT EMIT
+    2 PRESENT EMIT
+    3 PRESENT EMIT
+    4 PRESENT EMIT
+    NEWLINE
+}
+
+# Temporal: Seed the loop with "HELLO"
+PROCEDURE seed_hello {
+    CHAR_H 0 PROPHECY
+    CHAR_E 1 PROPHECY
+    CHAR_L 2 PROPHECY
+    CHAR_L 3 PROPHECY
+    CHAR_O 4 PROPHECY
+}
+
+# ════ Main Program ════
+
+# Read 5 characters from the future
+c0 c1 c2 c3 c4
+
+# Check if it matches "HELLO"
+is_hello
+
+IF {
+    # It matches! The loop is stable.
+    # Write back to ensure the fixed point
+    c0 c1 c2 c3 c4
+    stabilize
+
+    # Output the self-fulfilling message
+    print_hello
+} ELSE {
+    # The future was empty or wrong.
+    # Seed the loop - next epoch will see "HELLO"
+    seed_hello
+}

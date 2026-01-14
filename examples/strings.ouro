@@ -1,0 +1,62 @@
+# String Operations Example
+#
+# Demonstrates the string manipulation operations available in Ourochronos.
+# Strings are first-class values that can be manipulated with built-in ops.
+#
+# Demonstrates:
+# - STR_REV (REV): Reverse a string
+# - STR_CAT (CAT): Concatenate two strings
+# - STR_LEN: Get string length
+# - STR_SPLIT (SPLIT): Split string by delimiter
+# - String output formatting
+
+# ════ Procedures ════
+
+# Print a labeled test result
+PROCEDURE print_test PURE {
+    # Stack: label result --
+    SWAP OUTPUT ": " OUTPUT OUTPUT NEWLINE
+}
+
+# ════ Test Suite ════
+"String Operations Test Suite" OUTPUT NEWLINE
+"=============================" OUTPUT NEWLINE
+
+# Test 1: String Reverse
+"Test REV" OUTPUT NEWLINE
+"  Input: \"Hello\"" OUTPUT NEWLINE
+"  Output: " OUTPUT
+"Hello" REV OUTPUT NEWLINE
+
+# Test 2: String Concatenation
+"Test CAT" OUTPUT NEWLINE
+"  Input: \"Hello\" + \" World\"" OUTPUT NEWLINE
+"  Output: " OUTPUT
+"Hello" " World" CAT OUTPUT NEWLINE
+
+# Test 3: String Length
+"Test STR_LEN" OUTPUT NEWLINE
+"  Input: \"Ourochronos\"" OUTPUT NEWLINE
+"  Length: " OUTPUT
+"Ourochronos" STR_LEN OUTPUT NEWLINE
+DROP  # Drop the string, keep only length info displayed
+
+# Test 4: String Split
+"Test SPLIT" OUTPUT NEWLINE
+"  Input: \"A,B,C,D\" split by ',')" OUTPUT NEWLINE
+"  Parts:" OUTPUT NEWLINE
+"A,B,C,D" ',' SPLIT
+# Stack now has: "A" "B" "C" "D" 4 (count on top)
+"  Count: " OUTPUT OUTPUT NEWLINE
+"    [3]: " OUTPUT OUTPUT NEWLINE
+"    [2]: " OUTPUT OUTPUT NEWLINE
+"    [1]: " OUTPUT OUTPUT NEWLINE
+"    [0]: " OUTPUT OUTPUT NEWLINE
+
+# Test 5: Combining operations
+"Test Combined Operations" OUTPUT NEWLINE
+"  REV(CAT(\"abc\", \"def\")): " OUTPUT
+"abc" "def" CAT REV OUTPUT NEWLINE
+
+"=============================" OUTPUT NEWLINE
+"String tests complete!" OUTPUT NEWLINE

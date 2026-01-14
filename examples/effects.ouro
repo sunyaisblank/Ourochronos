@@ -1,0 +1,131 @@
+# Effect Annotations Example
+#
+# Demonstrates procedure effect annotations in Ourochronos.
+# Effects track what side effects a procedure may have:
+# - PURE: No side effects (referentially transparent)
+# - READS(addr): Reads from specified memory addresses
+# - WRITES(addr): Writes to specified memory addresses
+# - TEMPORAL: Uses ORACLE/PROPHECY operations
+#
+# Effect annotations help the compiler:
+# 1. Optimize pure functions (memoization, reordering)
+# 2. Detect effect violations
+# 3. Document procedure behavior
+
+# ════ Configuration ════
+MANIFEST ADDR_COUNTER = 0;
+MANIFEST ADDR_ACCUMULATOR = 1;
+
+# ════ Temporal Variables ════
+# Note: TEMPORAL syntax requires literal addresses (not MANIFEST)
+TEMPORAL counter @ 0 DEFAULT 0;
+TEMPORAL accumulator @ 1 DEFAULT 0;
+
+# ════ Pure Procedures ════
+# These have no side effects - same inputs always produce same outputs
+
+# Add two numbers
+# Stack effect: ( a b -- sum )
+PROCEDURE pure_add PURE {
+    ADD
+}
+
+# Multiply two numbers
+# Stack effect: ( a b -- product )
+PROCEDURE pure_mul PURE {
+    MUL
+}
+
+# Check if a number is positive
+# Stack effect: ( n -- bool )
+PROCEDURE is_positive PURE {
+    0 GT
+}
+
+# Square a number
+# Stack effect: ( n -- n^2 )
+PROCEDURE square PURE {
+    DUP MUL
+}
+
+# ════ Procedures with Effects ════
+
+# Read from counter address
+# Stack effect: ( -- value )
+PROCEDURE read_counter READS(0) {
+    ADDR_COUNTER ORACLE
+}
+
+# Write to counter address
+# Stack effect: ( value -- )
+PROCEDURE write_counter WRITES(0) {
+    ADDR_COUNTER PROPHECY
+}
+
+# Read from accumulator address
+# Stack effect: ( -- value )
+PROCEDURE read_accumulator READS(1) {
+    ADDR_ACCUMULATOR ORACLE
+}
+
+# Write to accumulator address
+# Stack effect: ( value -- )
+PROCEDURE write_accumulator WRITES(1) {
+    ADDR_ACCUMULATOR PROPHECY
+}
+
+# Increment counter (reads and writes)
+# Stack effect: ( -- )
+PROCEDURE increment_counter {
+    read_counter
+    1 ADD
+    write_counter
+}
+
+# Add value to accumulator
+# Stack effect: ( value -- )
+PROCEDURE accumulate {
+    read_accumulator
+    ADD
+    write_accumulator
+}
+
+# ════ Main Program ════
+"Effect Annotations Demo" OUTPUT NEWLINE
+"=======================" OUTPUT NEWLINE
+
+# Test pure functions
+"Pure add (10 + 20): " OUTPUT
+10 20 pure_add OUTPUT NEWLINE
+
+"Pure mul (5 * 6): " OUTPUT
+5 6 pure_mul OUTPUT NEWLINE
+
+"Square of 7: " OUTPUT
+7 square OUTPUT NEWLINE
+
+# Test procedures with effects
+"Initial counter: " OUTPUT
+read_counter OUTPUT NEWLINE
+
+# Write a value to counter
+42 write_counter
+"Counter after write: " OUTPUT
+read_counter OUTPUT NEWLINE
+
+# Increment counter
+increment_counter
+"Counter after increment: " OUTPUT
+read_counter OUTPUT NEWLINE
+
+# Test accumulator
+100 accumulate
+25 accumulate
+"Accumulator total: " OUTPUT
+read_accumulator OUTPUT NEWLINE
+
+# Stabilize the fixed point
+read_counter write_counter
+read_accumulator write_accumulator
+
+"Effect demo complete!" OUTPUT NEWLINE

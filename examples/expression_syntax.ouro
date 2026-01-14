@@ -1,0 +1,20 @@
+# Expression Syntax Demo
+# 
+# New expression syntax makes Ourochronos more readable:
+# - Arithmetic: (10 + 20 * 3)
+# - Comparisons: (x > 1)
+# - IF with expr: IF (x > 0) { ... }
+
+# Arithmetic expression - outputs 30
+(10 + 20) OUTPUT
+
+# Comparison - outputs 1 (true)
+(10 > 5) OUTPUT
+
+# IF with expression syntax - outputs 42
+IF (3 > 1) {
+    42 OUTPUT
+}
+
+# Simple fixed-point - read what was written
+0 ORACLE 0 PROPHECY

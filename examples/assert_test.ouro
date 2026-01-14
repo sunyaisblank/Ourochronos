@@ -1,0 +1,7 @@
+"Testing Assert..." OUTPUT
+LET x = 10;
+ASSERT x > 5 TEMPORAL "x should be > 5";
+"Assert passed" OUTPUT
+
+ASSERT x < 5 TEMPORAL "x should be < 5 (Expect Failure)";
+"Assert failed to catch error" OUTPUT

@@ -1,0 +1,86 @@
+# Combinator Test Suite
+#
+# Tests the higher-order combinators available in Ourochronos.
+# Combinators are operations that manipulate quotations (code blocks).
+#
+# Demonstrates:
+# - EXEC: Execute a quotation
+# - DIP: Execute quotation, preserving top of stack
+# - KEEP: Execute quotation, but restore original value
+# - BI: Apply two quotations to the same value
+# - ASSERT for verification
+
+# ════ Test Header ════
+"Combinator Test Suite" OUTPUT NEWLINE
+"=====================" OUTPUT NEWLINE
+
+# ════ Test EXEC ════
+# EXEC pops a quotation and executes it
+# Stack: [ code ] -- result
+"Test EXEC" OUTPUT NEWLINE
+"  [ 10 ] EXEC -> " OUTPUT
+[ 10 ] EXEC
+DUP OUTPUT NEWLINE
+DUP 10 EQ ASSERT "EXEC failed"
+DROP
+"  Status: PASSED" OUTPUT NEWLINE
+
+# ════ Test DIP ════
+# DIP executes quotation under the top element
+# Stack: x [ code ] -- (code result) x
+"Test DIP" OUTPUT NEWLINE
+"  20 [ 10 ] DIP -> " OUTPUT
+20 [ 10 ] DIP
+# Stack should be: 10 20
+DUP OUTPUT " " OUTPUT
+SWAP DUP OUTPUT NEWLINE
+SWAP  # Restore for checks
+DUP 20 EQ ASSERT "DIP top check failed"
+SWAP DUP 10 EQ ASSERT "DIP bottom check failed"
+DROP DROP
+"  Status: PASSED" OUTPUT NEWLINE
+
+# ════ Test KEEP ════
+# KEEP executes quotation but restores the original value
+# Stack: x [ code ] -- (code result) x
+"Test KEEP" OUTPUT NEWLINE
+"  10 [ 1 ADD ] KEEP -> " OUTPUT
+10 [ 1 ADD ] KEEP
+# Stack should be: 11 10
+DUP OUTPUT " " OUTPUT
+SWAP DUP OUTPUT NEWLINE
+SWAP  # Restore for checks
+DUP 10 EQ ASSERT "KEEP restore check failed"
+SWAP DUP 11 EQ ASSERT "KEEP action check failed"
+DROP DROP
+"  Status: PASSED" OUTPUT NEWLINE
+
+# ════ Test BI ════
+# BI applies two quotations to the same value
+# Stack: x [ q1 ] [ q2 ] -- (q1 x) (q2 x)
+"Test BI" OUTPUT NEWLINE
+"  10 [ 1 ADD ] [ 2 MUL ] BI -> " OUTPUT
+10 [ 1 ADD ] [ 2 MUL ] BI
+# Stack should be: 11 20
+DUP OUTPUT " " OUTPUT
+SWAP DUP OUTPUT NEWLINE
+SWAP  # Restore for checks
+DUP 20 EQ ASSERT "BI q2 check failed"
+SWAP DUP 11 EQ ASSERT "BI q1 check failed"
+DROP DROP
+"  Status: PASSED" OUTPUT NEWLINE
+
+# ════ Combined Example ════
+"Test Combined Combinators" OUTPUT NEWLINE
+"  5 [ DUP MUL ] KEEP [ 1 ADD ] BI -> " OUTPUT
+# Compute: 5 squared (25) and 5+1 (6)
+5 [ DUP MUL ] KEEP [ 1 ADD ] BI
+# After KEEP: 25 5
+# After BI: 25 6 (q1=KEEP result, q2=5+1)
+DUP OUTPUT " " OUTPUT
+SWAP DUP OUTPUT NEWLINE
+DROP DROP
+"  Status: PASSED" OUTPUT NEWLINE
+
+"=====================" OUTPUT NEWLINE
+"All combinator tests passed!" OUTPUT NEWLINE

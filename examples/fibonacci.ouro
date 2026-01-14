@@ -1,0 +1,62 @@
+# Fibonacci Sequence Generator
+#
+# Generates Fibonacci numbers up to LIMIT using traditional iteration.
+# This demonstrates non-temporal computation for comparison with
+# temporal witness patterns.
+#
+# Demonstrates:
+# - MANIFEST constants
+# - WHILE loops with conditions
+# - Stack manipulation (SWAP, OVER)
+# - Procedures with effects
+# - Pure computation (no ORACLE/PROPHECY)
+#
+# Output: 1 1 2 3 5 8 13 21 34 55 89
+
+# ════ Configuration ════
+MANIFEST LIMIT = 100;
+
+# ════ Pure Procedures ════
+
+# Print a number followed by a space
+PROCEDURE print_num PURE {
+    # Stack: n --
+    OUTPUT SPACE
+}
+
+# Calculate next Fibonacci step
+PROCEDURE fib_step PURE {
+    # Stack: a b -- b (a+b)
+    SWAP      # b a
+    OVER      # b a b
+    ADD       # b (a+b)
+}
+
+# Check if we should continue the loop
+PROCEDURE should_continue PURE {
+    # Stack: a b -- a b bool
+    DUP LIMIT LT
+}
+
+# ════ Main Procedure ════
+
+PROCEDURE generate_fibonacci PURE {
+    # Initialize: 0 1 (but start output from 1)
+    0 1
+
+    # Loop while current value < LIMIT
+    WHILE { should_continue } {
+        # Stack: a b
+        DUP print_num
+        fib_step
+    }
+
+    # Cleanup
+    DROP DROP
+    NEWLINE
+}
+
+# ════ Main Program ════
+"Fibonacci sequence (< " OUTPUT LIMIT OUTPUT "):" OUTPUT NEWLINE
+generate_fibonacci
+"Done." OUTPUT NEWLINE

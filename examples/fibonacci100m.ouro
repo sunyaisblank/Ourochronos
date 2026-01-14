@@ -1,0 +1,50 @@
+# Fibonacci 100 Million Terms Benchmark
+#
+# Computes 100,000,000 terms of the Fibonacci sequence.
+# Note: Values wrap at 2^64 due to unsigned arithmetic.
+#
+# Performance metrics:
+# - CLOCK: Timestamps in milliseconds
+# - Output: [fib_value][elapsed_ms]
+#
+# Run with: ourochronos fibonacci100m.ouro --max-inst 5000000000
+
+# ════ Configuration ════
+MANIFEST ITERATIONS = 100000000;
+
+# ════ Procedures ════
+PROCEDURE fib_step PURE {
+    # Stack: a b -- b (a+b)
+    SWAP OVER ADD
+}
+
+# ════ Main Program ════
+
+# Record start time
+CLOCK
+
+# Initialize Fibonacci: 0 1
+0 1
+
+# Counter
+0
+
+WHILE { DUP ITERATIONS LT } {
+    # Stack: start a b counter
+    1 ADD          # Increment counter
+    ROT ROT        # Get a b on top
+    fib_step       # Compute next
+    ROT            # Rotate back
+}
+
+# Stack: start fib_prev fib_curr counter
+DROP              # Drop counter
+SWAP DROP         # Keep only final fib value
+SWAP              # fib_final start_time
+
+# Record end time and calculate elapsed
+CLOCK SWAP SUB
+
+# Output: [fib_value][elapsed_ms]
+SWAP OUTPUT       # Output final Fib value (mod 2^64)
+OUTPUT            # Output elapsed time in ms

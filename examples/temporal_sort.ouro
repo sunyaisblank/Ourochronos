@@ -1,0 +1,120 @@
+# Temporal Sort (O(N) Complexity)
+#
+# Problem: Sort the list [4, 1, 3, 2]
+# Conventional approach: O(N log N) or O(N^2)
+# Temporal approach: O(N) verification per epoch
+#
+# Algorithm:
+# 1. Ask Oracle for the sorted values
+# 2. Verify:
+#    a. Is it sorted? (v0 <= v1 <= v2 <= v3)
+#    b. Is it a permutation? (sum and product match)
+# 3. If valid: create fixed point
+# 4. If invalid: perturb to force re-search
+#
+# Demonstrates:
+# - Temporal witness pattern for sorting
+# - Multiple TEMPORAL variables
+# - Reusable pure verification procedures
+# - Hash-based permutation checking
+
+# ════ Configuration ════
+MANIFEST ADDR_0 = 10;
+MANIFEST ADDR_1 = 11;
+MANIFEST ADDR_2 = 12;
+MANIFEST ADDR_3 = 13;
+
+# Original values: [4, 1, 3, 2]
+MANIFEST ORIGINAL_SUM = 10;      # 4 + 1 + 3 + 2 = 10
+MANIFEST ORIGINAL_PRODUCT = 24; # 4 * 1 * 3 * 2 = 24
+
+# ════ Temporal Variables ════
+# Note: TEMPORAL syntax requires literal addresses (not MANIFEST)
+TEMPORAL v0 @ 10 DEFAULT 1;
+TEMPORAL v1 @ 11 DEFAULT 2;
+TEMPORAL v2 @ 12 DEFAULT 3;
+TEMPORAL v3 @ 13 DEFAULT 4;
+
+# ════ Pure Verification Procedures ════
+
+# Check if four values are sorted (ascending)
+PROCEDURE is_sorted PURE {
+    # Stack: a b c d -- bool
+    # Check: a <= b AND b <= c AND c <= d
+    3 PEEK 3 PEEK LTE   # a <= b?
+    3 PEEK 2 PEEK LTE   # b <= c?
+    AND
+    2 PEEK 1 PEEK LTE   # c <= d?
+    AND
+}
+
+# Check if four values sum to expected value
+PROCEDURE check_sum PURE {
+    # Stack: a b c d expected -- bool
+    SWAP                # a b c expected d
+    4 PEEK ADD          # a b c expected sum_partial
+    4 PEEK ADD          # a b expected sum_partial
+    4 PEEK ADD          # a expected sum
+    SWAP EQ             # sum == expected?
+}
+
+# Check if four values have expected product
+PROCEDURE check_product PURE {
+    # Stack: a b c d expected -- bool
+    SWAP                # a b c expected d
+    4 PEEK MUL          # a b c expected prod_partial
+    4 PEEK MUL          # a b expected prod_partial
+    4 PEEK MUL          # a expected prod
+    SWAP EQ             # prod == expected?
+}
+
+# ════ Temporal Procedures ════
+
+# Verify and stabilize the sort
+PROCEDURE verify_sort {
+    # Stack: v0 v1 v2 v3
+
+    # First check: is it sorted?
+    4 PEEK 4 PEEK 4 PEEK 4 PEEK  # duplicate all 4 values
+    is_sorted
+
+    IF {
+        # Sorted! Now verify permutation
+        4 PEEK 4 PEEK 4 PEEK 4 PEEK ORIGINAL_SUM check_sum
+        4 PEEK 4 PEEK 4 PEEK 4 PEEK ORIGINAL_PRODUCT check_product
+        AND
+
+        IF {
+            # Valid sort! Stabilize the timeline
+            ADDR_3 PROPHECY
+            ADDR_2 PROPHECY
+            ADDR_1 PROPHECY
+            ADDR_0 PROPHECY
+
+            # Output the sorted result
+            "Sorted: " OUTPUT
+            ADDR_0 PRESENT OUTPUT " " OUTPUT
+            ADDR_1 PRESENT OUTPUT " " OUTPUT
+            ADDR_2 PRESENT OUTPUT " " OUTPUT
+            ADDR_3 PRESENT OUTPUT NEWLINE
+        } ELSE {
+            # Sorted but wrong numbers - perturb
+            DROP DROP DROP
+            1 ADD ADDR_0 PROPHECY
+        }
+    } ELSE {
+        # Not sorted - swap values to encourage convergence
+        DROP DROP DROP DROP
+        1 ADDR_0 PROPHECY
+        2 ADDR_1 PROPHECY
+        3 ADDR_2 PROPHECY
+        4 ADDR_3 PROPHECY
+    }
+}
+
+# ════ Main Program ════
+# Read current guess from oracle
+v0 v1 v2 v3
+
+# Verify and stabilize
+verify_sort

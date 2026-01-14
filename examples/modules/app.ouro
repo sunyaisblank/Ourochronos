@@ -1,0 +1,80 @@
+# Module Import Example
+#
+# Demonstrates importing and using procedures from a library module.
+# This showcases code reuse and modular program organization.
+#
+# Demonstrates:
+# - IMPORT statement for loading modules
+# - Using imported procedures
+# - Pure computation without temporal operations
+
+IMPORT "examples/modules/math_lib.ouro"
+
+# ════ Test Suite ════
+"Math Library Test Suite" OUTPUT NEWLINE
+"========================" OUTPUT NEWLINE
+
+# Test ABS
+"Test ABS(-5): " OUTPUT
+0 5 SUB ABS OUTPUT  # -5 = 0 - 5 in unsigned arithmetic
+" (expected: 5)" OUTPUT NEWLINE
+
+"Test ABS(42): " OUTPUT
+42 ABS OUTPUT
+" (expected: 42)" OUTPUT NEWLINE
+
+# Test SQUARE
+"Test SQUARE(7): " OUTPUT
+7 SQUARE OUTPUT
+" (expected: 49)" OUTPUT NEWLINE
+
+# Test CUBE
+"Test CUBE(3): " OUTPUT
+3 CUBE OUTPUT
+" (expected: 27)" OUTPUT NEWLINE
+
+# Test ADDMUL
+"Test ADDMUL(2, 3, 4) = (2+3)*4: " OUTPUT
+2 3 4 ADDMUL OUTPUT
+" (expected: 20)" OUTPUT NEWLINE
+
+# Test MULADD
+"Test MULADD(2, 3, 4) = (2*3)+4: " OUTPUT
+2 3 4 MULADD OUTPUT
+" (expected: 10)" OUTPUT NEWLINE
+
+# Test MAX2
+"Test MAX2(10, 25): " OUTPUT
+10 25 MAX2 OUTPUT
+" (expected: 25)" OUTPUT NEWLINE
+
+# Test MIN2
+"Test MIN2(10, 25): " OUTPUT
+10 25 MIN2 OUTPUT
+" (expected: 10)" OUTPUT NEWLINE
+
+# Test predicates
+"Test IS_EVEN(42): " OUTPUT
+42 IS_EVEN OUTPUT
+" (expected: 1)" OUTPUT NEWLINE
+
+"Test IS_ODD(42): " OUTPUT
+42 IS_ODD OUTPUT
+" (expected: 0)" OUTPUT NEWLINE
+
+# Test SUM_TO_N
+"Test SUM_TO_N(10) = 1+2+...+10: " OUTPUT
+10 SUM_TO_N OUTPUT
+" (expected: 55)" OUTPUT NEWLINE
+
+# Test IN_RANGE
+"Test IN_RANGE(5, 1, 10): " OUTPUT
+5 1 10 IN_RANGE OUTPUT
+" (expected: 1)" OUTPUT NEWLINE
+
+"Test IN_RANGE(15, 1, 10): " OUTPUT
+15 1 10 IN_RANGE OUTPUT
+" (expected: 0)" OUTPUT NEWLINE
+
+"========================" OUTPUT NEWLINE
+"All tests complete!" OUTPUT NEWLINE

@@ -1,0 +1,118 @@
+# Canonical Hello World via Bootstrap Paradox
+#
+# Goal: Print "Hello World!" using time travel.
+# Method: The "Bootstrap Paradox" (Information from Nowhere).
+#
+# We read the string from the future.
+# If it matches "Hello World!", we preserve it (Identity Loop).
+# If it doesn't, we seed it (Initialization).
+#
+# Result: The string effectively has no origin; it exists because it exists.
+#
+# Demonstrates:
+# - Bootstrap paradox pattern
+# - MANIFEST constants for ASCII values
+# - TEMPORAL scope for batch oracle reads
+# - Procedures with effect annotations
+# - String output via EMIT
+
+# ════ ASCII Constants ════
+MANIFEST CHAR_H = 72;
+MANIFEST CHAR_e = 101;
+MANIFEST CHAR_l = 108;
+MANIFEST CHAR_o = 111;
+MANIFEST CHAR_SPACE = 32;
+MANIFEST CHAR_W = 87;
+MANIFEST CHAR_r = 114;
+MANIFEST CHAR_d = 100;
+MANIFEST CHAR_BANG = 33;
+
+# Memory Layout: addresses 0..11 store the string "Hello World!"
+MANIFEST STR_LEN = 12;
+
+# ════ Procedures ════
+
+# Pure: Verify first and last character
+PROCEDURE verify_string PURE {
+    # Stack: c0 c1 c2 c3 c4 c5 c6 c7 c8 c9 c10 c11 -- bool
+    # Check first char is 'H' and last is '!'
+    11 PICK CHAR_H EQ   # c0 == 'H'?
+    1 PICK CHAR_BANG EQ # c11 == '!'?
+    AND
+}
+
+# Temporal: Write string back to create stable loop
+PROCEDURE stabilize_string {
+    # Stack: c0 c1 c2 c3 c4 c5 c6 c7 c8 c9 c10 c11 --
+    11 PROPHECY
+    10 PROPHECY
+    9 PROPHECY
+    8 PROPHECY
+    7 PROPHECY
+    6 PROPHECY
+    5 PROPHECY
+    4 PROPHECY
+    3 PROPHECY
+    2 PROPHECY
+    1 PROPHECY
+    0 PROPHECY
+}
+
+# Pure: Output the string using EMIT
+PROCEDURE output_string PURE {
+    # Read from PRESENT and emit each character
+    0 PRESENT EMIT
+    1 PRESENT EMIT
+    2 PRESENT EMIT
+    3 PRESENT EMIT
+    4 PRESENT EMIT
+    5 PRESENT EMIT
+    6 PRESENT EMIT
+    7 PRESENT EMIT
+    8 PRESENT EMIT
+    9 PRESENT EMIT
+    10 PRESENT EMIT
+    11 PRESENT EMIT
+    NEWLINE
+}
+
+# Temporal: Seed the string if not present
+PROCEDURE seed_string {
+    # Write "Hello World!" to addresses 0..11
+    CHAR_H 0 PROPHECY
+    CHAR_e 1 PROPHECY
+    CHAR_l 2 PROPHECY
+    CHAR_l 3 PROPHECY
+    CHAR_o 4 PROPHECY
+    CHAR_SPACE 5 PROPHECY
+    CHAR_W 6 PROPHECY
+    CHAR_o 7 PROPHECY
+    CHAR_r 8 PROPHECY
+    CHAR_l 9 PROPHECY
+    CHAR_d 10 PROPHECY
+    CHAR_BANG 11 PROPHECY
+}
+
+# ════ Main Program ════
+
+# 1. Read Future (Anamnesis) - all 12 characters
+0 ORACLE 1 ORACLE 2 ORACLE 3 ORACLE 4 ORACLE 5 ORACLE
+6 ORACLE 7 ORACLE 8 ORACLE 9 ORACLE 10 ORACLE 11 ORACLE
+# Stack: [c0 c1 c2 c3 c4 c5 c6 c7 c8 c9 c10 c11]
+
+# 2. Verify the string
+verify_string
+
+IF {
+    # 3a. Stabilization: Write back to close the loop
+    0 ORACLE 1 ORACLE 2 ORACLE 3 ORACLE 4 ORACLE 5 ORACLE
+    6 ORACLE 7 ORACLE 8 ORACLE 9 ORACLE 10 ORACLE 11 ORACLE
+    stabilize_string
+
+    # 4. Output the message
+    output_string
+} ELSE {
+    # 3b. Seeding: The timeline was empty or wrong
+    # By writing now, we ensure the next epoch reads correct values
+    seed_string
+}

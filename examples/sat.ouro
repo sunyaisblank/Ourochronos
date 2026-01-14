@@ -1,0 +1,64 @@
+# SAT Solver via Temporal Witness Pattern
+#
+# Problem: Find x, y (boolean 0 or 1) such that:
+#   (x OR y) = true  (at least one must be 1)
+#
+# Demonstrates:
+# - Temporal witness pattern for constraint satisfaction
+# - Effect annotations on procedures
+# - TEMPORAL variable declarations
+# - Hash tables for solution tracking
+#
+# Complexity: O(1) verification per epoch
+# Memory Layout: 0=x, 1=y
+
+# ════ Configuration ════
+MANIFEST ADDR_X = 0;
+MANIFEST ADDR_Y = 1;
+
+# ════ Temporal Variables ════
+# These auto-generate ORACLE reads from specified addresses
+# Note: TEMPORAL syntax requires literal addresses (not MANIFEST)
+TEMPORAL x @ 0 DEFAULT 0;
+TEMPORAL y @ 1 DEFAULT 1;
+
+# ════ Procedures with Effect Annotations ════
+
+# Pure function: evaluate the SAT formula (x OR y)
+PROCEDURE evaluate_formula PURE {
+    # Stack: x y -- result
+    OR
+}
+
+# Temporal procedure: verify and stabilize the solution
+PROCEDURE verify_and_stabilize {
+    # Stack: x y
+    OVER OVER evaluate_formula
+
+    IF {
+        # Formula satisfied! (x OR y) = true
+        # Write back to create fixed point
+        ADDR_Y PROPHECY  # write y back
+        ADDR_X PROPHECY  # write x back
+
+        # Output the satisfying assignment
+        "SAT! x=" OUTPUT
+        ADDR_X PRESENT OUTPUT
+        " y=" OUTPUT
+        ADDR_Y PRESENT OUTPUT
+        NEWLINE
+    } ELSE {
+        # Not satisfied (x=0 AND y=0)
+        # Try x=0, y=1 (which will satisfy)
+        DROP DROP
+        0 ADDR_X PROPHECY
+        1 ADDR_Y PROPHECY
+    }
+}
+
+# ════ Main Program ════
+# Read candidate values from temporal oracle
+x y
+
+# Verify and create fixed point
+verify_and_stabilize

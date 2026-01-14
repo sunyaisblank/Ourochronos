@@ -1,0 +1,36 @@
+# LET Bindings Example
+#
+# This example demonstrates the new LET syntax for named variables.
+# LET bindings are syntactic sugar that compile to stack operations.
+#
+# Syntax: LET name = expression;
+#
+# The expression is evaluated and left on the stack. When the variable
+# is referenced, a PICK operation retrieves its value.
+
+# Simple binding: LET x = value;
+LET x = 42;
+
+# Expression binding: LET y = complex expression;
+LET y = x 2 MUL;  # y = 84
+
+# Use variables in computation
+x y ADD OUTPUT    # Outputs 126 (42 + 84)
+
+# Variables with temporal values
+LET factor = 0 ORACLE;
+LET is_valid = factor 1 GT factor 15 LT AND;
+
+is_valid IF {
+    15 factor MOD 0 EQ IF {
+        # Found a valid factor!
+        factor OUTPUT
+        factor 0 PROPHECY
+    } ELSE {
+        # Not a factor, try next
+        factor 1 ADD 0 PROPHECY
+    }
+} ELSE {
+    # Out of range, reset
+    2 0 PROPHECY
+}

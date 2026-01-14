@@ -1,0 +1,52 @@
+[package]
+name = "ourochronos"
+version = "0.2.0"
+edition = "2021"
+authors = ["OUROCHRONOS Project"]
+description = "A closed timelike curve programming language"
+license = "MIT"
+
+[dependencies]
+rayon = { version = "1.10", optional = true }
+num_cpus = { version = "1.16", optional = true }
+cranelift = { version = "0.112", optional = true }
+cranelift-module = { version = "0.112", optional = true }
+cranelift-jit = { version = "0.112", optional = true }
+cranelift-native = { version = "0.112", optional = true }
+cranelift-object = { version = "0.112", optional = true }
+target-lexicon = { version = "0.12", optional = true }
+object = { version = "0.36", optional = true }
+lsp-server = { version = "0.7", optional = true }
+lsp-types = { version = "0.95", optional = true }
+serde_json = { version = "1.0", optional = true }
+serde = { version = "1.0", features = ["derive"], optional = true }
+libloading = { version = "0.8", optional = true }
+
+[features]
+default = []
+smt = []
+parallel = ["rayon", "num_cpus"]
+dynamic-ffi = ["libloading"]
+jit = [
+    "cranelift",
+    "cranelift-module",
+    "cranelift-jit",
+    "cranelift-native",
+    "target-lexicon",
+]
+aot = [
+    "cranelift",
+    "cranelift-module",
+    "cranelift-object",
+    "cranelift-native",
+    "target-lexicon",
+    "object",
+]
+lsp = ["lsp-server", "lsp-types", "serde_json", "serde"]
+
+[[bin]]
+name = "ourochronos"
+path = "src/main.rs"
+
+[dev-dependencies]
+proptest = "1.4"

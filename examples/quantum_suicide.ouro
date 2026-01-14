@@ -1,0 +1,68 @@
+# "Quantum Suicide" / Paradox Selection Pattern
+#
+# Finding a value without searching.
+# This demonstrates the most powerful temporal programming pattern:
+# using paradoxes to eliminate invalid universes.
+#
+# We want to find the "Magic Number" (42).
+#
+# Strategy:
+# 1. Ask the Oracle "What is the number?"
+# 2. If it IS 42, we stabilize (write 42 back)
+# 3. If it is NOT 42, we create a Paradox
+#
+# Since paradoxes are invalid executions, the runtime
+# MUST select the timeline where we guessed 42 immediately.
+#
+# Demonstrates:
+# - Paradox-based value selection
+# - The grandfather paradox as a programming tool
+# - TEMPORAL variables
+# - Procedure effects
+
+# ════ Configuration ════
+MANIFEST MAGIC = 42;
+MANIFEST ADDR_GUESS = 0;
+
+# ════ Temporal Variables ════
+# Note: TEMPORAL syntax requires literal address (not MANIFEST)
+TEMPORAL guess @ 0 DEFAULT 0;
+
+# ════ Procedures ════
+
+# Pure: Check if we found the magic number
+PROCEDURE is_magic PURE {
+    # Stack: n -- bool
+    MAGIC EQ
+}
+
+# Temporal: Stabilize the solution
+PROCEDURE stabilize {
+    # Stack: n --
+    DUP ADDR_GUESS PROPHECY
+    "Magic number found: " OUTPUT OUTPUT NEWLINE
+}
+
+# Temporal: Create grandfather paradox to eliminate this timeline
+PROCEDURE eliminate_timeline {
+    # The classic grandfather paradox: NOT(x) = x is impossible
+    # This creates an oscillation, making this timeline invalid
+    ADDR_GUESS ORACLE NOT ADDR_GUESS PROPHECY
+}
+
+# ════ Main Program ════
+
+# Read the guess from the oracle
+guess
+
+# Check if it's the magic number
+DUP is_magic IF {
+    # It matched! This is a valid timeline.
+    # Stabilize by writing back
+    stabilize
+} ELSE {
+    # Wrong guess - eliminate this timeline
+    # The runtime must find a timeline where the guess is correct
+    DROP
+    eliminate_timeline
+}
