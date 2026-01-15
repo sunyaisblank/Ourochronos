@@ -1,0 +1,62 @@
+# Ourochronos Configuration
+# Copy this file to ourochronos.toml and customize as needed.
+# Environment variables override config file values.
+
+[execution]
+# Maximum epochs before timeout (default: 1000)
+max_epochs = 1000
+
+# Maximum instructions per epoch (gas limit)
+max_instructions = 10_000_000
+
+# Execution mode: "standard", "action", "diagnostic"
+mode = "standard"
+
+# Initial random seed (0 for time-based)
+seed = 0
+
+# Number of seeds to try in action-guided mode
+action_seeds = 4
+
+[vm]
+# Use fast VM for pure (non-temporal) programs
+prefer_fast_vm = true
+
+# Enable JIT compilation for hot loops (requires --features jit)
+enable_jit = false
+
+# JIT compilation threshold (number of loop iterations before compiling)
+jit_threshold = 100
+
+[audit]
+# Enable audit logging
+enabled = false
+
+# Audit log file path (empty for stdout-only)
+log_path = ""
+
+# Log format: "text" or "json"
+format = "text"
+
+# Minimum severity: "info", "warning", "error", "critical"
+min_severity = "info"
+
+# Echo audit entries to stdout
+echo_stdout = false
+
+[output]
+# Print output immediately during execution
+immediate_output = true
+
+# Verbose mode (show detailed execution info)
+verbose = false
+
+[limits]
+# Maximum stack depth
+max_stack_depth = 65536
+
+# Maximum memory addresses
+max_memory_addresses = 65536
+
+# Maximum string length
+max_string_length = 1_000_000

@@ -1,0 +1,34 @@
+# Build artifacts
+target/
+*.o
+*.a
+*.so
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Git
+.git/
+.gitignore
+
+# Documentation (not needed in runtime image)
+docs/
+
+# Tests (not needed in runtime image)
+tests/
+
+# Examples
+examples/
+
+# CI/CD
+.github/
+
+# Claude
+.claude/
+
+# Local config
+*.local.*
+ourochronos.toml

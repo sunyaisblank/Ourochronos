@@ -23,6 +23,7 @@ pub mod stdlib;
 pub mod package;
 pub mod ffi;
 pub mod io;
+pub mod audit;
 
 pub use error::{OuroError, OuroResult, ErrorConfig, ErrorCategory, SourceLocation,
                  DivisionByZeroPolicy, BoundsPolicy, StackPolicy, MemoryOperation, ErrorCollector};

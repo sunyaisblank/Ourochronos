@@ -2,8 +2,10 @@ use ourochronos::{TimeLoop, ConvergenceStatus, Config, ExecutionMode, tokenize, 
 use ourochronos::fast_vm::{is_program_pure, FastExecutor};
 use ourochronos::tracing_jit::JitFastExecutor;
 use ourochronos::vm::EpochStatus;
+use ourochronos::audit::{self, AuditEntry, AuditConfig, AuditFormat, ActionCategory, Severity, Outcome};
 use std::env;
 use std::fs;
+use std::time::Instant;
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -39,6 +41,8 @@ fn main() {
         println!("  --fast          Use fast VM for pure (non-temporal) programmes");
         println!("  --jit           Use JIT-enabled fast VM with hot loop compilation");
         println!("  --lsp           Start Language Server Protocol server");
+        println!("  --audit [file]  Enable audit logging (default: ourochronos-audit.log)");
+        println!("  --audit-json    Use JSON Lines format for audit output");
         return;
     }
 
@@ -74,14 +78,55 @@ fn main() {
         }
     }
 
+    // Parse audit options
+    let audit_json = args.contains(&"--audit-json".to_string());
+    if let Some(idx) = args.iter().position(|a| a == "--audit") {
+        let audit_path = if idx + 1 < args.len() && !args[idx + 1].starts_with('-') {
+            args[idx + 1].clone()
+        } else {
+            "ourochronos-audit.log".to_string()
+        };
+
+        let config = AuditConfig {
+            log_path: std::path::PathBuf::from(&audit_path),
+            min_severity: Severity::Info,
+            echo_stdout: diagnostic,
+            format: if audit_json { AuditFormat::JsonLines } else { AuditFormat::Text },
+        };
+
+        if let Err(e) = audit::init_global_logger(config) {
+            eprintln!("Warning: Could not initialize audit logger: {}", e);
+        } else if diagnostic {
+            println!("Audit logging to: {}", audit_path);
+        }
+    }
+
+    // Log startup
+    audit::audit(
+        AuditEntry::new("STARTUP", "System", "ourochronos", "CLI session started")
+            .with_category(ActionCategory::System)
+            .with_meta("file", filename)
+            .with_meta("mode", if action_mode { "action" } else if fast_mode { "fast" } else if jit_mode { "jit" } else { "standard" })
+    );
+
     let source = fs::read_to_string(filename).expect("Failed to read file");
     
+    let parse_start = Instant::now();
     let tokens = tokenize(&source);
     let mut parser = Parser::new(&tokens);
     parser.register_procedures(ourochronos::StdLib::procedures());
-    
+
     match parser.parse_program() {
         Ok(parsed_program) => {
+            let parse_duration = parse_start.elapsed();
+            audit::audit(
+                AuditEntry::new("PARSE", "Program", filename, "Parsed successfully")
+                    .with_category(ActionCategory::Parse)
+                    .with_duration_us(parse_duration.as_micros() as u64)
+                    .with_meta("statements", parsed_program.body.len().to_string())
+                    .with_meta("procedures", parsed_program.procedures.len().to_string())
+            );
+
             // Inline all procedure calls
             let program = if !parsed_program.procedures.is_empty() {
                 if diagnostic {
