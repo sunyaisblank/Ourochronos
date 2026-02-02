@@ -26,8 +26,8 @@ use std::time::{Duration, Instant};
 use std::fmt;
 
 use crate::ast::OpCode;
-use crate::core_types::Address;
-use crate::optimizer::ProfileData;
+use crate::core::Address;
+use crate::optimization::optimizer::ProfileData;
 
 /// Configuration for the profiler.
 #[derive(Debug, Clone)]

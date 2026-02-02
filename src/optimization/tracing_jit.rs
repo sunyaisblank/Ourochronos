@@ -23,8 +23,8 @@ use std::hash::{Hash, Hasher};
 use std::collections::hash_map::DefaultHasher;
 
 use crate::ast::{OpCode, Stmt, Program};
-use crate::core_types::{Value, Memory};
-use crate::memo::SpeculativeExecutor;
+use crate::core::{Value, Memory};
+use super::memo::SpeculativeExecutor;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Trace Recording
@@ -1849,9 +1849,8 @@ impl TracingJit {
 // JIT-Enabled Fast Executor
 // ═══════════════════════════════════════════════════════════════════════════
 
-use crate::fast_vm::FastStack;
-use crate::vm::EpochStatus;
-use crate::core_types::OutputItem;
+use crate::vm::{FastStack, EpochStatus};
+use crate::core::OutputItem;
 
 /// Fast executor with integrated JIT compilation.
 pub struct JitFastExecutor {
@@ -2724,7 +2723,7 @@ mod tests {
 // Profile-Guided JIT Optimization
 // ═══════════════════════════════════════════════════════════════════════════
 
-use crate::profiler::{Profiler, OptimizationHints};
+use crate::tooling::profiler::{Profiler, OptimizationHints};
 
 /// Configuration for JIT compilation.
 #[derive(Debug, Clone)]

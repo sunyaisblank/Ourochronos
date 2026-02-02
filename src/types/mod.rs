@@ -64,7 +64,7 @@
 //! 5. **Linearity**: ORACLE results cannot be freely duplicated
 
 use crate::ast::{Program, Stmt, OpCode, Procedure, Effect as AstEffect};
-use crate::core_types::Address;
+use crate::core::Address;
 use std::collections::{HashMap, HashSet};
 
 /// Temporal type for compile-time causal tracking.

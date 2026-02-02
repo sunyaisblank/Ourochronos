@@ -12,7 +12,7 @@
 //! - **Causality tracing**: Follow value changes across epochs
 
 use crate::ast::Program;
-use crate::core_types::{Memory, Value, OutputItem, Address};
+use crate::core::{Memory, Value, OutputItem, Address};
 use crate::vm::{Executor, ExecutorConfig, EpochStatus};
 
 /// Debug event types.

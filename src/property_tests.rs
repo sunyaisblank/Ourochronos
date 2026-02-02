@@ -5,7 +5,7 @@
 #[cfg(test)]
 mod tests {
     use crate::*;
-    use crate::core_types::{Memory, Value, OutputItem};
+    use crate::core::{Memory, Value, OutputItem};
     use proptest::prelude::*;
 
     /// Extract the numeric value from an OutputItem.

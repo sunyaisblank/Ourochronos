@@ -21,10 +21,10 @@ use std::path::Path;
 
 use crate::parser::Parser;
 use crate::timeloop::{TimeLoop, TimeLoopConfig, ConvergenceStatus};
-use crate::core_types::Memory;
+use crate::core::Memory;
 use crate::types::TypeChecker;
-use crate::debugger::Debugger;
-use crate::profiler::{Profiler, ProfilerConfig};
+use super::debugger::Debugger;
+use super::profiler::{Profiler, ProfilerConfig};
 
 /// REPL configuration.
 #[derive(Debug, Clone)]

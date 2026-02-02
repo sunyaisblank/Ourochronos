@@ -13,7 +13,7 @@ use cranelift_module::{Module, Linkage};
 use cranelift_object::{ObjectBuilder, ObjectModule};
 
 use crate::ast::Program;
-use crate::jit::JitError;
+use super::jit::JitError;
 
 /// AOT compiler that produces object files.
 pub struct AotCompiler {

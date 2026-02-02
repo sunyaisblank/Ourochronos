@@ -7,8 +7,8 @@
 //! - Comments: # line comment
 
 use crate::ast::{OpCode, Stmt, Program, Procedure, Effect};
-use crate::core_types::Value;
-use crate::ffi::{FFISignature, FFIType, FFIEffect};
+use crate::core::Value;
+use crate::runtime::ffi::{FFISignature, FFIType, FFIEffect};
 use std::iter::Peekable;
 use std::slice::Iter;
 use std::collections::HashMap;

@@ -7,7 +7,7 @@
 //! - Provenance analysis
 
 use crate::ast::{Program, Stmt, OpCode};
-use crate::core_types::Address;
+use crate::core::Address;
 use std::collections::{HashMap, HashSet, VecDeque};
 
 /// Temporal Dependency Graph.

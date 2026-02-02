@@ -8,7 +8,7 @@
 mod tests {
     use crate::*;
     use crate::timeloop::TimeLoopConfig;
-    use crate::core_types::OutputItem;
+    use crate::core::OutputItem;
 
     /// Extract numeric values from output items.
     fn extract_output_values(output: &[OutputItem]) -> Vec<u64> {

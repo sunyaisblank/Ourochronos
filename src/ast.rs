@@ -4,7 +4,7 @@
 //! Programs consist of statements that manipulate a value stack, present memory,
 //! and can read from anamnesis (the temporal oracle).
 
-use crate::core_types::Value;
+use crate::core::Value;
 
 /// All operations available in OUROCHRONOS.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

@@ -6,12 +6,12 @@
 //! The fixed-point search (in timeloop.rs) repeatedly runs epochs until
 //! Present = Anamnesis (temporal consistency achieved).
 
-use crate::core_types::{Value, Address, Memory, OutputItem, DataStructures};
+use crate::core::{Value, Address, Memory, OutputItem, DataStructures};
 use crate::ast::{OpCode, Stmt, Program};
-use crate::provenance::Provenance;
-use crate::io::{IOContext, FileMode, SeekOrigin};
-use crate::ffi::{FFIContext, FFICaller};
-use crate::error::SourceLocation;
+use crate::core::provenance::Provenance;
+use crate::runtime::io::{IOContext, FileMode, SeekOrigin};
+use crate::runtime::ffi::{FFIContext, FFICaller};
+use crate::core::error::SourceLocation;
 use std::io::{self, Write, BufRead};
 
 /// Status of epoch execution.

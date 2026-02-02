@@ -19,9 +19,9 @@
 //! }
 //! ```
 
-use crate::core_types::{Value, Handle};
+use crate::core::{Value, Handle};
 use crate::vm::VmState;
-use crate::error::{OuroError, OuroResult, SourceLocation};
+use crate::core::error::{OuroError, OuroResult, SourceLocation};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::path::PathBuf;
@@ -945,7 +945,7 @@ impl Default for ExtendedFFIContext {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core_types::Memory;
+    use crate::core::Memory;
 
     #[test]
     fn test_ffi_registry_register() {

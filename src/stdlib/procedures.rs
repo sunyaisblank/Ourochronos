@@ -3,7 +3,7 @@
 //! Provides common operations and utilities for temporal programming.
 
 use crate::ast::{Stmt, OpCode, Procedure, Effect};
-use crate::core_types::Value;
+use crate::core::Value;
 
 /// Standard library module.
 pub struct StdLib;

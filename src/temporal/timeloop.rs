@@ -12,11 +12,11 @@
 //! and selects the solution with minimum action (cost), preferring non-trivial,
 //! output-producing solutions.
 
-use crate::core_types::{Memory, Address, Value, OutputItem};
+use crate::core::{Memory, Address, Value, OutputItem};
 use crate::ast::Program;
 use crate::vm::{Executor, ExecutorConfig, EpochStatus};
 use crate::action::{ActionConfig, ActionPrinciple, FixedPointSelector};
-use crate::memo::{EpochCache, MemoizedResult};
+use crate::optimization::memo::{EpochCache, MemoizedResult};
 use std::collections::HashMap;
 
 /// Result of fixed-point search.
@@ -189,7 +189,7 @@ impl TimeLoop {
     }
     
     /// Get cache statistics.
-    pub fn cache_stats(&self) -> crate::memo::CacheStats {
+    pub fn cache_stats(&self) -> crate::optimization::memo::CacheStats {
         self.cache.stats()
     }
     

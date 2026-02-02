@@ -18,7 +18,7 @@
 //! 4. **Lightweight**: Minimal overhead when not triggered
 
 use std::fmt;
-use crate::core_types::Address;
+use super::address::Address;
 
 /// Configuration for error handling behavior.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -20,8 +20,8 @@
 //! standard VM when ORACLE/PROPHECY operations are encountered.
 
 use crate::ast::{OpCode, Stmt, Program};
-use crate::core_types::{Value, Memory, OutputItem};
-use crate::vm::{EpochStatus, EpochResult, ExecutorConfig, Executor};
+use crate::core::{Value, Memory, OutputItem};
+use super::executor::{EpochStatus, EpochResult, ExecutorConfig, Executor};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Stack Register Cache

@@ -27,8 +27,8 @@
 //!
 //! The runtime explores multiple fixed points and selects the one with minimum action.
 
-use crate::core_types::{Memory, Address, Value, OutputItem};
-use crate::provenance::Provenance;
+use crate::core::{Memory, Address, Value, OutputItem};
+use crate::core::provenance::Provenance;
 use std::collections::HashMap;
 
 /// Configuration for the action principle.
@@ -665,7 +665,7 @@ impl FixedPointSelector {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core_types::Memory;
+    use crate::core::Memory;
     
     #[test]
     fn test_action_prefers_non_trivial() {

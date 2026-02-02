@@ -14,7 +14,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
-use crate::core_types::{Memory, OutputItem, Value, MEMORY_SIZE};
+use crate::core::{Memory, OutputItem, Value, MEMORY_SIZE};
 use crate::vm::EpochStatus;
 
 /// Maximum cache size before eviction.

@@ -29,8 +29,8 @@
 //! SOCKET_CLOSE                  # socket --
 //! ```
 
-use crate::core_types::{Value, Handle};
-use crate::error::{OuroError, OuroResult, SourceLocation};
+use crate::core::{Value, Handle};
+use crate::core::error::{OuroError, OuroResult, SourceLocation};
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write, Seek, SeekFrom, BufWriter};

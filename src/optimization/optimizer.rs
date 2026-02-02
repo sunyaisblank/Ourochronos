@@ -11,7 +11,7 @@
 //! - Profile-guided optimization support
 
 use crate::ast::{Stmt, OpCode, Program};
-use crate::core_types::Value;
+use crate::core::Value;
 use std::collections::{HashMap, HashSet};
 
 /// Optimization level for the compiler.
@@ -193,7 +193,7 @@ pub struct ProfileData {
 
 impl ProfileData {
     /// Create from profiler results.
-    pub fn from_profiler(profiler: &crate::profiler::Profiler) -> Self {
+    pub fn from_profiler(profiler: &crate::tooling::profiler::Profiler) -> Self {
         let mut data = Self::default();
 
         // Extract instruction hotspots
