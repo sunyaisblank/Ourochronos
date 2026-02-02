@@ -80,14 +80,18 @@ impl Memory {
     /// Mixing function for incremental hashing.
     /// Combines address and value into a well-distributed hash contribution.
     /// Returns 0 for zero values to maintain consistency (zeros contribute nothing).
+    ///
+    /// Uses improved mixing that properly incorporates address into the hash
+    /// rather than just adding it, ensuring better distribution.
     #[inline]
     fn hash_mix(addr: Address, val: u64) -> u64 {
         if val == 0 {
             return 0; // Zero values contribute nothing to hash
         }
-        // Use a variant of FxHash mixing
-        let mut h = val.wrapping_mul(0x517cc1b727220a95);
-        h = h.wrapping_add(addr as u64);
+        // Combine address and value with multiplicative mixing for better distribution
+        let combined = (addr as u64).wrapping_mul(0x9e3779b97f4a7c15).wrapping_add(val);
+        // Apply finalization mixing (MurmurHash3-style)
+        let mut h = combined.wrapping_mul(0x517cc1b727220a95);
         h ^= h >> 33;
         h = h.wrapping_mul(0xc4ceb9fe1a85ec53);
         h ^= h >> 33;
@@ -121,11 +125,41 @@ impl Memory {
         }
 
         self.cells[addr as usize] = val;
+
+        // Debug assertion: verify incremental hash is correct
+        #[cfg(debug_assertions)]
+        debug_assert_eq!(
+            self.cached_hash,
+            self.recompute_hash_internal(),
+            "Hash invariant violated after write to address {}",
+            addr
+        );
+    }
+
+    /// Internal method to recompute hash from scratch.
+    /// Used for debug assertions to verify incremental hash correctness.
+    #[cfg(debug_assertions)]
+    fn recompute_hash_internal(&self) -> u64 {
+        let mut hash = 0u64;
+        for (addr, cell) in self.cells.iter().enumerate() {
+            if cell.val != 0 {
+                hash ^= Self::hash_mix(addr as Address, cell.val);
+            }
+        }
+        hash
     }
 
     /// Check if two memory states are equal (by value, ignoring provenance).
     /// This is the fixed-point check: P_final = A_initial.
+    ///
+    /// Uses cached hash for O(1) early rejection when states differ (common case).
+    /// Falls back to O(N) cell-by-cell comparison only when hashes match.
     pub fn values_equal(&self, other: &Memory) -> bool {
+        // Fast path: different hashes guarantee different content
+        if self.cached_hash != other.cached_hash {
+            return false;
+        }
+        // Same hash: verify cell-by-cell (hash collision possible but rare)
         self.cells.iter()
             .zip(other.cells.iter())
             .all(|(v1, v2)| v1.val == v2.val)
@@ -196,7 +230,15 @@ impl Memory {
     }
 
     /// Check if memory is empty (all zeros).
+    ///
+    /// Uses cached hash for O(1) early rejection when non-empty (common case).
+    /// Falls back to O(N) scan only when hash is zero.
     pub fn is_empty(&self) -> bool {
+        // Fast path: non-zero hash means at least one non-zero cell
+        if self.cached_hash != 0 {
+            return false;
+        }
+        // Zero hash: verify cell-by-cell (all-zero state has hash 0)
         self.cells.iter().all(|v| v.val == 0)
     }
 

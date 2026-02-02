@@ -244,28 +244,9 @@ impl Value {
     ///
     /// # Returns
     /// `Ok(result)` for successful division, or `Err` if policy is Error and divisor is zero.
+    #[inline]
     pub fn checked_div(self, rhs: Self, policy: DivisionByZeroPolicy) -> OuroResult<Self> {
-        if rhs.val == 0 {
-            match policy {
-                DivisionByZeroPolicy::ReturnZero => Ok(Value {
-                    val: 0,
-                    prov: self.prov.merge(&rhs.prov),
-                }),
-                DivisionByZeroPolicy::Sentinel(v) => Ok(Value {
-                    val: v,
-                    prov: self.prov.merge(&rhs.prov),
-                }),
-                DivisionByZeroPolicy::Error => Err(OuroError::DivisionByZero {
-                    dividend: self.val,
-                    location: SourceLocation::default(),
-                }),
-            }
-        } else {
-            Ok(Value {
-                val: self.val.wrapping_div(rhs.val),
-                prov: self.prov.merge(&rhs.prov),
-            })
-        }
+        self.checked_div_at(rhs, policy, SourceLocation::default())
     }
 
     /// Division with configurable policy and location tracking.
@@ -299,28 +280,9 @@ impl Value {
     }
 
     /// Modulo with configurable zero-divisor policy.
+    #[inline]
     pub fn checked_mod(self, rhs: Self, policy: DivisionByZeroPolicy) -> OuroResult<Self> {
-        if rhs.val == 0 {
-            match policy {
-                DivisionByZeroPolicy::ReturnZero => Ok(Value {
-                    val: 0,
-                    prov: self.prov.merge(&rhs.prov),
-                }),
-                DivisionByZeroPolicy::Sentinel(v) => Ok(Value {
-                    val: v,
-                    prov: self.prov.merge(&rhs.prov),
-                }),
-                DivisionByZeroPolicy::Error => Err(OuroError::ModuloByZero {
-                    dividend: self.val,
-                    location: SourceLocation::default(),
-                }),
-            }
-        } else {
-            Ok(Value {
-                val: self.val.wrapping_rem(rhs.val),
-                prov: self.prov.merge(&rhs.prov),
-            })
-        }
+        self.checked_mod_at(rhs, policy, SourceLocation::default())
     }
 
     /// Modulo with configurable policy and location tracking.
@@ -598,5 +560,167 @@ mod tests {
         let result = a.checked_div(zero, DivisionByZeroPolicy::Sentinel(u64::MAX));
         assert!(result.is_ok());
         assert_eq!(result.unwrap().val, u64::MAX);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Property Tests for Arithmetic Invariants
+    // ═══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_signed_additive_inverse() {
+        // Property: a + (-a) == 0 for all a (except i64::MIN which cannot be negated)
+        let test_values: Vec<i64> = vec![
+            0, 1, -1, 42, -42,
+            i64::MAX,
+            i64::MAX / 2, i64::MIN / 2,
+            1000000, -1000000,
+        ];
+
+        for val in test_values {
+            let a = Value::from_signed(val);
+            let neg_a = Value::from_signed(val.wrapping_neg());
+            let sum = a.signed_add(neg_a);
+            assert_eq!(sum.val, 0, "a + (-a) should equal 0 for a = {}", val);
+        }
+
+        // Special case: i64::MIN
+        // i64::MIN.wrapping_neg() == i64::MIN due to two's complement
+        // So i64::MIN + i64::MIN = 0 in wrapping arithmetic
+        let min = Value::from_signed(i64::MIN);
+        let neg_min = Value::from_signed(i64::MIN.wrapping_neg());
+        let sum = min.signed_add(neg_min);
+        assert_eq!(sum.val, 0, "i64::MIN + wrapping_neg(i64::MIN) should equal 0");
+    }
+
+    #[test]
+    fn test_addition_commutativity() {
+        // Property: a + b == b + a
+        let test_pairs: Vec<(u64, u64)> = vec![
+            (0, 0), (1, 0), (0, 1), (1, 1),
+            (42, 100), (u64::MAX, 0), (u64::MAX, 1),
+            (u64::MAX / 2, u64::MAX / 2),
+        ];
+
+        for (av, bv) in test_pairs {
+            let a = Value::new(av);
+            let b = Value::new(bv);
+            let sum1 = a.clone() + b.clone();
+            let sum2 = b + a;
+            assert_eq!(sum1.val, sum2.val, "a + b should equal b + a for {} + {}", av, bv);
+        }
+    }
+
+    #[test]
+    fn test_multiplication_commutativity() {
+        // Property: a * b == b * a
+        let test_pairs: Vec<(u64, u64)> = vec![
+            (0, 0), (1, 0), (0, 1), (1, 1),
+            (7, 13), (42, 100), (u64::MAX, 0), (u64::MAX, 1),
+        ];
+
+        for (av, bv) in test_pairs {
+            let a = Value::new(av);
+            let b = Value::new(bv);
+            let prod1 = a.clone() * b.clone();
+            let prod2 = b * a;
+            assert_eq!(prod1.val, prod2.val, "a * b should equal b * a for {} * {}", av, bv);
+        }
+    }
+
+    #[test]
+    fn test_division_policy_consistency() {
+        // Property: checked_div behaves same as checked_div_at with default location
+        let dividend = Value::new(100);
+        let divisors = vec![
+            Value::new(0), Value::new(1), Value::new(7), Value::new(100),
+        ];
+        let policies = vec![
+            DivisionByZeroPolicy::ReturnZero,
+            DivisionByZeroPolicy::Error,
+            DivisionByZeroPolicy::Sentinel(999),
+        ];
+
+        for divisor in &divisors {
+            for policy in &policies {
+                let r1 = dividend.clone().checked_div(divisor.clone(), *policy);
+                let r2 = dividend.clone().checked_div_at(
+                    divisor.clone(),
+                    *policy,
+                    SourceLocation::default()
+                );
+
+                match (r1, r2) {
+                    (Ok(v1), Ok(v2)) => assert_eq!(v1.val, v2.val),
+                    (Err(_), Err(_)) => {} // Both errors is OK
+                    _ => panic!("checked_div and checked_div_at should produce same result type"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_modulo_policy_consistency() {
+        // Property: checked_mod behaves same as checked_mod_at with default location
+        let dividend = Value::new(100);
+        let divisors = vec![
+            Value::new(0), Value::new(1), Value::new(7), Value::new(100),
+        ];
+        let policies = vec![
+            DivisionByZeroPolicy::ReturnZero,
+            DivisionByZeroPolicy::Error,
+            DivisionByZeroPolicy::Sentinel(999),
+        ];
+
+        for divisor in &divisors {
+            for policy in &policies {
+                let r1 = dividend.clone().checked_mod(divisor.clone(), *policy);
+                let r2 = dividend.clone().checked_mod_at(
+                    divisor.clone(),
+                    *policy,
+                    SourceLocation::default()
+                );
+
+                match (r1, r2) {
+                    (Ok(v1), Ok(v2)) => assert_eq!(v1.val, v2.val),
+                    (Err(_), Err(_)) => {} // Both errors is OK
+                    _ => panic!("checked_mod and checked_mod_at should produce same result type"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_bitwise_identity() {
+        // Property: a & a == a, a | a == a, a ^ 0 == a
+        let test_values: Vec<u64> = vec![
+            0, 1, 42, u64::MAX, u64::MAX / 2, 0xDEADBEEF,
+        ];
+
+        for val in test_values {
+            let a = Value::new(val);
+            let zero = Value::ZERO;
+
+            // a & a == a
+            assert_eq!((a.clone() & a.clone()).val, val, "a & a should equal a");
+
+            // a | a == a
+            assert_eq!((a.clone() | a.clone()).val, val, "a | a should equal a");
+
+            // a ^ 0 == a
+            assert_eq!((a.clone() ^ zero).val, val, "a ^ 0 should equal a");
+        }
+    }
+
+    #[test]
+    fn test_wrapping_behavior() {
+        // Property: MAX + 1 wraps to 0
+        let max = Value::new(u64::MAX);
+        let one = Value::ONE;
+        assert_eq!((max + one).val, 0, "MAX + 1 should wrap to 0");
+
+        // Property: 0 - 1 wraps to MAX
+        let zero = Value::ZERO;
+        let one = Value::ONE;
+        assert_eq!((zero - one).val, u64::MAX, "0 - 1 should wrap to MAX");
     }
 }

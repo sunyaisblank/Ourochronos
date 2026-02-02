@@ -111,6 +111,122 @@ impl ActionConfig {
             entropy_weight: 0.1,
         }
     }
+
+    /// Derive weights from information-theoretic principles based on program analysis.
+    ///
+    /// Instead of using ad-hoc hardcoded weights, this method derives principled
+    /// values based on:
+    ///
+    /// - **Expected sparsity (ρ)**: Fraction of cells expected to be zero
+    ///   - `w_zero = -ln(1 - ρ)` ≈ 0.105 for ρ = 0.1
+    /// - **Temporal fraction (τ)**: Fraction of cells with oracle dependency
+    ///   - `w_pure = -ln(τ)` ≈ 0.52 for τ = 0.3
+    /// - **Branching factor (β)**: Average number of possible values per cell
+    ///   - `w_causal = ln(β)` ≈ 0.69 for β = 2
+    ///
+    /// # Arguments
+    ///
+    /// * `temporal_core_size` - Number of addresses accessed by ORACLE/PROPHECY
+    /// * `total_memory` - Total addressable memory (default: 65536)
+    /// * `estimated_branching` - Estimated branching factor (default: 2.0)
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use ourochronos::action::ActionConfig;
+    /// let config = ActionConfig::derive_from_analysis(100, 65536, 2.0);
+    /// ```
+    pub fn derive_from_analysis(
+        temporal_core_size: usize,
+        total_memory: usize,
+        estimated_branching: f64,
+    ) -> Self {
+        let total = total_memory.max(1) as f64;
+        let core_size = temporal_core_size as f64;
+
+        // Expected sparsity: fraction of non-temporal cells
+        // Higher sparsity (more zeros expected) means lower zero penalty
+        let expected_sparsity = 1.0 - (core_size / total);
+        let zero_penalty = (-(1.0 - expected_sparsity.max(0.01)).ln()).max(0.01);
+
+        // Temporal fraction: what portion of memory is temporal
+        // Lower temporal fraction means higher pure penalty
+        let temporal_fraction = (core_size / total).max(0.01);
+        let pure_penalty = (-temporal_fraction.ln()).max(0.1);
+
+        // Causal bonus from branching factor
+        // Higher branching means more exploration needed
+        let causal_bonus = estimated_branching.max(1.1).ln();
+
+        Self {
+            zero_penalty,
+            pure_penalty,
+            causal_bonus,
+            unchanged_penalty: 0.2,  // Fixed: stability preference
+            output_bonus: 2.0,       // Strong preference for output
+            entropy_weight: 0.3,     // Moderate diversity preference
+        }
+    }
+
+    /// Derive weights using depth scaling that properly values deep computations.
+    ///
+    /// The standard `ln(1+depth)` scaling undervalues deep computations.
+    /// This method uses piecewise linear-log scaling:
+    /// - Linear scaling for small depths (0-10): full credit
+    /// - Logarithmic scaling for large depths: diminishing returns
+    ///
+    /// # Arguments
+    ///
+    /// * `depth` - The causal depth of a value
+    ///
+    /// # Returns
+    ///
+    /// Scaled depth value for use in action computation
+    pub fn depth_scaling(depth: usize) -> f64 {
+        const THRESHOLD: usize = 10;
+        if depth <= THRESHOLD {
+            // Linear for small depths: each step matters equally
+            depth as f64 * 0.1
+        } else {
+            // Log for large depths: diminishing returns
+            1.0 + (depth as f64 / THRESHOLD as f64).ln()
+        }
+    }
+
+    /// Compute the action for a single value, applying algebraic depth scaling.
+    ///
+    /// # Arguments
+    ///
+    /// * `value` - The value to compute action for
+    /// * `seed_value` - The original seed value at this address
+    ///
+    /// # Returns
+    ///
+    /// Action contribution for this value (lower is better)
+    pub fn value_action(&self, value: &Value, seed_value: u64) -> f64 {
+        let mut action = 0.0;
+
+        // Zero penalty
+        if value.val == 0 {
+            action += self.zero_penalty;
+        }
+
+        // Pure penalty (no oracle dependency)
+        if value.prov.is_pure() {
+            action += self.pure_penalty;
+        } else {
+            // Causal bonus with proper depth scaling
+            let depth = value.prov.dependency_count();
+            action -= self.causal_bonus * Self::depth_scaling(depth);
+        }
+
+        // Unchanged penalty
+        if value.val == seed_value {
+            action += self.unchanged_penalty;
+        }
+
+        action
+    }
 }
 
 /// Seed generation strategy for constraint-based seeding.
@@ -747,21 +863,75 @@ mod tests {
     #[test]
     fn test_entropy_calculation() {
         let principle = ActionPrinciple::default_config();
-        
+
         // All same values = low entropy
         let mut same_values: HashMap<u64, usize> = HashMap::new();
         same_values.insert(1, 10);
         let low_entropy = principle.shannon_entropy(&same_values, 10);
-        
+
         // All different values = high entropy
         let mut diff_values: HashMap<u64, usize> = HashMap::new();
         for i in 0..10 {
             diff_values.insert(i, 1);
         }
         let high_entropy = principle.shannon_entropy(&diff_values, 10);
-        
+
         assert!(high_entropy > low_entropy,
             "Different values ({}) should have higher entropy than same ({})",
             high_entropy, low_entropy);
+    }
+
+    #[test]
+    fn test_derive_from_analysis() {
+        // Test with small temporal core
+        let config = ActionConfig::derive_from_analysis(10, 1000, 2.0);
+        assert!(config.zero_penalty > 0.0);
+        assert!(config.pure_penalty > 0.0);
+        assert!(config.causal_bonus > 0.0);
+
+        // Test with large temporal core (more temporal = lower pure penalty)
+        let config_large = ActionConfig::derive_from_analysis(500, 1000, 2.0);
+        assert!(config_large.pure_penalty < config.pure_penalty,
+            "Larger temporal core should have lower pure penalty");
+    }
+
+    #[test]
+    fn test_depth_scaling() {
+        // Small depths: linear
+        assert!((ActionConfig::depth_scaling(0) - 0.0).abs() < 0.001);
+        assert!((ActionConfig::depth_scaling(5) - 0.5).abs() < 0.001);
+        assert!((ActionConfig::depth_scaling(10) - 1.0).abs() < 0.001);
+
+        // Large depths: logarithmic (slower growth)
+        let depth_20 = ActionConfig::depth_scaling(20);
+        let depth_100 = ActionConfig::depth_scaling(100);
+
+        // depth_20 should be approximately 1.0 + ln(2) ≈ 1.69
+        assert!(depth_20 > 1.0 && depth_20 < 2.0);
+
+        // depth_100 should be approximately 1.0 + ln(10) ≈ 3.3
+        assert!(depth_100 > 3.0 && depth_100 < 4.0);
+    }
+
+    #[test]
+    fn test_value_action() {
+        let config = ActionConfig::default();
+
+        // Zero value with pure provenance gets both penalties
+        let zero_pure = Value::new(0);
+        let action_zero = config.value_action(&zero_pure, 1); // seed is different
+        assert!(action_zero > 0.0);
+
+        // Non-zero pure value gets only pure penalty
+        let nonzero_pure = Value::new(42);
+        let action_nonzero = config.value_action(&nonzero_pure, 1);
+        assert!(action_nonzero > 0.0);
+        assert!(action_nonzero < action_zero);
+
+        // Temporal value gets causal bonus
+        let temporal = Value { val: 42, prov: Provenance::single(0) };
+        let action_temporal = config.value_action(&temporal, 1);
+        assert!(action_temporal < action_nonzero,
+            "Temporal value should have lower action than pure");
     }
 }

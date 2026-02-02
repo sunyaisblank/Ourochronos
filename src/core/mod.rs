@@ -25,7 +25,7 @@ pub mod data_structures;
 
 // Re-export primary types at module level
 pub use address::{Address, MEMORY_SIZE, Handle};
-pub use provenance::Provenance;
+pub use provenance::{Provenance, AlgebraicOp};
 pub use error::{
     OuroError, OuroResult, ErrorConfig, ErrorCategory, SourceLocation,
     DivisionByZeroPolicy, BoundsPolicy, StackPolicy, MemoryOperation, ErrorCollector

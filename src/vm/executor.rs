@@ -705,7 +705,9 @@ impl Executor {
             
             OpCode::Not => {
                 let a = self.pop(state)?;
-                state.stack.push(!a);
+                // Logical NOT: 0 -> 1, nonzero -> 0
+                let result = if a.val == 0 { 1 } else { 0 };
+                state.stack.push(Value { val: result, prov: a.prov });
             }
             
             OpCode::And => {

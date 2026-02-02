@@ -8,6 +8,7 @@ pub mod core;
 // ═══════════════════════════════════════════════════════════════════════════
 pub mod ast;
 pub mod parser;
+pub mod compiler;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Layer 2: Temporal & Types (depends on core, compiler)

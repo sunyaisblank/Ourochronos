@@ -393,7 +393,8 @@ mod output {
     #[test]
     fn output_does_not_pop_implicitly() {
         // OUTPUT consumes the value from stack
-        let result = run("42 OUTPUT 0 PROPHECY");
+        // After OUTPUT, push a dummy value and address for PROPHECY
+        let result = run("42 OUTPUT 0 0 PROPHECY");
         assert_consistent(&result);
     }
 }

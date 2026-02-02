@@ -5,6 +5,28 @@
 //! - Opcodes: ADD, SUB, ORACLE, PROPHECY, etc.
 //! - Control flow: IF { } ELSE { }, WHILE { cond } { body }
 //! - Comments: # line comment
+//!
+//! # Architecture
+//!
+//! The parser is organized into domain-specific modules for maintainability:
+//! - `domain`: Domain parser trait for modular keyword handling
+//! - `stack_ops`: Stack manipulation (DUP, SWAP, ROT, etc.)
+//! - `arithmetic`: Arithmetic and comparison operations
+//! - `temporal`: ORACLE, PROPHECY, PRESENT, PARADOX
+//! - `data_structures`: VEC, HASH, SET operations
+//! - `io_ops`: File, buffer, network, system operations
+//! - `string_ops`: String manipulation
+//! - `keyword_map`: Fast keyword-to-domain lookup
+
+// Domain parser modules
+pub mod domain;
+pub mod stack_ops;
+pub mod arithmetic;
+pub mod temporal;
+pub mod data_structures;
+pub mod io_ops;
+pub mod string_ops;
+pub mod keyword_map;
 
 use crate::ast::{OpCode, Stmt, Program, Procedure, Effect};
 use crate::core::Value;
@@ -12,6 +34,10 @@ use crate::runtime::ffi::{FFISignature, FFIType, FFIEffect};
 use std::iter::Peekable;
 use std::slice::Iter;
 use std::collections::HashMap;
+
+// Re-export domain parser types for external use
+pub use domain::{DomainParser, ParseContext};
+pub use keyword_map::{Domain, DomainRegistry};
 
 /// Source location span for error reporting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -154,64 +180,158 @@ impl From<ParseError> for String {
     }
 }
 
-/// Tokenize source code into a sequence of tokens.
+impl Span {
+    /// Combine two spans into a span covering both.
+    pub fn merge(&self, other: &Self) -> Self {
+        if self.offset <= other.offset {
+            Self {
+                line: self.line,
+                column: self.column,
+                offset: self.offset,
+                len: (other.offset + other.len).saturating_sub(self.offset),
+            }
+        } else {
+            other.merge(self)
+        }
+    }
+
+    /// Extract the text this span covers from source.
+    pub fn extract<'a>(&self, source: &'a str) -> &'a str {
+        let end = (self.offset + self.len).min(source.len());
+        &source[self.offset..end]
+    }
+}
+
+/// Tokenize source code into a sequence of tokens (without spans).
+/// For backward compatibility. Use `tokenize_with_spans` for span tracking.
 pub fn tokenize(input: &str) -> Vec<Token> {
+    tokenize_with_spans(input).into_iter().map(|st| st.token).collect()
+}
+
+/// Tokenize source code with full span tracking.
+///
+/// This is the preferred tokenization function as it provides precise
+/// source location for error reporting.
+///
+/// # Precision Requirements
+/// - Byte offsets are exact for UTF-8
+/// - Column tracking uses character count (not bytes)
+/// - Line numbers are 1-indexed
+pub fn tokenize_with_spans(input: &str) -> Vec<SpannedToken> {
     let mut tokens = Vec::new();
     let chars: Vec<char> = input.chars().collect();
     let mut i = 0;
-    
+
+    // Position tracking for spans
+    let mut line = 1usize;
+    let mut column = 1usize;
+
+    // Helper to compute byte offset for char position
+    let byte_offsets: Vec<usize> = {
+        let mut offsets = Vec::with_capacity(chars.len() + 1);
+        let mut off = 0;
+        for c in &chars {
+            offsets.push(off);
+            off += c.len_utf8();
+        }
+        offsets.push(off); // End offset
+        offsets
+    };
+
     while i < chars.len() {
+        let start_line = line;
+        let start_column = column;
+        let start_offset = byte_offsets[i];
+
         match chars[i] {
-            // Whitespace
-            ' ' | '\t' | '\n' | '\r' => {
+            // Whitespace - track position but don't emit token
+            ' ' | '\t' => {
+                column += 1;
                 i += 1;
             }
-            
+            '\n' => {
+                line += 1;
+                column = 1;
+                i += 1;
+            }
+            '\r' => {
+                // Handle \r\n as single newline
+                if i + 1 < chars.len() && chars[i + 1] == '\n' {
+                    i += 1;
+                }
+                line += 1;
+                column = 1;
+                i += 1;
+            }
+
             // Block delimiters
             '{' => {
-                tokens.push(Token::LBrace);
+                let span = Span::new(start_line, start_column, start_offset, 1);
+                tokens.push(SpannedToken::new(Token::LBrace, span));
+                column += 1;
                 i += 1;
             }
             '}' => {
-                tokens.push(Token::RBrace);
+                let span = Span::new(start_line, start_column, start_offset, 1);
+                tokens.push(SpannedToken::new(Token::RBrace, span));
+                column += 1;
                 i += 1;
             }
             '(' => {
-                tokens.push(Token::LParen);
+                let span = Span::new(start_line, start_column, start_offset, 1);
+                tokens.push(SpannedToken::new(Token::LParen, span));
+                column += 1;
                 i += 1;
             }
             ')' => {
-                tokens.push(Token::RParen);
+                let span = Span::new(start_line, start_column, start_offset, 1);
+                tokens.push(SpannedToken::new(Token::RParen, span));
+                column += 1;
                 i += 1;
             }
             '[' => {
-                tokens.push(Token::LBracket);
+                let span = Span::new(start_line, start_column, start_offset, 1);
+                tokens.push(SpannedToken::new(Token::LBracket, span));
+                column += 1;
                 i += 1;
             }
             ']' => {
-                tokens.push(Token::RBracket);
+                let span = Span::new(start_line, start_column, start_offset, 1);
+                tokens.push(SpannedToken::new(Token::RBracket, span));
+                column += 1;
                 i += 1;
             }
             ',' => {
-                tokens.push(Token::Comma);
+                let span = Span::new(start_line, start_column, start_offset, 1);
+                tokens.push(SpannedToken::new(Token::Comma, span));
+                column += 1;
                 i += 1;
             }
-            
+
             // Line comment
             '#' => {
                 while i < chars.len() && chars[i] != '\n' {
+                    column += 1;
                     i += 1;
                 }
             }
-            
+
             // String literal "..."
             '"' => {
                 i += 1; // Skip opening quote
+                column += 1;
                 let mut string_val = String::new();
                 while i < chars.len() && chars[i] != '"' {
+                    if chars[i] == '\n' {
+                        line += 1;
+                        column = 1;
+                    } else {
+                        column += 1;
+                    }
                     if chars[i] == '\\' && i + 1 < chars.len() {
                         // Escape sequence
                         i += 1;
+                        column += 1;
                         match chars[i] {
                             'n' => string_val.push('\n'),
                             't' => string_val.push('\t'),
@@ -227,16 +347,21 @@ pub fn tokenize(input: &str) -> Vec<Token> {
                 }
                 if i < chars.len() {
                     i += 1; // Skip closing quote
+                    column += 1;
                 }
-                tokens.push(Token::StringLit(string_val));
+                let end_offset = byte_offsets[i];
+                let span = Span::new(start_line, start_column, start_offset, end_offset - start_offset);
+                tokens.push(SpannedToken::new(Token::StringLit(string_val), span));
             }
-            
+
             // Character literal '...'
             '\'' => {
                 i += 1; // Skip opening quote
+                column += 1;
                 if i < chars.len() {
                     let ch = if chars[i] == '\\' && i + 1 < chars.len() {
                         i += 1;
+                        column += 1;
                         match chars[i] {
                             'n' => '\n',
                             't' => '\t',
@@ -249,107 +374,135 @@ pub fn tokenize(input: &str) -> Vec<Token> {
                         chars[i]
                     };
                     i += 1;
+                    column += 1;
                     if i < chars.len() && chars[i] == '\'' {
                         i += 1; // Skip closing quote
+                        column += 1;
                     }
-                    tokens.push(Token::CharLit(ch));
+                    let end_offset = byte_offsets[i];
+                    let span = Span::new(start_line, start_column, start_offset, end_offset - start_offset);
+                    tokens.push(SpannedToken::new(Token::CharLit(ch), span));
                 }
             }
-            
+
             // Semicolon comment (alternative)
             ';' if i + 1 < chars.len() && chars[i + 1] == ';' => {
                 while i < chars.len() && chars[i] != '\n' {
+                    column += 1;
                     i += 1;
                 }
             }
-            
+
             // Numeric literal
             c if c.is_ascii_digit() => {
-                let start = i;
-                
+                let start_i = i;
+
                 // Check for hex (0x) or binary (0b)
                 if c == '0' && i + 1 < chars.len() {
                     match chars[i + 1] {
                         'x' | 'X' => {
                             i += 2; // Skip 0x
-                            let hex_start = i;
+                            column += 2;
                             while i < chars.len() && chars[i].is_ascii_hexdigit() {
                                 i += 1;
+                                column += 1;
                             }
-                            let hex_str: String = chars[hex_start..i].iter().collect();
+                            let hex_str: String = chars[start_i + 2..i].iter().collect();
                             if let Ok(n) = u64::from_str_radix(&hex_str, 16) {
-                                tokens.push(Token::Number(n));
+                                let end_offset = byte_offsets[i];
+                                let span = Span::new(start_line, start_column, start_offset, end_offset - start_offset);
+                                tokens.push(SpannedToken::new(Token::Number(n), span));
                             }
                             continue;
                         }
                         'b' | 'B' => {
                             i += 2; // Skip 0b
-                            let bin_start = i;
+                            column += 2;
                             while i < chars.len() && (chars[i] == '0' || chars[i] == '1') {
                                 i += 1;
+                                column += 1;
                             }
-                            let bin_str: String = chars[bin_start..i].iter().collect();
+                            let bin_str: String = chars[start_i + 2..i].iter().collect();
                             if let Ok(n) = u64::from_str_radix(&bin_str, 2) {
-                                tokens.push(Token::Number(n));
+                                let end_offset = byte_offsets[i];
+                                let span = Span::new(start_line, start_column, start_offset, end_offset - start_offset);
+                                tokens.push(SpannedToken::new(Token::Number(n), span));
                             }
                             continue;
                         }
                         _ => {}
                     }
                 }
-                
+
                 // Decimal number
                 while i < chars.len() && chars[i].is_ascii_digit() {
                     i += 1;
+                    column += 1;
                 }
-                let num_str: String = chars[start..i].iter().collect();
+                let num_str: String = chars[start_i..i].iter().collect();
                 if let Ok(n) = num_str.parse::<u64>() {
-                    tokens.push(Token::Number(n));
+                    let end_offset = byte_offsets[i];
+                    let span = Span::new(start_line, start_column, start_offset, end_offset - start_offset);
+                    tokens.push(SpannedToken::new(Token::Number(n), span));
                 }
             }
-            
+
             // Word (identifier or keyword)
             c if c.is_alphabetic() || c == '_' => {
-                let start = i;
+                let start_i = i;
                 while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') {
                     i += 1;
+                    column += 1;
                 }
-                let word: String = chars[start..i].iter().collect();
-                tokens.push(Token::Word(word));
+                let word: String = chars[start_i..i].iter().collect();
+                let end_offset = byte_offsets[i];
+                let span = Span::new(start_line, start_column, start_offset, end_offset - start_offset);
+                tokens.push(SpannedToken::new(Token::Word(word), span));
             }
-            
+
             // Equals sign
             '=' if i + 1 < chars.len() && chars[i + 1] == '=' => {
                 // == is a comparison operator
-                tokens.push(Token::Word("==".to_string()));
                 i += 2;
+                column += 2;
+                let end_offset = byte_offsets[i];
+                let span = Span::new(start_line, start_column, start_offset, end_offset - start_offset);
+                tokens.push(SpannedToken::new(Token::Word("==".to_string()), span));
             }
             '=' => {
-                tokens.push(Token::Equals);
+                let span = Span::new(start_line, start_column, start_offset, 1);
+                tokens.push(SpannedToken::new(Token::Equals, span));
+                column += 1;
                 i += 1;
             }
-            
+
             // Semicolon (statement terminator)
             ';' => {
                 // Check if it's a comment (;;)
                 if i + 1 < chars.len() && chars[i + 1] == ';' {
                     while i < chars.len() && chars[i] != '\n' {
+                        column += 1;
                         i += 1;
                     }
                 } else {
-                    tokens.push(Token::Semicolon);
+                    let span = Span::new(start_line, start_column, start_offset, 1);
+                    tokens.push(SpannedToken::new(Token::Semicolon, span));
+                    column += 1;
                     i += 1;
                 }
             }
-            
+
             '/' => {
                 if i + 1 < chars.len() && chars[i+1] == '/' {
                     // Line comment
                     while i < chars.len() && chars[i] != '\n' {
+                        column += 1;
                         i += 1;
                     }
                 } else {
-                    tokens.push(Token::Word("/".to_string()));
+                    let span = Span::new(start_line, start_column, start_offset, 1);
+                    tokens.push(SpannedToken::new(Token::Word("/".to_string()), span));
+                    column += 1;
                     i += 1;
                 }
             }
@@ -361,29 +514,34 @@ pub fn tokenize(input: &str) -> Vec<Token> {
                 let mut op = String::new();
                 op.push(chars[i]);
                 i += 1;
-                
+                column += 1;
+
                 if i < chars.len() {
                     match (op.chars().next().unwrap(), chars[i]) {
                         ('<', '=') | ('>', '=') | ('!', '=') |
-                        ('<', '<') | ('>', '>') | 
+                        ('<', '<') | ('>', '>') |
                         ('&', '&') | ('|', '|') => {
                             op.push(chars[i]);
                             i += 1;
+                            column += 1;
                         }
                         _ => {}
                     }
                 }
-                
-                tokens.push(Token::Word(op));
+
+                let end_offset = byte_offsets[i];
+                let span = Span::new(start_line, start_column, start_offset, end_offset - start_offset);
+                tokens.push(SpannedToken::new(Token::Word(op), span));
             }
-            
+
             // Skip unknown characters
             _ => {
+                column += 1;
                 i += 1;
             }
         }
     }
-    
+
     tokens
 }
 
@@ -441,6 +599,8 @@ pub struct Parser<'a> {
     token_pos: usize,
     /// FFI declarations from FOREIGN blocks.
     ffi_declarations: Vec<FFIDeclaration>,
+    /// Domain parser registry for modular keyword handling.
+    domain_registry: DomainRegistry,
 }
 
 impl<'a> Parser<'a> {
@@ -457,6 +617,7 @@ impl<'a> Parser<'a> {
             stack_depth: 0,
             token_pos: 0,
             ffi_declarations: Vec::new(),
+            domain_registry: DomainRegistry::new(),
         }
     }
 
@@ -633,158 +794,39 @@ impl<'a> Parser<'a> {
     }
     
     /// Parse a word (opcode or keyword).
+    ///
+    /// This method uses the domain parser registry for simple opcodes,
+    /// and handles special cases (control flow, declarations) directly.
     fn parse_word(&mut self, word: &str) -> Result<Stmt, String> {
         let upper = word.to_uppercase();
-        
+
+        // Special cases that need access to parser state (control flow, declarations)
+        // These must be checked before delegating to domain parsers
         match upper.as_str() {
-            // Stack operations
-            "NOP" => self.emit_op(OpCode::Nop),
-            "HALT" => self.emit_op(OpCode::Halt),
-            "POP" | "DROP" => self.emit_op(OpCode::Pop),
-            "DUP" => self.emit_op(OpCode::Dup),
-            "SWAP" => self.emit_op(OpCode::Swap),
-            "OVER" => self.emit_op(OpCode::Over),
-            "ROT" => self.emit_op(OpCode::Rot),
-            "DEPTH" => self.emit_op(OpCode::Depth),
-            "PICK" | "PEEK" => self.emit_op(OpCode::Pick),
-            "ROLL" => self.emit_op(OpCode::Roll),
-            "REVERSE" | "REV" => self.emit_op(OpCode::Reverse),
-            "EXEC" | "CALL" => self.emit_op(OpCode::Exec),
-            "DIP" => self.emit_op(OpCode::Dip),
-            "KEEP" => self.emit_op(OpCode::Keep),
-            "BI" | "CLEAVE" => self.emit_op(OpCode::Bi),
-            "REC" => self.emit_op(OpCode::Rec),
-            
-            // String Operations
-            "STR_REV" => self.emit_op(OpCode::StrRev),
-            "STR_CAT" | "CONCAT" => self.emit_op(OpCode::StrCat),
-            "STR_SPLIT" | "SPLIT" => self.emit_op(OpCode::StrSplit),
-            
-            // Arithmetic
-            "ADD" | "+" => self.emit_op(OpCode::Add),
-            "SUB" | "-" => self.emit_op(OpCode::Sub),
-            "MUL" | "*" => self.emit_op(OpCode::Mul),
-            "DIV" | "/" => self.emit_op(OpCode::Div),
-            "MOD" | "%" => self.emit_op(OpCode::Mod),
-            "NEG" => self.emit_op(OpCode::Neg),
-            "ABS" => self.emit_op(OpCode::Abs),
-            "MIN" => self.emit_op(OpCode::Min),
-            "MAX" => self.emit_op(OpCode::Max),
-            "SIGN" | "SIGNUM" => self.emit_op(OpCode::Sign),
-
-            // Bitwise
-            "NOT" | "~" => self.emit_op(OpCode::Not),
-            "AND" | "&" => self.emit_op(OpCode::And),
-            "OR" | "|" => self.emit_op(OpCode::Or),
-            "XOR" | "^" => self.emit_op(OpCode::Xor),
-            "SHL" | "<<" => self.emit_op(OpCode::Shl),
-            "SHR" | ">>" => self.emit_op(OpCode::Shr),
-            
-            // Comparison
-            "EQ" | "==" => self.emit_op(OpCode::Eq),
-            "NEQ" | "!=" => self.emit_op(OpCode::Neq),
-            "LT" | "<" => self.emit_op(OpCode::Lt),
-            "GT" | ">" => self.emit_op(OpCode::Gt),
-            "LTE" | "<=" => self.emit_op(OpCode::Lte),
-            "GTE" | ">=" => self.emit_op(OpCode::Gte),
-
-            // Signed Comparison
-            "SLT" => self.emit_op(OpCode::Slt),
-            "SGT" => self.emit_op(OpCode::Sgt),
-            "SLTE" => self.emit_op(OpCode::Slte),
-            "SGTE" => self.emit_op(OpCode::Sgte),
-
-            // Temporal
-            "ORACLE" | "READ" => self.emit_op(OpCode::Oracle),
-            "PROPHECY" | "WRITE" => self.emit_op(OpCode::Prophecy),
-            "PRESENT" => self.emit_op(OpCode::PresentRead),
-            "PARADOX" => self.emit_op(OpCode::Paradox),
-            
-            // I/O
-            "INPUT" => self.emit_op(OpCode::Input),
+            // OUTPUT and EMIT have special expression syntax: OUTPUT(expr)
             "OUTPUT" => {
                 if matches!(self.tokens.peek(), Some(Token::LParen)) {
                     let expr_stmts = self.parse_expression()?;
                     let mut stmts = expr_stmts;
                     stmts.push(Stmt::Op(OpCode::Output));
-                    Ok(Stmt::Block(stmts))
+                    return Ok(Stmt::Block(stmts));
                 } else {
-                    self.emit_op(OpCode::Output)
+                    return self.emit_op(OpCode::Output);
                 }
             },
-            
+
             "EMIT" => {
                 if matches!(self.tokens.peek(), Some(Token::LParen)) {
                     let expr_stmts = self.parse_expression()?;
                     let mut stmts = expr_stmts;
                     stmts.push(Stmt::Op(OpCode::Emit));
-                    Ok(Stmt::Block(stmts))
+                    return Ok(Stmt::Block(stmts));
                 } else {
-                    self.emit_op(OpCode::Emit)
+                    return self.emit_op(OpCode::Emit);
                 }
             },
 
-            // Vector operations
-            "VEC_NEW" => self.emit_op(OpCode::VecNew),
-            "VEC_PUSH" => self.emit_op(OpCode::VecPush),
-            "VEC_POP" => self.emit_op(OpCode::VecPop),
-            "VEC_GET" => self.emit_op(OpCode::VecGet),
-            "VEC_SET" => self.emit_op(OpCode::VecSet),
-            "VEC_LEN" => self.emit_op(OpCode::VecLen),
-
-            // Hash table operations
-            "HASH_NEW" => self.emit_op(OpCode::HashNew),
-            "HASH_PUT" => self.emit_op(OpCode::HashPut),
-            "HASH_GET" => self.emit_op(OpCode::HashGet),
-            "HASH_DEL" => self.emit_op(OpCode::HashDel),
-            "HASH_HAS" => self.emit_op(OpCode::HashHas),
-            "HASH_LEN" => self.emit_op(OpCode::HashLen),
-
-            // Set operations
-            "SET_NEW" => self.emit_op(OpCode::SetNew),
-            "SET_ADD" => self.emit_op(OpCode::SetAdd),
-            "SET_HAS" => self.emit_op(OpCode::SetHas),
-            "SET_DEL" => self.emit_op(OpCode::SetDel),
-            "SET_LEN" => self.emit_op(OpCode::SetLen),
-
-            // FFI operations
-            "FFI_CALL" => self.emit_op(OpCode::FFICall),
-            "FFI_CALL_NAMED" => self.emit_op(OpCode::FFICallNamed),
-
-            // File I/O operations
-            "FILE_OPEN" => self.emit_op(OpCode::FileOpen),
-            "FILE_READ" => self.emit_op(OpCode::FileRead),
-            "FILE_WRITE" => self.emit_op(OpCode::FileWrite),
-            "FILE_SEEK" => self.emit_op(OpCode::FileSeek),
-            "FILE_FLUSH" => self.emit_op(OpCode::FileFlush),
-            "FILE_CLOSE" => self.emit_op(OpCode::FileClose),
-            "FILE_EXISTS" => self.emit_op(OpCode::FileExists),
-            "FILE_SIZE" => self.emit_op(OpCode::FileSize),
-
-            // Buffer operations
-            "BUFFER_NEW" => self.emit_op(OpCode::BufferNew),
-            "BUFFER_FROM_STACK" => self.emit_op(OpCode::BufferFromStack),
-            "BUFFER_TO_STACK" => self.emit_op(OpCode::BufferToStack),
-            "BUFFER_LEN" => self.emit_op(OpCode::BufferLen),
-            "BUFFER_READ_BYTE" => self.emit_op(OpCode::BufferReadByte),
-            "BUFFER_WRITE_BYTE" => self.emit_op(OpCode::BufferWriteByte),
-            "BUFFER_FREE" => self.emit_op(OpCode::BufferFree),
-
-            // Network operations
-            "TCP_CONNECT" => self.emit_op(OpCode::TcpConnect),
-            "SOCKET_SEND" => self.emit_op(OpCode::SocketSend),
-            "SOCKET_RECV" => self.emit_op(OpCode::SocketRecv),
-            "SOCKET_CLOSE" => self.emit_op(OpCode::SocketClose),
-
-            // Process operations
-            "PROC_EXEC" => self.emit_op(OpCode::ProcExec),
-
-            // System operations
-            "CLOCK" => self.emit_op(OpCode::Clock),
-            "SLEEP" => self.emit_op(OpCode::Sleep),
-            "RANDOM" => self.emit_op(OpCode::Random),
-
-            // Control flow
+            // Control flow keywords - require parser state for blocks
             "ASSERT" => {
                 // Optional condition expression
                 let mut stmts = if self.is_expression_start() {
@@ -907,14 +949,27 @@ impl<'a> Parser<'a> {
             // LET bindings: LET name = expr;
             "LET" => self.parse_let(),
             
-            // Handle constants, variables, or unknown words
+            // Handle domain parser keywords, constants, variables, or unknown words
             other => {
+                // First, try the domain parser registry for simple opcodes
+                // This delegates stack ops, arithmetic, temporal, data structures, I/O, strings
+                // to their respective domain parsers
+                {
+                    let mut ctx = ParseContext::new(
+                        &mut self.stack_depth,
+                        domain::emit_op_helper
+                    );
+                    if let Some(result) = self.domain_registry.parse(other, &mut ctx) {
+                        return result;
+                    }
+                }
+
                 // Check if it is a defined constant
                 if let Some(&val) = self.constants.get(other) {
                     self.stack_depth += 1;
                     return Ok(Stmt::Push(Value::new(val)));
                 }
-                
+
                 // Check if it is a defined variable (case-insensitive)
                 let lower = word.to_lowercase();
                 if let Some(binding) = self.variables.get(&lower).cloned() {
@@ -927,7 +982,7 @@ impl<'a> Parser<'a> {
                         Stmt::Op(OpCode::Pick),
                     ]));
                 }
-                
+
                 // Check if it is a temporal variable (oracle-backed)
                 if let Some(binding) = self.temporal_vars.get(&lower).cloned() {
                     self.stack_depth += 1; // ORACLE adds to stack
@@ -937,7 +992,7 @@ impl<'a> Parser<'a> {
                         Stmt::Op(OpCode::Oracle),
                     ]));
                 }
-                
+
                 // Check if it is a defined procedure
                 if let Some(binding) = self.procedures.get(&lower).cloned() {
                     // Procedure call: consumes params, produces returns
@@ -945,7 +1000,7 @@ impl<'a> Parser<'a> {
                     self.stack_depth += binding.return_count;
                     return Ok(Stmt::Call { name: lower });
                 }
-                
+
                 // If it is strictly uppercase, it might be a misspelled opcode
                 if other.chars().all(|c| c.is_uppercase() || c == '_') {
                     // Suggest similar opcodes
@@ -2240,5 +2295,163 @@ mod tests {
             .iter().any(|e| matches!(e, FFIEffect::IO)));
         assert!(program.ffi_declarations[1].signature.effects
             .iter().any(|e| matches!(e, FFIEffect::Reads)));
+    }
+
+    // ========================================================================
+    // Span Tracking Tests (Phase 2)
+    // ========================================================================
+
+    #[test]
+    fn test_tokenize_with_spans_basic() {
+        let tokens = tokenize_with_spans("42 ADD");
+        assert_eq!(tokens.len(), 2);
+
+        // First token: 42 at line 1, column 1
+        assert_eq!(tokens[0].token, Token::Number(42));
+        assert_eq!(tokens[0].span.line, 1);
+        assert_eq!(tokens[0].span.column, 1);
+        assert_eq!(tokens[0].span.offset, 0);
+        assert_eq!(tokens[0].span.len, 2);
+
+        // Second token: ADD at line 1, column 4
+        assert_eq!(tokens[1].token, Token::Word("ADD".to_string()));
+        assert_eq!(tokens[1].span.line, 1);
+        assert_eq!(tokens[1].span.column, 4);
+        assert_eq!(tokens[1].span.offset, 3);
+        assert_eq!(tokens[1].span.len, 3);
+    }
+
+    #[test]
+    fn test_tokenize_with_spans_multiline() {
+        let tokens = tokenize_with_spans("10\n20\n30");
+        assert_eq!(tokens.len(), 3);
+
+        assert_eq!(tokens[0].span.line, 1);
+        assert_eq!(tokens[0].span.column, 1);
+
+        assert_eq!(tokens[1].span.line, 2);
+        assert_eq!(tokens[1].span.column, 1);
+
+        assert_eq!(tokens[2].span.line, 3);
+        assert_eq!(tokens[2].span.column, 1);
+    }
+
+    #[test]
+    fn test_tokenize_with_spans_hex_binary() {
+        let tokens = tokenize_with_spans("0xFF 0b1010");
+        assert_eq!(tokens.len(), 2);
+
+        // 0xFF = 4 bytes
+        assert_eq!(tokens[0].token, Token::Number(255));
+        assert_eq!(tokens[0].span.len, 4);
+
+        // 0b1010 = 6 bytes
+        assert_eq!(tokens[1].token, Token::Number(10));
+        assert_eq!(tokens[1].span.len, 6);
+    }
+
+    #[test]
+    fn test_tokenize_with_spans_string() {
+        let tokens = tokenize_with_spans("\"hello\" ADD");
+        assert_eq!(tokens.len(), 2);
+
+        // "hello" = 7 bytes (including quotes)
+        assert_eq!(tokens[0].token, Token::StringLit("hello".to_string()));
+        assert_eq!(tokens[0].span.len, 7);
+    }
+
+    #[test]
+    fn test_tokenize_with_spans_char() {
+        let tokens = tokenize_with_spans("'a' 'b'");
+        assert_eq!(tokens.len(), 2);
+
+        // 'a' = 3 bytes
+        assert_eq!(tokens[0].token, Token::CharLit('a'));
+        assert_eq!(tokens[0].span.len, 3);
+        assert_eq!(tokens[0].span.column, 1);
+
+        // 'b' at column 5
+        assert_eq!(tokens[1].token, Token::CharLit('b'));
+        assert_eq!(tokens[1].span.column, 5);
+    }
+
+    #[test]
+    fn test_tokenize_with_spans_braces() {
+        let tokens = tokenize_with_spans("IF { 1 }");
+        assert_eq!(tokens.len(), 4);
+
+        assert_eq!(tokens[1].token, Token::LBrace);
+        assert_eq!(tokens[1].span.column, 4);
+        assert_eq!(tokens[1].span.len, 1);
+
+        assert_eq!(tokens[3].token, Token::RBrace);
+        assert_eq!(tokens[3].span.column, 8);
+    }
+
+    #[test]
+    fn test_tokenize_with_spans_operators() {
+        let tokens = tokenize_with_spans("<= >= != <<");
+        assert_eq!(tokens.len(), 4);
+
+        // Two-character operators should have len 2
+        assert_eq!(tokens[0].span.len, 2);
+        assert_eq!(tokens[1].span.len, 2);
+        assert_eq!(tokens[2].span.len, 2);
+        assert_eq!(tokens[3].span.len, 2);
+    }
+
+    #[test]
+    fn test_tokenize_with_spans_comment_skipping() {
+        let tokens = tokenize_with_spans("ADD # comment\nSUB");
+        assert_eq!(tokens.len(), 2);
+
+        assert_eq!(tokens[0].span.line, 1);
+        assert_eq!(tokens[1].span.line, 2);
+    }
+
+    #[test]
+    fn test_span_extract() {
+        let source = "42 ADD 100";
+        let tokens = tokenize_with_spans(source);
+
+        // Verify that span.extract() returns the correct text
+        assert_eq!(tokens[0].span.extract(source), "42");
+        assert_eq!(tokens[1].span.extract(source), "ADD");
+        assert_eq!(tokens[2].span.extract(source), "100");
+    }
+
+    #[test]
+    fn test_span_merge() {
+        let span1 = Span::new(1, 1, 0, 2);  // "42"
+        let span2 = Span::new(1, 4, 3, 3);  // "ADD"
+
+        let merged = span1.merge(&span2);
+        assert_eq!(merged.line, 1);
+        assert_eq!(merged.column, 1);
+        assert_eq!(merged.offset, 0);
+        assert_eq!(merged.len, 6); // "42 ADD"
+    }
+
+    #[test]
+    fn test_tokenize_with_spans_utf8() {
+        // Test that byte offsets are correct for UTF-8
+        let tokens = tokenize_with_spans("x = 42");
+        assert_eq!(tokens.len(), 3);
+
+        assert_eq!(tokens[0].span.offset, 0); // x
+        assert_eq!(tokens[1].span.offset, 2); // =
+        assert_eq!(tokens[2].span.offset, 4); // 42
+    }
+
+    #[test]
+    fn test_tokenize_backward_compatible() {
+        // Ensure tokenize() still works as before
+        let tokens_old = tokenize("10 20 ADD");
+        let tokens_new: Vec<Token> = tokenize_with_spans("10 20 ADD")
+            .into_iter()
+            .map(|st| st.token)
+            .collect();
+
+        assert_eq!(tokens_old, tokens_new);
     }
 }

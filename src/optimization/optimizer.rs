@@ -14,6 +14,120 @@ use crate::ast::{Stmt, OpCode, Program};
 use crate::core::Value;
 use std::collections::{HashMap, HashSet};
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Value Numbering for CSE
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Value number - unique identifier for a value in the computation.
+type ValueNumber = u64;
+
+/// Expression key for CSE hash table.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum ExprKey {
+    /// Literal constant value.
+    Literal(u64),
+    /// Binary operation: (op, left_vn, right_vn).
+    Binary(OpCode, ValueNumber, ValueNumber),
+    /// Unary operation: (op, operand_vn).
+    Unary(OpCode, ValueNumber),
+    /// Unknown/external value (cannot be deduplicated).
+    Unknown(u64),
+}
+
+/// Result of CSE transformation on a statement.
+enum CseTransform {
+    /// Keep the statement unchanged.
+    Keep(Stmt),
+    /// Replace with different statements.
+    Replace(Vec<Stmt>),
+    /// Remove the statement entirely.
+    Remove,
+}
+
+/// State for value numbering during CSE pass.
+#[derive(Debug)]
+struct ValueNumberingState {
+    /// Next value number to assign.
+    next_vn: ValueNumber,
+    /// Abstract stack with value numbers.
+    stack: Vec<ValueNumber>,
+    /// Map from expression keys to their value numbers.
+    expr_to_vn: HashMap<ExprKey, ValueNumber>,
+    /// Map from literal values to their value numbers.
+    literal_to_vn: HashMap<u64, ValueNumber>,
+}
+
+impl ValueNumberingState {
+    /// Create new value numbering state.
+    fn new() -> Self {
+        Self {
+            next_vn: 0,
+            stack: Vec::new(),
+            expr_to_vn: HashMap::new(),
+            literal_to_vn: HashMap::new(),
+        }
+    }
+
+    /// Get or create value number for a literal constant.
+    fn get_or_create_literal_vn(&mut self, val: u64) -> ValueNumber {
+        if let Some(&vn) = self.literal_to_vn.get(&val) {
+            vn
+        } else {
+            let vn = self.next_vn;
+            self.next_vn += 1;
+            self.literal_to_vn.insert(val, vn);
+            self.expr_to_vn.insert(ExprKey::Literal(val), vn);
+            vn
+        }
+    }
+
+    /// Get or create value number for an expression.
+    fn get_or_create_expr_vn(&mut self, key: ExprKey) -> ValueNumber {
+        if let Some(&vn) = self.expr_to_vn.get(&key) {
+            vn
+        } else {
+            let vn = self.next_vn;
+            self.next_vn += 1;
+            self.expr_to_vn.insert(key, vn);
+            vn
+        }
+    }
+
+    /// Create a new unknown value number (for external inputs).
+    fn create_unknown_vn(&mut self) -> ValueNumber {
+        let vn = self.next_vn;
+        self.next_vn += 1;
+        self.expr_to_vn.insert(ExprKey::Unknown(vn), vn);
+        vn
+    }
+
+    /// Push a value number onto the abstract stack.
+    fn push(&mut self, vn: ValueNumber) {
+        self.stack.push(vn);
+    }
+
+    /// Pop a value number from the abstract stack.
+    fn pop(&mut self) -> ValueNumber {
+        self.stack.pop().unwrap_or_else(|| self.create_unknown_vn())
+    }
+
+    /// Find if a value number exists on the stack, return depth from top.
+    fn find_value_on_stack(&self, vn: ValueNumber) -> Option<usize> {
+        for (i, &stack_vn) in self.stack.iter().rev().enumerate() {
+            if stack_vn == vn {
+                return Some(i);
+            }
+        }
+        None
+    }
+
+    /// Invalidate all tracking (e.g., after control flow merge).
+    fn invalidate(&mut self) {
+        self.stack.clear();
+        // Keep expr_to_vn for potential future matches within same basic block
+    }
+}
+
 /// Optimization level for the compiler.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OptLevel {
@@ -175,6 +289,487 @@ impl std::fmt::Display for OptStats {
         writeln!(f, "───────────────────────────────────────────────────────")?;
         writeln!(f, "Total optimizations:   {:>6}", self.total_optimizations())?;
         writeln!(f, "═══════════════════════════════════════════════════════")
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Formal Optimization Quality Metrics
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Distributional statistics for optimization quality assessment.
+///
+/// Tracks the shape of confidence score distributions using statistical moments:
+/// - **Mean (μ)**: Location - average confidence score
+/// - **Variance (σ²)**: Spread - how much scores deviate from mean
+/// - **Skewness (γ₁)**: Asymmetry - positive = right tail, negative = left tail
+/// - **Kurtosis (γ₂)**: Tailedness/peakedness - high = heavy tails
+///
+/// These moments provide insights into optimization effectiveness:
+/// - High mean with low variance = consistent high-quality optimizations
+/// - Negative skewness = most optimizations are high confidence
+/// - High kurtosis = outliers present (very good or very poor matches)
+#[derive(Debug, Clone, Default)]
+pub struct DistributionalMetrics {
+    /// Number of observations.
+    pub count: usize,
+    /// Running sum for mean calculation.
+    sum: f64,
+    /// Running sum of squares for variance.
+    sum_sq: f64,
+    /// Running sum of cubes for skewness.
+    sum_cube: f64,
+    /// Running sum of fourth powers for kurtosis.
+    sum_fourth: f64,
+    /// Minimum observed value.
+    pub min: f64,
+    /// Maximum observed value.
+    pub max: f64,
+}
+
+impl DistributionalMetrics {
+    /// Create new metrics tracker.
+    pub fn new() -> Self {
+        Self {
+            count: 0,
+            sum: 0.0,
+            sum_sq: 0.0,
+            sum_cube: 0.0,
+            sum_fourth: 0.0,
+            min: f64::INFINITY,
+            max: f64::NEG_INFINITY,
+        }
+    }
+
+    /// Record a new observation.
+    pub fn record(&mut self, value: f64) {
+        self.count += 1;
+        self.sum += value;
+        let v2 = value * value;
+        let v3 = v2 * value;
+        let v4 = v3 * value;
+        self.sum_sq += v2;
+        self.sum_cube += v3;
+        self.sum_fourth += v4;
+        self.min = self.min.min(value);
+        self.max = self.max.max(value);
+    }
+
+    /// Compute mean (first raw moment).
+    pub fn mean(&self) -> f64 {
+        if self.count == 0 {
+            0.0
+        } else {
+            self.sum / self.count as f64
+        }
+    }
+
+    /// Compute variance (second central moment).
+    pub fn variance(&self) -> f64 {
+        if self.count < 2 {
+            0.0
+        } else {
+            let mean = self.mean();
+            self.sum_sq / self.count as f64 - mean * mean
+        }
+    }
+
+    /// Compute standard deviation.
+    pub fn std_dev(&self) -> f64 {
+        self.variance().sqrt()
+    }
+
+    /// Compute skewness (third standardized moment).
+    ///
+    /// Measures asymmetry of the distribution:
+    /// - Positive: Right tail is longer (more low values)
+    /// - Negative: Left tail is longer (more high values)
+    /// - Zero: Symmetric distribution
+    pub fn skewness(&self) -> f64 {
+        if self.count < 3 {
+            return 0.0;
+        }
+
+        let mean = self.mean();
+        let std_dev = self.std_dev();
+        if std_dev < 1e-10 {
+            return 0.0;
+        }
+
+        let n = self.count as f64;
+        // E[(X - μ)³] = E[X³] - 3μE[X²] + 2μ³
+        let central_third = self.sum_cube / n
+            - 3.0 * mean * self.sum_sq / n
+            + 2.0 * mean * mean * mean;
+
+        central_third / (std_dev * std_dev * std_dev)
+    }
+
+    /// Compute excess kurtosis (fourth standardized moment - 3).
+    ///
+    /// Measures tailedness compared to normal distribution:
+    /// - Positive (leptokurtic): Heavier tails than normal
+    /// - Negative (platykurtic): Lighter tails than normal
+    /// - Zero (mesokurtic): Similar to normal distribution
+    pub fn kurtosis(&self) -> f64 {
+        if self.count < 4 {
+            return 0.0;
+        }
+
+        let mean = self.mean();
+        let variance = self.variance();
+        if variance < 1e-10 {
+            return 0.0;
+        }
+
+        let n = self.count as f64;
+        // E[(X - μ)⁴] = E[X⁴] - 4μE[X³] + 6μ²E[X²] - 3μ⁴
+        let central_fourth = self.sum_fourth / n
+            - 4.0 * mean * self.sum_cube / n
+            + 6.0 * mean * mean * self.sum_sq / n
+            - 3.0 * mean * mean * mean * mean;
+
+        (central_fourth / (variance * variance)) - 3.0
+    }
+
+    /// Get a summary string of all moments.
+    pub fn summary(&self) -> String {
+        format!(
+            "n={}, μ={:.4}, σ={:.4}, γ₁={:.4}, γ₂={:.4}, range=[{:.4}, {:.4}]",
+            self.count,
+            self.mean(),
+            self.std_dev(),
+            self.skewness(),
+            self.kurtosis(),
+            self.min,
+            self.max
+        )
+    }
+
+    /// Assess optimization quality based on distribution shape.
+    pub fn quality_assessment(&self) -> OptimizationQuality {
+        if self.count < 5 {
+            return OptimizationQuality::InsufficientData;
+        }
+
+        let mean = self.mean();
+        let std_dev = self.std_dev();
+        let skewness = self.skewness();
+
+        // High mean, low variance, negative skew = excellent
+        if mean > 0.7 && std_dev < 0.2 && skewness < 0.0 {
+            OptimizationQuality::Excellent
+        } else if mean > 0.5 && std_dev < 0.3 {
+            OptimizationQuality::Good
+        } else if mean > 0.3 {
+            OptimizationQuality::Fair
+        } else {
+            OptimizationQuality::Poor
+        }
+    }
+}
+
+/// Qualitative assessment of optimization effectiveness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OptimizationQuality {
+    /// Not enough data to assess.
+    InsufficientData,
+    /// Poor optimization (low confidence, high variance).
+    Poor,
+    /// Fair optimization (moderate confidence).
+    Fair,
+    /// Good optimization (high confidence, moderate variance).
+    Good,
+    /// Excellent optimization (high confidence, low variance, negative skew).
+    Excellent,
+}
+
+impl std::fmt::Display for OptimizationQuality {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InsufficientData => write!(f, "Insufficient Data"),
+            Self::Poor => write!(f, "Poor"),
+            Self::Fair => write!(f, "Fair"),
+            Self::Good => write!(f, "Good"),
+            Self::Excellent => write!(f, "Excellent"),
+        }
+    }
+}
+
+/// Comprehensive optimization effectiveness tracker.
+///
+/// Tracks multiple dimensions of optimization quality:
+/// - Pattern detection confidence distribution
+/// - Speedup factor distribution
+/// - Convergence rate for temporal patterns
+/// - Resource utilization efficiency
+#[derive(Debug, Clone, Default)]
+pub struct OptimizationEffectiveness {
+    /// Distribution of pattern detection confidence scores.
+    pub pattern_confidence: DistributionalMetrics,
+    /// Distribution of achieved speedup factors.
+    pub speedup_factors: DistributionalMetrics,
+    /// Distribution of convergence rates (for temporal patterns).
+    pub convergence_rates: DistributionalMetrics,
+    /// Total instructions saved.
+    pub total_instructions_saved: u64,
+    /// Total epochs saved (temporal optimization).
+    pub total_epochs_saved: u64,
+    /// Number of successful optimizations.
+    pub successful_optimizations: usize,
+    /// Number of deoptimizations (fallbacks).
+    pub deoptimizations: usize,
+}
+
+impl OptimizationEffectiveness {
+    /// Create new effectiveness tracker.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record a pattern detection with confidence score.
+    pub fn record_pattern_detection(&mut self, confidence: f64) {
+        self.pattern_confidence.record(confidence);
+    }
+
+    /// Record a speedup factor achieved.
+    pub fn record_speedup(&mut self, factor: f64) {
+        self.speedup_factors.record(factor);
+    }
+
+    /// Record a convergence rate observation.
+    pub fn record_convergence_rate(&mut self, rate: f64) {
+        self.convergence_rates.record(rate);
+    }
+
+    /// Record instructions saved by an optimization.
+    pub fn record_instructions_saved(&mut self, count: u64) {
+        self.total_instructions_saved += count;
+        self.successful_optimizations += 1;
+    }
+
+    /// Record epochs saved by temporal optimization.
+    pub fn record_epochs_saved(&mut self, count: u64) {
+        self.total_epochs_saved += count;
+    }
+
+    /// Record a deoptimization (fallback to interpreter).
+    pub fn record_deoptimization(&mut self) {
+        self.deoptimizations += 1;
+    }
+
+    /// Compute overall effectiveness score (0.0 to 1.0).
+    pub fn overall_score(&self) -> f64 {
+        let total_attempts = self.successful_optimizations + self.deoptimizations;
+        if total_attempts == 0 {
+            return 0.0;
+        }
+
+        // Weighted combination of factors
+        let success_rate = self.successful_optimizations as f64 / total_attempts as f64;
+        let mean_confidence = self.pattern_confidence.mean();
+        let mean_speedup = (self.speedup_factors.mean() / 10.0).min(1.0); // Normalize to 0-1
+
+        // Weighted average: success_rate most important
+        0.5 * success_rate + 0.3 * mean_confidence + 0.2 * mean_speedup
+    }
+
+    /// Generate a comprehensive report.
+    pub fn report(&self) -> String {
+        let mut report = String::new();
+        report.push_str("╔═══════════════════════════════════════════════════════╗\n");
+        report.push_str("║      OPTIMIZATION EFFECTIVENESS REPORT                ║\n");
+        report.push_str("╠═══════════════════════════════════════════════════════╣\n");
+
+        report.push_str(&format!("║ Overall Score: {:.2}%                                  \n",
+            self.overall_score() * 100.0));
+
+        report.push_str("╠───────────────────────────────────────────────────────╣\n");
+        report.push_str("║ PATTERN DETECTION                                     ║\n");
+        report.push_str(&format!("║   Confidence: {}  \n", self.pattern_confidence.summary()));
+        report.push_str(&format!("║   Quality: {}                                         \n",
+            self.pattern_confidence.quality_assessment()));
+
+        report.push_str("╠───────────────────────────────────────────────────────╣\n");
+        report.push_str("║ PERFORMANCE                                           ║\n");
+        report.push_str(&format!("║   Speedup: {}  \n", self.speedup_factors.summary()));
+        report.push_str(&format!("║   Instructions saved: {}                              \n",
+            self.total_instructions_saved));
+
+        if self.total_epochs_saved > 0 {
+            report.push_str("╠───────────────────────────────────────────────────────╣\n");
+            report.push_str("║ TEMPORAL OPTIMIZATION                                 ║\n");
+            report.push_str(&format!("║   Epochs saved: {}                                    \n",
+                self.total_epochs_saved));
+            report.push_str(&format!("║   Convergence: {}  \n", self.convergence_rates.summary()));
+        }
+
+        report.push_str("╠───────────────────────────────────────────────────────╣\n");
+        report.push_str("║ RELIABILITY                                           ║\n");
+        report.push_str(&format!("║   Successful: {}                                      \n",
+            self.successful_optimizations));
+        report.push_str(&format!("║   Deoptimizations: {}                                 \n",
+            self.deoptimizations));
+
+        report.push_str("╚═══════════════════════════════════════════════════════╝\n");
+
+        report
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Reference Frame Documentation
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Documents the geometric, distributional, and symmetrical reference frames
+/// used in the optimization system.
+///
+/// # Geometric Reference (Transform Theory)
+///
+/// Optimization passes can be understood as geometric transforms on program space:
+///
+/// | Transform Type | Properties Preserved | Optimization Examples |
+/// |----------------|---------------------|----------------------|
+/// | **Isometry** | Distances, angles | Instruction reordering (no semantic change) |
+/// | **Similarity** | Ratios, angles | Loop unrolling (scales iteration space) |
+/// | **Affine** | Parallelism, ratios | Constant folding (linear transform on values) |
+/// | **Projective** | Cross-ratio only | Dead code elimination (projection to subspace) |
+///
+/// The stack operations form an affine transform group on the value space.
+///
+/// # Distributional Reference (Statistical Moments)
+///
+/// Optimization confidence is characterized by its distribution:
+///
+/// | Moment | Symbol | Interpretation for Optimization |
+/// |--------|--------|--------------------------------|
+/// | Mean | μ | Average confidence - higher = better patterns |
+/// | Variance | σ² | Consistency - lower = more reliable |
+/// | Skewness | γ₁ | Bias - negative = most scores are high |
+/// | Kurtosis | γ₂ | Outliers - high = occasional excellent/poor |
+///
+/// # Symmetrical Reference (Conservation Laws)
+///
+/// Temporal optimization obeys conservation laws from CTC physics:
+///
+/// | Conservation | Constraint | Implication |
+/// |--------------|-----------|-------------|
+/// | **Self-consistency** | S = F(S) | Fixed-point convergence required |
+/// | **Causal closure** | No information creation | Bootstrap patterns bounded |
+/// | **Provenance tracking** | Causal history preserved | Oracle/Prophecy correlation |
+///
+/// Continuous symmetries (Noether's theorem analogue):
+/// - Time translation → epoch count conservation (total work preserved)
+/// - Value permutation → commutativity exploitation in CSE
+///
+/// Discrete symmetries:
+/// - Loop unrolling: Z_n → Z_1 reduction (n-fold periodicity eliminated)
+/// - Dead code: Projection symmetry (irreducible subspace preserved)
+pub struct ReferenceFrameDocumentation;
+
+impl ReferenceFrameDocumentation {
+    /// Returns documentation for geometric transforms in optimization.
+    pub fn geometric_transforms() -> &'static str {
+        r#"
+GEOMETRIC TRANSFORMS IN OPTIMIZATION
+====================================
+
+Optimization passes transform programs while preserving semantic equivalence.
+These can be classified by the geometric properties they preserve:
+
+1. ISOMETRY (Distance-Preserving)
+   - Preserves: All distances and angles
+   - Examples: Instruction scheduling within basic blocks
+   - The "shape" of computation is unchanged
+
+2. SIMILARITY (Ratio-Preserving)
+   - Preserves: Ratios and angles
+   - Examples: Loop unrolling (scales iteration space by factor k)
+   - Work is scaled but relative structure maintained
+
+3. AFFINE (Parallelism-Preserving)
+   - Preserves: Parallelism and ratios along lines
+   - Examples: Constant folding, strength reduction
+   - Stack operations form an affine group on value space
+
+4. PROJECTIVE (Cross-Ratio-Preserving)
+   - Preserves: Only cross-ratios
+   - Examples: Dead code elimination (projects to live subspace)
+   - Most general linear transform, loses most structure
+
+The optimization level determines which transforms are applied:
+- None: Identity (trivial isometry)
+- Basic: Isometry + simple similarity
+- Full: Affine transforms (constant folding, CSE)
+- Aggressive: Projective (speculative elimination)
+"#
+    }
+
+    /// Returns documentation for distributional analysis.
+    pub fn distributional_analysis() -> &'static str {
+        r#"
+DISTRIBUTIONAL ANALYSIS OF OPTIMIZATION QUALITY
+===============================================
+
+We characterize optimization confidence using statistical moments:
+
+MOMENT     FORMULA                  INTERPRETATION
+------     -------                  --------------
+Mean       μ = E[X]                 Average confidence score
+Variance   σ² = E[(X-μ)²]           Spread around mean
+Skewness   γ₁ = E[(X-μ)³]/σ³        Asymmetry of distribution
+Kurtosis   γ₂ = E[(X-μ)⁴]/σ⁴ - 3    Tail heaviness vs normal
+
+QUALITY INTERPRETATION:
+
+| Mean | Variance | Skewness | Kurtosis | Assessment |
+|------|----------|----------|----------|------------|
+| High | Low      | Negative | Low      | Excellent  |
+| High | Moderate | Any      | Low      | Good       |
+| Mid  | High     | Positive | High     | Fair       |
+| Low  | High     | Positive | High     | Poor       |
+
+Negative skewness (left-skewed) is desirable: most scores are high.
+Low kurtosis indicates consistency without outliers.
+"#
+    }
+
+    /// Returns documentation for conservation laws in temporal optimization.
+    pub fn conservation_laws() -> &'static str {
+        r#"
+CONSERVATION LAWS IN TEMPORAL OPTIMIZATION
+==========================================
+
+Ourochronos implements Deutschian CTC semantics, which impose conservation laws:
+
+1. SELF-CONSISTENCY CONSERVATION
+   Constraint: S = F(S) (fixed-point)
+   Physical basis: Novikov self-consistency in CTCs
+   Implication: Every temporal loop must converge or oscillate
+
+2. CAUSAL CLOSURE
+   Constraint: No net information creation
+   Physical basis: Causality preservation
+   Implication: Bootstrap patterns have bounded complexity
+
+3. PROVENANCE CONSERVATION
+   Constraint: Causal history tracked through all operations
+   Physical basis: Information conservation
+   Implication: Every PROPHECY traceable to ORACLE sources
+
+SYMMETRY → CONSERVATION (Noether-like correspondence):
+
+| Symmetry Type | Conservation Law |
+|---------------|------------------|
+| Time translation | Total computation work |
+| Value permutation | CSE equivalence classes |
+| Loop periodicity | Unrolling factor bounds |
+
+Asymmetric patterns (grandfather paradox) manifest as oscillation:
+  x_{n+1} = ¬x_n → period-2 cycle, no fixed point
+
+Acceleration methods (Aitken, Anderson) exploit these symmetries
+to predict fixed points before exhaustive iteration.
+"#
     }
 }
 
@@ -566,7 +1161,8 @@ impl Optimizer {
             }
             OpCode::Not => {
                 if let Some(Some(a)) = stack.pop() {
-                    let result = !a;
+                    // Logical NOT: 0 -> 1, nonzero -> 0
+                    let result = if a == 0 { 1 } else { 0 };
                     stack.push(Some(result));
                     return Some(result);
                 }
@@ -810,34 +1406,233 @@ impl Optimizer {
     // Common Subexpression Elimination Pass
     // ═══════════════════════════════════════════════════════════════════════
 
+    /// Common Subexpression Elimination using value numbering for stack-based code.
+    ///
+    /// For stack-based languages, CSE works by:
+    /// 1. Assigning value numbers to each unique value/computation
+    /// 2. Tracking the abstract stack state with value numbers
+    /// 3. Detecting when the same value number is computed twice
+    /// 4. Replacing redundant computations with stack manipulation (DUP, OVER)
     fn cse_pass(&mut self, stmts: &[Stmt]) -> Vec<Stmt> {
-        // Build expression map
-        let mut expr_map: HashMap<String, usize> = HashMap::new();
         let mut result = Vec::new();
+        let mut vn_state = ValueNumberingState::new();
 
-        for (i, stmt) in stmts.iter().enumerate() {
-            let expr_key = self.stmt_to_expr_key(stmt);
-
-            if let Some(_first_occurrence) = expr_map.get(&expr_key) {
-                // This is a common subexpression
-                // For now, we just track it - full CSE requires value numbering
-                // which is complex for a stack-based language
-                result.push(stmt.clone());
-            } else {
-                expr_map.insert(expr_key, i);
-                result.push(stmt.clone());
+        for stmt in stmts {
+            match self.cse_transform_stmt(stmt, &mut vn_state) {
+                CseTransform::Keep(s) => result.push(s),
+                CseTransform::Replace(replacement) => {
+                    self.stats.cse_eliminated += 1;
+                    result.extend(replacement);
+                }
+                CseTransform::Remove => {
+                    self.stats.cse_eliminated += 1;
+                }
             }
         }
 
         result
     }
 
-    fn stmt_to_expr_key(&self, stmt: &Stmt) -> String {
+    /// Transform a statement using CSE value numbering.
+    fn cse_transform_stmt(&mut self, stmt: &Stmt, state: &mut ValueNumberingState) -> CseTransform {
         match stmt {
-            Stmt::Push(v) => format!("push_{}", v.val),
-            Stmt::Op(op) => format!("op_{:?}", op),
-            Stmt::Call { name } => format!("call_{}", name),
-            _ => format!("{:?}", std::ptr::addr_of!(stmt)),
+            Stmt::Push(val) => {
+                let vn = state.get_or_create_literal_vn(val.val);
+
+                // Check if this value is already on the stack
+                if let Some(depth) = state.find_value_on_stack(vn) {
+                    // Value is already on stack - use stack manipulation instead
+                    let replacement = self.generate_stack_copy(depth);
+                    state.push(vn);
+                    return CseTransform::Replace(replacement);
+                }
+
+                // Track the new value on stack
+                state.push(vn);
+                CseTransform::Keep(stmt.clone())
+            }
+
+            Stmt::Op(op) => {
+                match op {
+                    // Binary operations
+                    OpCode::Add | OpCode::Sub | OpCode::Mul | OpCode::Div |
+                    OpCode::Mod | OpCode::And | OpCode::Or | OpCode::Xor |
+                    OpCode::Shl | OpCode::Shr | OpCode::Eq | OpCode::Neq |
+                    OpCode::Lt | OpCode::Gt | OpCode::Lte | OpCode::Gte |
+                    OpCode::Min | OpCode::Max | OpCode::Slt | OpCode::Sgt |
+                    OpCode::Slte | OpCode::Sgte => {
+                        if state.stack.len() >= 2 {
+                            let vn_b = state.pop();
+                            let vn_a = state.pop();
+
+                            // Check if this operation was already computed
+                            // Copy the value to avoid borrow issues
+                            let expr_key = ExprKey::Binary(*op, vn_a, vn_b);
+                            let existing_vn = state.expr_to_vn.get(&expr_key).copied();
+
+                            if let Some(ev) = existing_vn {
+                                // Expression already computed - check if result on stack
+                                if let Some(depth) = state.find_value_on_stack(ev) {
+                                    // Result is on stack - restore operands and copy result
+                                    state.push(vn_a);
+                                    state.push(vn_b);
+                                    let mut replacement = vec![
+                                        Stmt::Op(OpCode::Pop),
+                                        Stmt::Op(OpCode::Pop),
+                                    ];
+                                    replacement.extend(self.generate_stack_copy(depth + 2)); // +2 for the pops we'll emit
+                                    state.push(ev);
+                                    return CseTransform::Replace(replacement);
+                                }
+                            }
+
+                            // Compute new value number for this expression
+                            let result_vn = state.get_or_create_expr_vn(expr_key);
+                            state.push(result_vn);
+                        }
+                        CseTransform::Keep(stmt.clone())
+                    }
+
+                    // Unary operations
+                    OpCode::Not | OpCode::Neg | OpCode::Abs | OpCode::Sign => {
+                        if !state.stack.is_empty() {
+                            let vn_a = state.pop();
+                            let expr_key = ExprKey::Unary(*op, vn_a);
+
+                            // Copy to avoid borrow issues
+                            let existing_vn = state.expr_to_vn.get(&expr_key).copied();
+
+                            if let Some(ev) = existing_vn {
+                                if let Some(depth) = state.find_value_on_stack(ev) {
+                                    state.push(vn_a);
+                                    let mut replacement = vec![Stmt::Op(OpCode::Pop)];
+                                    replacement.extend(self.generate_stack_copy(depth + 1));
+                                    state.push(ev);
+                                    return CseTransform::Replace(replacement);
+                                }
+                            }
+
+                            let result_vn = state.get_or_create_expr_vn(expr_key);
+                            state.push(result_vn);
+                        }
+                        CseTransform::Keep(stmt.clone())
+                    }
+
+                    // Stack manipulation
+                    OpCode::Dup => {
+                        if let Some(&vn) = state.stack.last() {
+                            state.push(vn);
+                        }
+                        CseTransform::Keep(stmt.clone())
+                    }
+                    OpCode::Pop => {
+                        state.pop();
+                        CseTransform::Keep(stmt.clone())
+                    }
+                    OpCode::Swap => {
+                        if state.stack.len() >= 2 {
+                            let len = state.stack.len();
+                            state.stack.swap(len - 1, len - 2);
+                        }
+                        CseTransform::Keep(stmt.clone())
+                    }
+                    OpCode::Over => {
+                        if state.stack.len() >= 2 {
+                            let vn = state.stack[state.stack.len() - 2];
+                            state.push(vn);
+                        }
+                        CseTransform::Keep(stmt.clone())
+                    }
+                    OpCode::Rot => {
+                        if state.stack.len() >= 3 {
+                            let len = state.stack.len();
+                            let c = state.stack.remove(len - 3);
+                            state.stack.push(c);
+                        }
+                        CseTransform::Keep(stmt.clone())
+                    }
+                    OpCode::Depth => {
+                        let vn = state.create_unknown_vn();
+                        state.push(vn);
+                        CseTransform::Keep(stmt.clone())
+                    }
+                    OpCode::Pick => {
+                        // PICK is complex - just create unknown value number
+                        state.pop(); // Remove index
+                        let vn = state.create_unknown_vn();
+                        state.push(vn);
+                        CseTransform::Keep(stmt.clone())
+                    }
+
+                    // Temporal operations - invalidate all tracking
+                    OpCode::Oracle | OpCode::Prophecy | OpCode::PresentRead => {
+                        state.invalidate();
+                        CseTransform::Keep(stmt.clone())
+                    }
+
+                    // I/O operations - add unknown values
+                    OpCode::Input => {
+                        let vn = state.create_unknown_vn();
+                        state.push(vn);
+                        CseTransform::Keep(stmt.clone())
+                    }
+                    OpCode::Output | OpCode::Emit => {
+                        state.pop();
+                        CseTransform::Keep(stmt.clone())
+                    }
+
+                    // All other operations - keep as is
+                    _ => {
+                        CseTransform::Keep(stmt.clone())
+                    }
+                }
+            }
+
+            // For blocks, if/while, etc - recursively process
+            Stmt::Block(inner) => {
+                let optimized = self.cse_pass(inner);
+                CseTransform::Keep(Stmt::Block(optimized))
+            }
+
+            Stmt::If { then_branch, else_branch } => {
+                // Condition was already evaluated - pop result
+                state.pop();
+                // Process branches with separate states (conservative)
+                let opt_then = self.cse_pass(then_branch);
+                let opt_else = else_branch.as_ref().map(|eb| self.cse_pass(eb));
+                // After if/else, we don't know the stack state
+                state.invalidate();
+                CseTransform::Keep(Stmt::If {
+                    then_branch: opt_then,
+                    else_branch: opt_else,
+                })
+            }
+
+            Stmt::While { cond, body } => {
+                // Loops invalidate CSE state due to potential back-edges
+                state.invalidate();
+                CseTransform::Keep(Stmt::While {
+                    cond: self.cse_pass(cond),
+                    body: self.cse_pass(body),
+                })
+            }
+
+            _ => CseTransform::Keep(stmt.clone()),
+        }
+    }
+
+    /// Generate stack operations to copy value at given depth to top.
+    fn generate_stack_copy(&self, depth: usize) -> Vec<Stmt> {
+        match depth {
+            0 => vec![Stmt::Op(OpCode::Dup)],  // Top of stack
+            1 => vec![Stmt::Op(OpCode::Over)], // Second from top
+            _ => {
+                // For deeper values, use PICK with depth
+                vec![
+                    Stmt::Push(Value::new(depth as u64)),
+                    Stmt::Op(OpCode::Pick),
+                ]
+            }
         }
     }
 
@@ -1052,13 +1847,181 @@ impl Optimizer {
         result
     }
 
-    fn analyze_loop_bound(&self, _cond: &[Stmt]) -> Option<usize> {
-        // Simple pattern matching for bounded loops
-        // Pattern: PUSH counter, PUSH 0, GT (decrementing counter)
-        // This is a simplified analysis - real implementation would need dataflow analysis
+    /// Analyze loop condition to determine iteration bound.
+    ///
+    /// Recognizes the following patterns:
+    /// 1. Fixed constant: `PUSH n; PUSH 0; GT` → n iterations
+    /// 2. Range comparison: `PUSH counter; PUSH limit; LT` with increment
+    /// 3. Equality check: `PUSH val; PUSH target; NEQ` → bounded by val-target
+    ///
+    /// Returns Some(bound) if a fixed iteration count can be determined.
+    fn analyze_loop_bound(&self, cond: &[Stmt]) -> Option<usize> {
+        // Extract the pattern from condition statements
+        let bound_info = self.extract_loop_bound_pattern(cond)?;
 
-        // For now, return None - full implementation would track counter variables
+        // Validate bound is within unroll threshold
+        if bound_info <= self.unroll_threshold {
+            Some(bound_info)
+        } else {
+            None
+        }
+    }
+
+    /// Extract loop bound from condition pattern.
+    ///
+    /// For stack-based languages, we recognize these condition patterns:
+    /// - `PUSH n; PUSH 0; GT` → n iterations (counting down from n to 0)
+    /// - `PUSH 0; PUSH n; LT` → n iterations (counting up from 0 to n)
+    /// - `PUSH start; PUSH end; NEQ` → |end - start| iterations
+    fn extract_loop_bound_pattern(&self, cond: &[Stmt]) -> Option<usize> {
+        // Pattern 1: Simple constant comparison (most common)
+        // Condition: [PUSH a, PUSH b, CMP]
+        if cond.len() >= 3 {
+            // Look for PUSH a, PUSH b, comparison at end
+            let last = cond.last()?;
+            let cmp_op = match last {
+                Stmt::Op(op) => *op,
+                _ => return None,
+            };
+
+            // Extract the two values being compared
+            let (val_a, val_b) = self.extract_comparison_values(&cond[..cond.len()-1])?;
+
+            match cmp_op {
+                // n > 0: n iterations counting down
+                OpCode::Gt if val_b == 0 => {
+                    if val_a > 0 && val_a <= u16::MAX as u64 {
+                        return Some(val_a as usize);
+                    }
+                }
+                // 0 < n: n iterations counting up
+                OpCode::Lt if val_a == 0 && val_b > 0 => {
+                    if val_b <= u16::MAX as u64 {
+                        return Some(val_b as usize);
+                    }
+                }
+                // n >= 1: n iterations
+                OpCode::Gte if val_b == 1 => {
+                    if val_a > 0 && val_a <= u16::MAX as u64 {
+                        return Some(val_a as usize);
+                    }
+                }
+                // 0 <= n-1: n iterations
+                OpCode::Lte if val_a == 0 && val_b > 0 => {
+                    if val_b <= u16::MAX as u64 {
+                        return Some(val_b as usize);
+                    }
+                }
+                // a != b: |a - b| iterations (assumes convergence)
+                OpCode::Neq => {
+                    let diff = if val_a > val_b {
+                        val_a - val_b
+                    } else {
+                        val_b - val_a
+                    };
+                    if diff > 0 && diff <= u16::MAX as u64 {
+                        return Some(diff as usize);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Pattern 2: Single constant with implicit comparison
+        // Condition: [PUSH n] where n is treated as boolean
+        if cond.len() == 1 {
+            if let Stmt::Push(val) = &cond[0] {
+                // Non-zero constant → 1 iteration (will become false after decrement)
+                if val.val > 0 && val.val <= self.unroll_threshold as u64 {
+                    return Some(val.val as usize);
+                }
+            }
+        }
+
         None
+    }
+
+    /// Extract two constant values from statements for comparison analysis.
+    /// Returns (left_operand, right_operand) if both can be determined as constants.
+    fn extract_comparison_values(&self, stmts: &[Stmt]) -> Option<(u64, u64)> {
+        // Track the abstract stack to find the top two values
+        let mut stack: Vec<Option<u64>> = Vec::new();
+
+        for stmt in stmts {
+            match stmt {
+                Stmt::Push(val) => {
+                    stack.push(Some(val.val));
+                }
+                Stmt::Op(OpCode::Dup) => {
+                    if let Some(top) = stack.last().cloned() {
+                        stack.push(top);
+                    } else {
+                        stack.push(None);
+                    }
+                }
+                Stmt::Op(OpCode::Swap) => {
+                    if stack.len() >= 2 {
+                        let len = stack.len();
+                        stack.swap(len - 1, len - 2);
+                    }
+                }
+                Stmt::Op(OpCode::Over) => {
+                    if stack.len() >= 2 {
+                        let val = stack[stack.len() - 2].clone();
+                        stack.push(val);
+                    } else {
+                        stack.push(None);
+                    }
+                }
+                Stmt::Op(OpCode::Pop) => {
+                    stack.pop();
+                }
+                // Binary operations that produce a result
+                Stmt::Op(OpCode::Add) | Stmt::Op(OpCode::Sub) |
+                Stmt::Op(OpCode::Mul) | Stmt::Op(OpCode::Div) |
+                Stmt::Op(OpCode::Mod) | Stmt::Op(OpCode::And) |
+                Stmt::Op(OpCode::Or) | Stmt::Op(OpCode::Xor) => {
+                    if stack.len() >= 2 {
+                        let b = stack.pop();
+                        let a = stack.pop();
+                        // Try to compute the result if both are known
+                        let result = match (a, b, stmt) {
+                            (Some(Some(av)), Some(Some(bv)), Stmt::Op(OpCode::Add)) =>
+                                Some(av.wrapping_add(bv)),
+                            (Some(Some(av)), Some(Some(bv)), Stmt::Op(OpCode::Sub)) =>
+                                Some(av.wrapping_sub(bv)),
+                            (Some(Some(av)), Some(Some(bv)), Stmt::Op(OpCode::Mul)) =>
+                                Some(av.wrapping_mul(bv)),
+                            _ => None,
+                        };
+                        stack.push(result);
+                    } else {
+                        stack.push(None);
+                    }
+                }
+                // Operations that invalidate tracking
+                Stmt::Op(OpCode::Oracle) | Stmt::Op(OpCode::Prophecy) |
+                Stmt::Op(OpCode::PresentRead) | Stmt::Op(OpCode::Input) => {
+                    stack.push(None); // Unknown value
+                }
+                _ => {
+                    // For other operations, conservatively mark as unknown
+                    stack.push(None);
+                }
+            }
+        }
+
+        // We need at least two values on the stack for comparison
+        if stack.len() >= 2 {
+            let b = stack.pop()?;
+            let a = stack.pop()?;
+            match (a, b) {
+                (Some(av), Some(bv)) => Some((av, bv)),
+                _ => None,
+            }
+        } else {
+            None
+        }
     }
 
     // ═══════════════════════════════════════════════════════════════════════

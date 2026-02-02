@@ -149,8 +149,8 @@ pub enum OpCode {
     // Bitwise Logic
     // ═══════════════════════════════════════════════════════════════════
     
-    /// Bitwise NOT.
-    /// Stack: ( a -- ~a )
+    /// Logical NOT: 0 -> 1, nonzero -> 0.
+    /// Stack: ( a -- !a )
     Not,
     
     /// Bitwise AND.

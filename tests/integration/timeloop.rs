@@ -261,8 +261,9 @@ mod divergence {
 
     #[test]
     fn multiplication_divergence() {
-        // Arrange: x * 2 = x only for x = 0, but 0 ORACLE starts non-zero
-        let code = "0 ORACLE 2 MUL 0 PROPHECY";
+        // Arrange: Start with at least 1, then x * 2 diverges (1 -> 2 -> 4 -> 8 -> ...)
+        // Using "1 MAX" ensures we start with at least 1 even if Oracle reads 0
+        let code = "0 ORACLE 1 MAX 2 MUL 0 PROPHECY";
         let config = config_with_epochs(30);
 
         // Act

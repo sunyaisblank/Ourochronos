@@ -658,6 +658,96 @@ impl fmt::Display for OuroError {
 impl std::error::Error for OuroError {}
 
 impl OuroError {
+    // ═══════════════════════════════════════════════════════════════════
+    // Error Construction Helpers
+    // ═══════════════════════════════════════════════════════════════════
+
+    /// Create an InvalidHandle error with default location.
+    #[inline]
+    pub fn invalid_handle(handle_type: &str, handle: u64, max_handle: u64) -> Self {
+        OuroError::InvalidHandle {
+            handle_type: handle_type.to_string(),
+            handle,
+            max_handle,
+            location: SourceLocation::default(),
+        }
+    }
+
+    /// Create an InvalidHandle error with specific location.
+    #[inline]
+    pub fn invalid_handle_at(handle_type: &str, handle: u64, max_handle: u64, location: SourceLocation) -> Self {
+        OuroError::InvalidHandle {
+            handle_type: handle_type.to_string(),
+            handle,
+            max_handle,
+            location,
+        }
+    }
+
+    /// Create a StackUnderflow error with default location.
+    #[inline]
+    pub fn stack_underflow(operation: &str, required: usize, available: usize) -> Self {
+        OuroError::StackUnderflow {
+            operation: operation.to_string(),
+            required,
+            available,
+            location: SourceLocation::default(),
+        }
+    }
+
+    /// Create a StackUnderflow error with specific location.
+    #[inline]
+    pub fn stack_underflow_at(operation: &str, required: usize, available: usize, location: SourceLocation) -> Self {
+        OuroError::StackUnderflow {
+            operation: operation.to_string(),
+            required,
+            available,
+            location,
+        }
+    }
+
+    /// Create an IndexOutOfBounds error with default location.
+    #[inline]
+    pub fn index_out_of_bounds(structure_type: &str, index: u64, length: u64) -> Self {
+        OuroError::IndexOutOfBounds {
+            structure_type: structure_type.to_string(),
+            index,
+            length,
+            location: SourceLocation::default(),
+        }
+    }
+
+    /// Create an IndexOutOfBounds error with specific location.
+    #[inline]
+    pub fn index_out_of_bounds_at(structure_type: &str, index: u64, length: u64, location: SourceLocation) -> Self {
+        OuroError::IndexOutOfBounds {
+            structure_type: structure_type.to_string(),
+            index,
+            length,
+            location,
+        }
+    }
+
+    /// Create an EmptyStructure error with default location.
+    #[inline]
+    pub fn empty_structure(structure_type: &str, operation: &str) -> Self {
+        OuroError::EmptyStructure {
+            structure_type: structure_type.to_string(),
+            operation: operation.to_string(),
+            location: SourceLocation::default(),
+        }
+    }
+
+    /// Create an EmptyStructure error with specific location.
+    #[inline]
+    pub fn empty_structure_at(structure_type: &str, operation: &str, location: SourceLocation) -> Self {
+        OuroError::EmptyStructure {
+            structure_type: structure_type.to_string(),
+            operation: operation.to_string(),
+            location,
+        }
+    }
+
     /// Check if this error is recoverable.
     pub fn is_recoverable(&self) -> bool {
         matches!(self,

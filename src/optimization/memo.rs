@@ -986,12 +986,41 @@ impl ParallelEvaluator {
 // Fixed Point Acceleration
 // ═══════════════════════════════════════════════════════════════════════════
 
+/// Machine epsilon for f64 (2^-52 ≈ 2.22e-16).
+/// This is the smallest value such that 1.0 + MACHINE_EPSILON != 1.0.
+const MACHINE_EPSILON: f64 = f64::EPSILON;
+
+/// Safe minimum for denominators to avoid division by near-zero.
+/// Uses sqrt(machine_epsilon) for balanced stability vs precision.
+const SAFE_DENOMINATOR_MIN: f64 = 1.4901161193847656e-8; // sqrt(2.22e-16)
+
+/// Default relative tolerance for convergence (relative to value magnitude).
+const DEFAULT_RELATIVE_TOLERANCE: f64 = 1e-10;
+
+/// Default absolute tolerance for convergence (for values near zero).
+const DEFAULT_ABSOLUTE_TOLERANCE: f64 = 1e-14;
+
 /// Accelerator for faster fixed-point convergence.
 ///
 /// Uses techniques like:
-/// - Aitken's delta-squared process
-/// - Anderson mixing
-/// - Memorized partial results
+/// - Aitken's delta-squared process (quadratic convergence)
+/// - Anderson mixing (m-step linear combination)
+/// - Adaptive method selection based on convergence pattern
+///
+/// # Numerical Stability
+///
+/// The accelerator implements several safeguards:
+/// - **Adaptive tolerance**: Uses relative tolerance for large values,
+///   absolute tolerance for values near zero
+/// - **Safe division**: Denominators below √ε are treated as zero
+/// - **Error tracking**: Accumulated error bounds are tracked per address
+/// - **Finite checks**: Non-finite results are rejected
+///
+/// # Machine Precision
+///
+/// f64 provides 52-bit mantissa (approximately 15-16 significant decimal digits).
+/// For integer values up to 2^52 (≈4.5×10^15), f64 is exact.
+/// Beyond this, some integers cannot be represented exactly.
 #[derive(Debug)]
 pub struct FixedPointAccelerator {
     /// History of memory states.
@@ -1000,6 +1029,10 @@ pub struct FixedPointAccelerator {
     max_history: usize,
     /// Acceleration method.
     method: AccelerationMethod,
+    /// Convergence tolerance configuration.
+    tolerance: ConvergenceTolerance,
+    /// Error tracking per address.
+    error_bounds: HashMap<u16, ErrorBound>,
     /// Statistics.
     stats: AcceleratorStats,
 }
@@ -1010,16 +1043,121 @@ pub enum AccelerationMethod {
     /// No acceleration (standard iteration).
     None,
     /// Aitken's delta-squared process.
+    /// Optimal for linearly convergent sequences with constant ratio.
     Aitken,
     /// Anderson mixing (m-step).
+    /// More robust for oscillatory or slowly convergent sequences.
     Anderson(usize),
-    /// Adaptive switching between methods.
+    /// Adaptive switching between methods based on convergence pattern.
     Adaptive,
 }
 
 impl Default for AccelerationMethod {
     fn default() -> Self {
         AccelerationMethod::Adaptive
+    }
+}
+
+/// Convergence tolerance configuration.
+///
+/// Uses combined relative-absolute tolerance:
+/// |a - b| ≤ max(absolute_tol, relative_tol * max(|a|, |b|))
+#[derive(Debug, Clone, Copy)]
+pub struct ConvergenceTolerance {
+    /// Relative tolerance (fraction of value magnitude).
+    pub relative: f64,
+    /// Absolute tolerance (for values near zero).
+    pub absolute: f64,
+}
+
+impl Default for ConvergenceTolerance {
+    fn default() -> Self {
+        Self {
+            relative: DEFAULT_RELATIVE_TOLERANCE,
+            absolute: DEFAULT_ABSOLUTE_TOLERANCE,
+        }
+    }
+}
+
+impl ConvergenceTolerance {
+    /// Create tolerance with specified relative and absolute bounds.
+    pub fn new(relative: f64, absolute: f64) -> Self {
+        Self { relative, absolute }
+    }
+
+    /// Create single-precision tolerance (~7 decimal digits).
+    pub fn single_precision() -> Self {
+        Self {
+            relative: 1e-6,
+            absolute: 1e-7,
+        }
+    }
+
+    /// Create double-precision tolerance (~15 decimal digits).
+    pub fn double_precision() -> Self {
+        Self {
+            relative: 1e-14,
+            absolute: 1e-15,
+        }
+    }
+
+    /// Create integer-exact tolerance (no floating point error allowed).
+    pub fn integer_exact() -> Self {
+        Self {
+            relative: 0.0,
+            absolute: 0.5, // Less than 0.5 means same integer when rounded
+        }
+    }
+
+    /// Check if two values are within tolerance.
+    #[inline]
+    pub fn is_within(&self, a: f64, b: f64) -> bool {
+        let diff = (a - b).abs();
+        let magnitude = a.abs().max(b.abs());
+        let tolerance = self.absolute.max(self.relative * magnitude);
+        diff <= tolerance
+    }
+
+    /// Compute the effective tolerance for a given magnitude.
+    #[inline]
+    pub fn effective_tolerance(&self, magnitude: f64) -> f64 {
+        self.absolute.max(self.relative * magnitude)
+    }
+}
+
+/// Error bound tracking for numerical stability analysis.
+#[derive(Debug, Clone, Default)]
+pub struct ErrorBound {
+    /// Accumulated absolute error bound.
+    pub accumulated_error: f64,
+    /// Number of operations contributing to error.
+    pub operation_count: u64,
+    /// Maximum observed delta between iterations.
+    pub max_delta: f64,
+    /// Convergence rate estimate (ratio of successive deltas).
+    pub convergence_rate: Option<f64>,
+}
+
+impl ErrorBound {
+    /// Update error bound after an acceleration step.
+    pub fn update(&mut self, delta: f64, prev_delta: Option<f64>) {
+        self.accumulated_error += delta.abs() * MACHINE_EPSILON;
+        self.operation_count += 1;
+        self.max_delta = self.max_delta.max(delta.abs());
+
+        // Estimate convergence rate from successive deltas
+        if let Some(pd) = prev_delta {
+            if pd.abs() > SAFE_DENOMINATOR_MIN {
+                let rate = delta.abs() / pd.abs();
+                self.convergence_rate = Some(rate);
+            }
+        }
+    }
+
+    /// Check if error bound is acceptable.
+    pub fn is_acceptable(&self, tolerance: &ConvergenceTolerance, magnitude: f64) -> bool {
+        let effective_tol = tolerance.effective_tolerance(magnitude);
+        self.accumulated_error < effective_tol
     }
 }
 
@@ -1034,6 +1172,10 @@ pub struct AcceleratorStats {
     pub acceleration_steps: usize,
     /// Current method being used.
     pub current_method: String,
+    /// Number of numerical stability rejections.
+    pub stability_rejections: usize,
+    /// Estimated overall convergence rate.
+    pub estimated_rate: Option<f64>,
 }
 
 impl Default for FixedPointAccelerator {
@@ -1043,7 +1185,7 @@ impl Default for FixedPointAccelerator {
 }
 
 impl FixedPointAccelerator {
-    /// Create a new accelerator.
+    /// Create a new accelerator with default settings.
     pub fn new() -> Self {
         Self::with_method(AccelerationMethod::Adaptive)
     }
@@ -1061,8 +1203,27 @@ impl FixedPointAccelerator {
             history: VecDeque::with_capacity(max_history),
             max_history,
             method,
+            tolerance: ConvergenceTolerance::default(),
+            error_bounds: HashMap::new(),
             stats: AcceleratorStats::default(),
         }
+    }
+
+    /// Create with custom tolerance.
+    pub fn with_tolerance(method: AccelerationMethod, tolerance: ConvergenceTolerance) -> Self {
+        let mut accel = Self::with_method(method);
+        accel.tolerance = tolerance;
+        accel
+    }
+
+    /// Set convergence tolerance.
+    pub fn set_tolerance(&mut self, tolerance: ConvergenceTolerance) {
+        self.tolerance = tolerance;
+    }
+
+    /// Get current tolerance configuration.
+    pub fn tolerance(&self) -> &ConvergenceTolerance {
+        &self.tolerance
     }
 
     /// Record a new iteration.
@@ -1085,6 +1246,19 @@ impl FixedPointAccelerator {
     }
 
     /// Aitken's delta-squared acceleration.
+    ///
+    /// Implements the formula: x* = x₂ - (Δx₂)² / (Δx₂ - Δx₁)
+    /// where Δxᵢ = xᵢ - xᵢ₋₁
+    ///
+    /// This accelerates linearly convergent sequences to quadratic convergence.
+    ///
+    /// # Numerical Stability
+    ///
+    /// The denominator (Δx₂ - Δx₁) can be problematic when:
+    /// - The sequence is already converged (denominator → 0)
+    /// - The convergence ratio is exactly 1 (denominator → 0)
+    ///
+    /// We use √(machine_epsilon) as the safe minimum denominator.
     fn aitken_accelerate(&mut self) -> Option<Memory> {
         if self.history.len() < 3 {
             return None;
@@ -1095,10 +1269,13 @@ impl FixedPointAccelerator {
         let x1 = &self.history[len - 2];
         let x2 = &self.history[len - 1];
 
-        // Apply Aitken's formula to each cell
         let mut result = x2.clone();
+        let mut any_accelerated = false;
+        let mut total_convergence_rate = 0.0;
+        let mut rate_count = 0;
 
-        for addr in 0..MEMORY_SIZE as u16 {
+        for addr in 0..(MEMORY_SIZE as u32) {
+            let addr = addr as u16;
             let v0 = x0.read(addr).val as f64;
             let v1 = x1.read(addr).val as f64;
             let v2 = x2.read(addr).val as f64;
@@ -1107,68 +1284,221 @@ impl FixedPointAccelerator {
             let delta2 = v2 - v1;
             let delta_delta = delta2 - delta1;
 
-            if delta_delta.abs() > 1e-10 {
+            // Check denominator is safe for division
+            // Use adaptive threshold based on value magnitude
+            let magnitude = v2.abs().max(v1.abs()).max(v0.abs());
+            let safe_denom = SAFE_DENOMINATOR_MIN.max(MACHINE_EPSILON * magnitude);
+
+            if delta_delta.abs() > safe_denom {
+                // Compute accelerated value using Aitken's formula
                 let accelerated = v2 - (delta2 * delta2) / delta_delta;
+
+                // Validate result
                 if accelerated.is_finite() && accelerated >= 0.0 {
-                    result.write(addr, Value::new(accelerated as u64));
+                    // Check if result is within reasonable bounds
+                    // Allow extrapolation up to 10x the max current value
+                    // This permits meaningful acceleration while preventing runaway
+                    let max_val = v2.max(v1).max(v0);
+                    let max_reasonable = max_val * 10.0 + 1000.0;
+
+                    if accelerated <= max_reasonable {
+                        result.write(addr, Value::new(accelerated.round() as u64));
+                        any_accelerated = true;
+
+                        // Update error tracking
+                        let error_bound = self.error_bounds.entry(addr).or_default();
+                        error_bound.update(delta2, Some(delta1));
+
+                        // Track convergence rate
+                        if delta1.abs() > safe_denom {
+                            let rate = delta2.abs() / delta1.abs();
+                            if rate.is_finite() && rate < 1.0 {
+                                total_convergence_rate += rate;
+                                rate_count += 1;
+                            }
+                        }
+                    }
+                } else {
+                    self.stats.stability_rejections += 1;
                 }
             }
         }
 
-        self.stats.acceleration_steps += 1;
-        self.stats.current_method = "Aitken".to_string();
-        Some(result)
+        if any_accelerated {
+            self.stats.acceleration_steps += 1;
+            self.stats.current_method = "Aitken".to_string();
+            if rate_count > 0 {
+                self.stats.estimated_rate = Some(total_convergence_rate / rate_count as f64);
+            }
+            Some(result)
+        } else {
+            None
+        }
     }
 
     /// Anderson mixing acceleration.
+    ///
+    /// Computes a weighted linear combination of recent iterates:
+    /// x* = Σᵢ wᵢ xᵢ / Σᵢ wᵢ
+    ///
+    /// The weights increase for more recent iterations (recency bias).
+    ///
+    /// # Parameters
+    /// - `m`: Number of previous iterates to mix (Anderson(m) uses m+1 total)
+    ///
+    /// # Numerical Stability
+    ///
+    /// Anderson mixing is more robust than Aitken for:
+    /// - Oscillatory sequences
+    /// - Slowly convergent sequences
+    /// - Sequences with varying convergence rates
     fn anderson_accelerate(&mut self, m: usize) -> Option<Memory> {
         if self.history.len() < m + 1 {
             return None;
         }
 
-        // Simple Anderson mixing: use weighted average of recent iterations
-        let weights: Vec<f64> = (0..=m).map(|i| {
-            1.0 / (m + 1) as f64 * (i + 1) as f64
-        }).collect();
+        // Compute weights with recency bias (more recent = higher weight)
+        // Using linearly increasing weights: w_i = (i+1) / sum
+        let weights: Vec<f64> = (0..=m).map(|i| (i + 1) as f64).collect();
+        let weight_sum: f64 = weights.iter().sum();
 
         let mut result = Memory::new();
+        let mut any_mixed = false;
 
-        for addr in 0..MEMORY_SIZE as u16 {
+        for addr in 0..(MEMORY_SIZE as u32) {
+            let addr = addr as u16;
             let mut weighted_sum = 0.0;
-            let mut weight_sum = 0.0;
+            let mut actual_weight_sum = 0.0;
+            let mut values: Vec<f64> = Vec::with_capacity(m + 1);
 
             for (i, weight) in weights.iter().enumerate() {
                 if i < self.history.len() {
                     let val = self.history[self.history.len() - 1 - i].read(addr).val as f64;
-                    weighted_sum += weight * val;
-                    weight_sum += weight;
+                    values.push(val);
+                    weighted_sum += (*weight / weight_sum) * val;
+                    actual_weight_sum += *weight / weight_sum;
                 }
             }
 
-            if weight_sum > 0.0 {
-                result.write(addr, Value::new((weighted_sum / weight_sum) as u64));
+            if actual_weight_sum > SAFE_DENOMINATOR_MIN {
+                let mixed_value = weighted_sum / actual_weight_sum;
+
+                // Validate the result
+                if mixed_value.is_finite() && mixed_value >= 0.0 {
+                    // Ensure mixed value is within reasonable range of inputs
+                    let min_val = values.iter().cloned().fold(f64::INFINITY, f64::min);
+                    let max_val = values.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+
+                    // Allow some extrapolation but not excessive
+                    let range = max_val - min_val;
+                    let safe_min = min_val - range * 0.5;
+                    let safe_max = max_val + range * 0.5;
+
+                    if mixed_value >= safe_min && mixed_value <= safe_max {
+                        result.write(addr, Value::new(mixed_value.round() as u64));
+                        any_mixed = true;
+
+                        // Update error tracking
+                        if values.len() >= 2 {
+                            let delta = values[0] - values[1];
+                            let prev_delta = if values.len() >= 3 {
+                                Some(values[1] - values[2])
+                            } else {
+                                None
+                            };
+                            let error_bound = self.error_bounds.entry(addr).or_default();
+                            error_bound.update(delta, prev_delta);
+                        }
+                    }
+                } else {
+                    self.stats.stability_rejections += 1;
+                }
             }
         }
 
-        self.stats.acceleration_steps += 1;
-        self.stats.current_method = format!("Anderson({})", m);
-        Some(result)
+        if any_mixed {
+            self.stats.acceleration_steps += 1;
+            self.stats.current_method = format!("Anderson({})", m);
+            Some(result)
+        } else {
+            None
+        }
     }
 
     /// Adaptive acceleration - switches methods based on convergence pattern.
+    ///
+    /// Strategy:
+    /// 1. Estimate convergence rate from recent history
+    /// 2. If rate < 0.5 (fast convergence): use Aitken
+    /// 3. If rate > 0.9 (slow/oscillatory): use Anderson with larger m
+    /// 4. Otherwise: use Anderson(2) as balanced default
     fn adaptive_accelerate(&mut self) -> Option<Memory> {
         if self.history.len() < 3 {
             return None;
         }
 
-        // Try Aitken first
-        let aitken_result = self.aitken_accelerate();
-        if aitken_result.is_some() {
-            return aitken_result;
+        // Estimate convergence rate from last two deltas
+        let len = self.history.len();
+        let x0 = &self.history[len - 3];
+        let x1 = &self.history[len - 2];
+        let x2 = &self.history[len - 1];
+
+        // Compute average convergence rate across non-trivial addresses
+        let mut total_rate = 0.0;
+        let mut rate_count = 0;
+
+        for addr in 0..(MEMORY_SIZE as u32) {
+            let addr = addr as u16;
+            let v0 = x0.read(addr).val as f64;
+            let v1 = x1.read(addr).val as f64;
+            let v2 = x2.read(addr).val as f64;
+
+            let delta1 = (v1 - v0).abs();
+            let delta2 = (v2 - v1).abs();
+
+            if delta1 > SAFE_DENOMINATOR_MIN && delta2 > SAFE_DENOMINATOR_MIN {
+                let rate = delta2 / delta1;
+                if rate.is_finite() && rate > 0.0 {
+                    total_rate += rate;
+                    rate_count += 1;
+                }
+            }
         }
 
-        // Fall back to Anderson
-        self.anderson_accelerate(2)
+        if rate_count == 0 {
+            // No measurable deltas - sequence may already be converged
+            return None;
+        }
+
+        let avg_rate = total_rate / rate_count as f64;
+        self.stats.estimated_rate = Some(avg_rate);
+
+        // Choose method based on convergence rate
+        if avg_rate < 0.5 {
+            // Fast convergence - Aitken is optimal
+            self.aitken_accelerate()
+        } else if avg_rate > 0.9 {
+            // Very slow or oscillatory - use more history with Anderson
+            self.anderson_accelerate(4)
+        } else {
+            // Moderate convergence - standard Anderson
+            self.anderson_accelerate(2)
+        }
+    }
+
+    /// Get error bound for a specific address.
+    pub fn error_bound(&self, addr: u16) -> Option<&ErrorBound> {
+        self.error_bounds.get(&addr)
+    }
+
+    /// Check if all active addresses have acceptable error bounds.
+    pub fn all_errors_acceptable(&self) -> bool {
+        self.error_bounds.iter().all(|(addr, bound)| {
+            let magnitude = self.history.back()
+                .map(|m| m.read(*addr).val as f64)
+                .unwrap_or(1.0);
+            bound.is_acceptable(&self.tolerance, magnitude)
+        })
     }
 
     /// Get statistics.

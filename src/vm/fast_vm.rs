@@ -616,7 +616,8 @@ impl FastExecutor {
             // ═══════════════════════════════════════════════════════════
             OpCode::Not => {
                 let a = self.stack.pop().ok_or("Stack underflow: NOT")?;
-                self.stack.push(!a);
+                // Logical NOT: 0 -> 1, nonzero -> 0
+                self.stack.push(if a == 0 { 1 } else { 0 });
                 Ok(())
             }
 

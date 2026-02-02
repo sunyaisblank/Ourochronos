@@ -232,9 +232,10 @@ mod information_flow {
     #[test]
     fn conditional_on_future_information() {
         // Decision based on oracle value
+        // Use GTE so that when value reaches 10, it stays at 10 (fixed point)
         let code = r#"
             0 ORACLE
-            DUP 10 GT IF {
+            DUP 10 GTE IF {
                 10 0 PROPHECY
             } ELSE {
                 DUP 1 ADD 0 PROPHECY
@@ -267,8 +268,10 @@ mod information_flow {
     #[test]
     fn multiple_oracle_reads() {
         // Reading from multiple oracle addresses
+        // Write the sum to addr 0, and the same sum to addr 1
         let code = r#"
             0 ORACLE 1 ORACLE ADD
+            DUP
             0 PROPHECY
             1 PROPHECY
         "#;

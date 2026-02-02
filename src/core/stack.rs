@@ -394,4 +394,249 @@ mod tests {
         let result = stack.pop_n(5, "test", loc);
         assert!(result.is_err());
     }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Edge Case Tests
+    // ═══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_pick_zero_equals_peek() {
+        // pick(0) should be equivalent to dup (copy top element)
+        let mut stack = Stack::new();
+        let loc = SourceLocation::default();
+
+        stack.push(Value::new(42));
+        stack.push(Value::new(100));
+
+        // Pick 0 copies the top element
+        stack.pick_checked(0, loc.clone()).unwrap();
+
+        // Stack should be: [42, 100, 100]
+        assert_eq!(stack.depth(), 3);
+        assert_eq!(stack.peek().unwrap().val, 100);
+
+        // Verify by popping
+        assert_eq!(stack.pop().unwrap().val, 100);
+        assert_eq!(stack.pop().unwrap().val, 100);
+        assert_eq!(stack.pop().unwrap().val, 42);
+    }
+
+    #[test]
+    fn test_reverse_zero() {
+        // reverse(0) should be a no-op
+        let mut stack = Stack::new();
+        let loc = SourceLocation::default();
+
+        stack.push(Value::new(1));
+        stack.push(Value::new(2));
+        stack.push(Value::new(3));
+
+        // Reverse 0 elements - should succeed and do nothing
+        stack.reverse_checked(0, loc).unwrap();
+
+        assert_eq!(stack.depth(), 3);
+        assert_eq!(stack.pop().unwrap().val, 3);
+        assert_eq!(stack.pop().unwrap().val, 2);
+        assert_eq!(stack.pop().unwrap().val, 1);
+    }
+
+    #[test]
+    fn test_reverse_one() {
+        // reverse(1) should be a no-op
+        let mut stack = Stack::new();
+        let loc = SourceLocation::default();
+
+        stack.push(Value::new(1));
+        stack.push(Value::new(2));
+        stack.push(Value::new(3));
+
+        // Reverse 1 element - should succeed and do nothing
+        stack.reverse_checked(1, loc).unwrap();
+
+        assert_eq!(stack.depth(), 3);
+        assert_eq!(stack.pop().unwrap().val, 3);
+        assert_eq!(stack.pop().unwrap().val, 2);
+        assert_eq!(stack.pop().unwrap().val, 1);
+    }
+
+    #[test]
+    fn test_max_depth_with_dup() {
+        // dup should respect max_depth
+        let mut stack = Stack::with_max_depth(3);
+        let loc = SourceLocation::default();
+
+        stack.push_checked(Value::new(1), loc.clone()).unwrap();
+        stack.push_checked(Value::new(2), loc.clone()).unwrap();
+        stack.push_checked(Value::new(3), loc.clone()).unwrap();
+
+        // Stack is full, dup should fail
+        let result = stack.dup_checked(loc);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_max_depth_with_over() {
+        // over should respect max_depth
+        let mut stack = Stack::with_max_depth(3);
+        let loc = SourceLocation::default();
+
+        stack.push_checked(Value::new(1), loc.clone()).unwrap();
+        stack.push_checked(Value::new(2), loc.clone()).unwrap();
+        stack.push_checked(Value::new(3), loc.clone()).unwrap();
+
+        // Stack is full, over should fail
+        let result = stack.over_checked(loc);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_max_depth_with_pick() {
+        // pick should respect max_depth
+        let mut stack = Stack::with_max_depth(3);
+        let loc = SourceLocation::default();
+
+        stack.push_checked(Value::new(1), loc.clone()).unwrap();
+        stack.push_checked(Value::new(2), loc.clone()).unwrap();
+        stack.push_checked(Value::new(3), loc.clone()).unwrap();
+
+        // Stack is full, pick should fail
+        let result = stack.pick_checked(1, loc);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_pop_n_equals_depth() {
+        // pop_n with n == depth should empty the stack
+        let mut stack = Stack::new();
+        let loc = SourceLocation::default();
+
+        stack.push(Value::new(1));
+        stack.push(Value::new(2));
+        stack.push(Value::new(3));
+
+        let values = stack.pop_n(3, "test", loc).unwrap();
+
+        assert_eq!(values.len(), 3);
+        assert_eq!(values[0].val, 1);
+        assert_eq!(values[1].val, 2);
+        assert_eq!(values[2].val, 3);
+        assert!(stack.is_empty());
+        assert_eq!(stack.depth(), 0);
+    }
+
+    #[test]
+    fn test_pop_n_zero() {
+        // pop_n(0) should return empty vec without modifying stack
+        let mut stack = Stack::new();
+        let loc = SourceLocation::default();
+
+        stack.push(Value::new(1));
+        stack.push(Value::new(2));
+
+        let values = stack.pop_n(0, "test", loc).unwrap();
+
+        assert_eq!(values.len(), 0);
+        assert_eq!(stack.depth(), 2);
+    }
+
+    #[test]
+    fn test_roll_zero() {
+        // roll(0) should be a no-op (move top to top)
+        let mut stack = Stack::new();
+        let loc = SourceLocation::default();
+
+        stack.push(Value::new(1));
+        stack.push(Value::new(2));
+        stack.push(Value::new(3));
+
+        stack.roll_checked(0, loc).unwrap();
+
+        assert_eq!(stack.depth(), 3);
+        assert_eq!(stack.pop().unwrap().val, 3);
+        assert_eq!(stack.pop().unwrap().val, 2);
+        assert_eq!(stack.pop().unwrap().val, 1);
+    }
+
+    #[test]
+    fn test_swap_on_two_elements() {
+        // swap on exactly 2 elements
+        let mut stack = Stack::new();
+        let loc = SourceLocation::default();
+
+        stack.push(Value::new(1));
+        stack.push(Value::new(2));
+
+        stack.swap_checked(loc).unwrap();
+
+        assert_eq!(stack.pop().unwrap().val, 1);
+        assert_eq!(stack.pop().unwrap().val, 2);
+    }
+
+    #[test]
+    fn test_rot_on_exactly_three() {
+        // rot on exactly 3 elements
+        let mut stack = Stack::new();
+        let loc = SourceLocation::default();
+
+        stack.push(Value::new(1));
+        stack.push(Value::new(2));
+        stack.push(Value::new(3));
+
+        // ROT: (1 2 3 -- 2 3 1)
+        stack.rot_checked(loc).unwrap();
+
+        assert_eq!(stack.pop().unwrap().val, 1);
+        assert_eq!(stack.pop().unwrap().val, 3);
+        assert_eq!(stack.pop().unwrap().val, 2);
+        assert!(stack.is_empty());
+    }
+
+    #[test]
+    fn test_require_on_exact_depth() {
+        // require(n) should succeed when depth == n
+        let mut stack = Stack::new();
+        let loc = SourceLocation::default();
+
+        stack.push(Value::new(1));
+        stack.push(Value::new(2));
+
+        let result = stack.require(2, "test", loc);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_require_on_greater_depth() {
+        // require(n) should succeed when depth > n
+        let mut stack = Stack::new();
+        let loc = SourceLocation::default();
+
+        stack.push(Value::new(1));
+        stack.push(Value::new(2));
+        stack.push(Value::new(3));
+
+        let result = stack.require(2, "test", loc);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_pop_or_zero_empty() {
+        // pop_or_zero on empty stack returns ZERO
+        let mut stack = Stack::new();
+        let val = stack.pop_or_zero();
+        assert_eq!(val.val, 0);
+    }
+
+    #[test]
+    fn test_unlimited_depth_stack() {
+        // Stack with max_depth = 0 allows unlimited pushes
+        let mut stack = Stack::new();
+        let loc = SourceLocation::default();
+
+        // Push many elements (no limit)
+        for i in 0..1000 {
+            stack.push_checked(Value::new(i), loc.clone()).unwrap();
+        }
+
+        assert_eq!(stack.depth(), 1000);
+    }
 }

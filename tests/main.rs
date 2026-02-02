@@ -13,6 +13,10 @@
 //! - **benchmark**: Performance comparison tests
 //!   - VM vs FastVM performance
 //!   - JIT compilation benchmarks
+//! - **stress**: Heavy load stress tests (ignored by default)
+//!   - Memory operations
+//!   - Provenance merges
+//!   - Stack operations
 //!
 //! ## Running Tests
 //!
@@ -26,6 +30,9 @@
 //! # Run benchmarks (release mode recommended)
 //! cargo test --test main benchmark --release -- --nocapture
 //!
+//! # Run stress tests (ignored by default)
+//! cargo test --test main stress --release -- --ignored
+//!
 //! # Run with output
 //! cargo test --test main -- --nocapture
 //! ```
@@ -33,6 +40,7 @@
 mod common;
 mod integration;
 mod benchmark;
+mod stress;
 
 // Re-export test modules for test organisation
 pub use integration::*;

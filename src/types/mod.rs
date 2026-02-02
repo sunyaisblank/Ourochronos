@@ -498,38 +498,153 @@ impl EffectSet {
     }
 }
 
-/// Type error during checking.
+/// Kind of type error for categorization and handling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TypeErrorKind {
+    /// Stack underflow during operation.
+    StackUnderflow,
+    /// Type mismatch in operation.
+    TypeMismatch,
+    /// Linear value illegally duplicated (DUP, OVER, PICK on ORACLE result).
+    LinearityViolation,
+    /// Effect declaration doesn't match actual effects.
+    EffectViolation,
+    /// Temporal type error (e.g., temporal address in ORACLE).
+    TemporalError,
+    /// Unknown or undefined identifier.
+    UndefinedIdentifier,
+    /// Other/generic error.
+    Other,
+}
+
+impl TypeErrorKind {
+    /// Get a human-readable name for this error kind.
+    pub fn name(&self) -> &'static str {
+        match self {
+            TypeErrorKind::StackUnderflow => "stack underflow",
+            TypeErrorKind::TypeMismatch => "type mismatch",
+            TypeErrorKind::LinearityViolation => "linearity violation",
+            TypeErrorKind::EffectViolation => "effect violation",
+            TypeErrorKind::TemporalError => "temporal error",
+            TypeErrorKind::UndefinedIdentifier => "undefined identifier",
+            TypeErrorKind::Other => "error",
+        }
+    }
+
+    /// Check if this error is a linearity violation.
+    pub fn is_linearity(&self) -> bool {
+        matches!(self, TypeErrorKind::LinearityViolation)
+    }
+}
+
+/// Type error during checking with full source location support.
 #[derive(Debug, Clone)]
 pub struct TypeError {
     /// Description of the error.
     pub message: String,
+    /// Kind of error for categorization.
+    pub kind: TypeErrorKind,
     /// Location hint (statement index).
     pub location: Option<usize>,
+    /// Source span (line, column) if available.
+    pub line: Option<usize>,
+    pub column: Option<usize>,
+    /// Optional help text.
+    pub help: Option<String>,
+    /// Optional note.
+    pub note: Option<String>,
 }
 
 impl TypeError {
     pub fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
+            kind: TypeErrorKind::Other,
             location: None,
+            line: None,
+            column: None,
+            help: None,
+            note: None,
         }
     }
-    
+
+    /// Create a linearity violation error.
+    pub fn linearity(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            kind: TypeErrorKind::LinearityViolation,
+            location: None,
+            line: None,
+            column: None,
+            help: Some("Linear values from ORACLE can only be used once. Use SWAP/ROT to move them without duplication.".to_string()),
+            note: None,
+        }
+    }
+
+    /// Create a stack underflow error.
+    pub fn stack_underflow(operation: &str, required: usize, available: usize) -> Self {
+        Self {
+            message: format!("{} requires {} element(s) but stack has {}", operation, required, available),
+            kind: TypeErrorKind::StackUnderflow,
+            location: None,
+            line: None,
+            column: None,
+            help: None,
+            note: None,
+        }
+    }
+
+    pub fn with_kind(mut self, kind: TypeErrorKind) -> Self {
+        self.kind = kind;
+        self
+    }
+
     pub fn with_location(mut self, loc: usize) -> Self {
         self.location = Some(loc);
+        self
+    }
+
+    pub fn with_line_col(mut self, line: usize, column: usize) -> Self {
+        self.line = Some(line);
+        self.column = Some(column);
+        self
+    }
+
+    pub fn with_help(mut self, help: impl Into<String>) -> Self {
+        self.help = Some(help.into());
+        self
+    }
+
+    pub fn with_note(mut self, note: impl Into<String>) -> Self {
+        self.note = Some(note.into());
         self
     }
 }
 
 impl std::fmt::Display for TypeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if let Some(loc) = self.location {
-            write!(f, "[stmt {}] {}", loc, self.message)
-        } else {
-            write!(f, "{}", self.message)
+        // Format: "error[E0001]: message at line:col"
+        write!(f, "error[{}]", self.kind.name())?;
+
+        if let (Some(line), Some(col)) = (self.line, self.column) {
+            write!(f, " at {}:{}", line, col)?;
+        } else if let Some(loc) = self.location {
+            write!(f, " at stmt {}", loc)?;
         }
+
+        write!(f, ": {}", self.message)?;
+
+        if let Some(help) = &self.help {
+            write!(f, "\n  = help: {}", help)?;
+        }
+        if let Some(note) = &self.note {
+            write!(f, "\n  = note: {}", note)?;
+        }
+        Ok(())
     }
 }
+
+impl std::error::Error for TypeError {}
 
 /// Result of type checking.
 #[derive(Debug, Clone)]
@@ -628,6 +743,9 @@ pub struct TypeChecker {
 }
 
 /// A linearity violation detected during type checking.
+///
+/// Linear types (from ORACLE) can only be used once. Attempting to duplicate
+/// them via DUP, OVER, or PICK is a compile-time error in strict mode.
 #[derive(Debug, Clone)]
 pub struct LinearityViolation {
     /// The operation that caused the violation.
@@ -636,6 +754,30 @@ pub struct LinearityViolation {
     pub message: String,
     /// Statement index where violation occurred.
     pub stmt_index: usize,
+    /// The type that was illegally duplicated.
+    pub violating_type: StackType,
+    /// Stack position of the linear value (for OVER/PICK).
+    pub stack_position: Option<usize>,
+}
+
+impl LinearityViolation {
+    /// Convert this violation to a TypeError for unified error handling.
+    pub fn to_type_error(&self) -> TypeError {
+        TypeError::linearity(&self.message)
+            .with_location(self.stmt_index)
+            .with_note(format!(
+                "The {} operation attempted to duplicate a linear value (type: {})",
+                self.operation,
+                self.violating_type.describe()
+            ))
+    }
+}
+
+impl std::fmt::Display for LinearityViolation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "linearity violation at stmt {}: {} - {}",
+            self.stmt_index, self.operation, self.message)
+    }
 }
 
 impl TypeChecker {
@@ -920,19 +1062,12 @@ impl TypeChecker {
 
             OpCode::Pick => {
                 let _ = self.pop_type(); // index
-                // PICK duplicates a value at a computed index
-                // We can't statically check which element, so warn conservatively
-                // if any stack element is linear
-                for (i, st) in self.stack.iter().enumerate() {
-                    if st.is_linear() {
-                        self.warnings.push(format!(
-                            "PICK at stmt {} may duplicate linear value at position {}",
-                            self.stmt_index, i
-                        ));
-                        break;
-                    }
-                }
-                // Result type is unknown but unrestricted
+                // PICK duplicates a value at a computed index.
+                // Since we can't statically determine which element will be picked,
+                // we must conservatively reject if ANY stack element is linear.
+                // This is strict but sound - it prevents potential linear duplication.
+                self.check_stack_has_no_linear("PICK");
+                // Result type is unknown but unrestricted (we've validated no linear)
                 self.stack.push(StackType::UNKNOWN);
             }
             
@@ -1323,6 +1458,9 @@ impl TypeChecker {
     }
 
     /// Check if the top of stack can be duplicated (not linear).
+    ///
+    /// In strict mode (default), duplicating a linear value is a compile error.
+    /// Linear values come from ORACLE and can only be consumed once.
     fn check_can_duplicate(&mut self, operation: &str) -> bool {
         let top = self.peek_type();
         if top.is_linear() {
@@ -1334,6 +1472,8 @@ impl TypeChecker {
                     top.describe()
                 ),
                 stmt_index: self.stmt_index,
+                violating_type: top,
+                stack_position: Some(0),
             };
             if self.strict_linearity {
                 self.linear_violations.push(violation);
@@ -1350,8 +1490,11 @@ impl TypeChecker {
     }
 
     /// Check if a specific stack position can be duplicated.
+    ///
+    /// Used for OVER (index 1) and PICK (dynamic index).
     fn check_can_duplicate_at(&mut self, index: usize, operation: &str) -> bool {
-        if let Some(st) = self.stack.get(self.stack.len().saturating_sub(1 + index)) {
+        let stack_idx = self.stack.len().saturating_sub(1 + index);
+        if let Some(st) = self.stack.get(stack_idx).copied() {
             if st.is_linear() {
                 let violation = LinearityViolation {
                     operation: operation.to_string(),
@@ -1362,6 +1505,8 @@ impl TypeChecker {
                         st.describe()
                     ),
                     stmt_index: self.stmt_index,
+                    violating_type: st,
+                    stack_position: Some(index),
                 };
                 if self.strict_linearity {
                     self.linear_violations.push(violation);
@@ -1369,6 +1514,37 @@ impl TypeChecker {
                     self.warnings.push(format!(
                         "Warning at stmt {}: {} of linear value at index {}",
                         self.stmt_index, operation, index
+                    ));
+                }
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Check if any element on the stack is linear (for PICK with dynamic index).
+    ///
+    /// Returns true if all elements are safe to duplicate, false if any are linear.
+    fn check_stack_has_no_linear(&mut self, operation: &str) -> bool {
+        for (i, st) in self.stack.iter().enumerate().rev() {
+            if st.is_linear() {
+                let violation = LinearityViolation {
+                    operation: operation.to_string(),
+                    message: format!(
+                        "{} may duplicate linear value at position {} (type: {}). \
+                         Cannot statically verify safety with dynamic index.",
+                        operation, self.stack.len() - 1 - i, st.describe()
+                    ),
+                    stmt_index: self.stmt_index,
+                    violating_type: *st,
+                    stack_position: Some(self.stack.len() - 1 - i),
+                };
+                if self.strict_linearity {
+                    self.linear_violations.push(violation);
+                } else {
+                    self.warnings.push(format!(
+                        "Warning at stmt {}: {} may duplicate linear value at position {}",
+                        self.stmt_index, operation, self.stack.len() - 1 - i
                     ));
                 }
                 return false;
@@ -1702,14 +1878,29 @@ mod tests {
     }
 
     #[test]
-    fn test_pick_linear_warning() {
-        // PICK with linear values on stack should produce warnings
+    fn test_pick_linear_violation() {
+        // PICK with linear values on stack should produce linearity violation
+        // (stricter than before - now an error, not just a warning)
         let result = check("0 ORACLE 1 2 3 1 PICK");
 
-        // PICK at runtime index may duplicate linear value - should warn
-        // The warning is in result.warnings, not linear_violations
-        // because we can't statically determine which element is picked
-        assert!(!result.warnings.is_empty());
+        // PICK at runtime index may duplicate linear value - now a compile error
+        // Since we can't statically verify which element is picked, we must
+        // conservatively reject if ANY stack element is linear
+        assert!(result.has_linear_violations());
+        let pick_violations: Vec<_> = result.linear_violations.iter()
+            .filter(|v| v.operation == "PICK")
+            .collect();
+        assert!(!pick_violations.is_empty(), "Expected PICK linearity violation");
+    }
+
+    #[test]
+    fn test_pick_without_linear_is_ok() {
+        // PICK without linear values on stack should be fine
+        let result = check("1 2 3 4 1 PICK");
+
+        // No linear violations since no ORACLE values
+        assert!(!result.has_linear_violations());
+        assert!(result.is_valid);
     }
 
     #[test]
