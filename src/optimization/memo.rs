@@ -105,7 +105,6 @@ struct CacheEntry {
     result: MemoizedResult,
     access_count: usize,
     last_access: Instant,
-    validated: bool,
 }
 
 impl CacheEntry {
@@ -114,7 +113,6 @@ impl CacheEntry {
             result,
             access_count: 1,
             last_access: Instant::now(),
-            validated: false,
         }
     }
 
@@ -249,7 +247,7 @@ impl EpochCache {
         for &dep_hash in depends_on {
             self.dependencies
                 .entry(dep_hash)
-                .or_insert_with(HashSet::new)
+                .or_default()
                 .insert(hash);
         }
         self.store_by_hash(hash, result);
@@ -1038,7 +1036,7 @@ pub struct FixedPointAccelerator {
 }
 
 /// Acceleration methods for fixed-point computation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AccelerationMethod {
     /// No acceleration (standard iteration).
     None,
@@ -1049,13 +1047,8 @@ pub enum AccelerationMethod {
     /// More robust for oscillatory or slowly convergent sequences.
     Anderson(usize),
     /// Adaptive switching between methods based on convergence pattern.
+    #[default]
     Adaptive,
-}
-
-impl Default for AccelerationMethod {
-    fn default() -> Self {
-        AccelerationMethod::Adaptive
-    }
 }
 
 /// Convergence tolerance configuration.

@@ -241,8 +241,6 @@ fn detect_pure_pattern(analysis: &TraceAnalysis) -> TracePattern {
         } else {
             TracePattern::CounterLoop
         }
-    } else if analysis.has_loop {
-        TracePattern::Generic
     } else {
         TracePattern::Generic
     }

@@ -21,7 +21,7 @@
 //! let optimizer = Optimizer::with_profile(OptLevel::Aggressive, profile_data);
 //! ```
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use std::fmt;
 
@@ -455,7 +455,7 @@ impl Profiler {
     pub fn record_loop_iteration(&mut self, loop_id: usize, iteration_count: usize) {
         self.loop_iteration_counts
             .entry(loop_id)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(iteration_count);
     }
 
@@ -553,7 +553,7 @@ impl Profiler {
                     let total = taken + not_taken;
                     if total >= 10 {
                         let prob = taken as f64 / total as f64;
-                        if prob > 0.8 || prob < 0.2 {
+                        if !(0.2..=0.8).contains(&prob) {
                             Some((id, prob > 0.5))
                         } else {
                             None

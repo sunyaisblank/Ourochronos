@@ -13,10 +13,27 @@ use std::fmt;
 use super::address::Address;
 use super::address::MEMORY_SIZE;
 
-/// Maximum number of unique addresses in a provenance set before saturation.
+/// Default maximum number of unique addresses in a provenance set before saturation.
 /// Once exceeded, the set is replaced with a `Saturated` sentinel meaning
 /// "depends on all addresses", bounding merge overhead to O(1).
-pub const PROVENANCE_SATURATION_LIMIT: usize = 256;
+pub const DEFAULT_PROVENANCE_SATURATION_LIMIT: usize = 256;
+
+use std::cell::Cell;
+
+thread_local! {
+    static SATURATION_LIMIT: Cell<usize> = const { Cell::new(DEFAULT_PROVENANCE_SATURATION_LIMIT) };
+}
+
+/// Set the provenance saturation limit for the current thread.
+/// Intended to be called once at startup; remains constant during execution.
+pub fn set_saturation_limit(limit: usize) {
+    SATURATION_LIMIT.with(|cell| cell.set(limit));
+}
+
+/// Get the current provenance saturation limit.
+pub fn saturation_limit() -> usize {
+    SATURATION_LIMIT.with(|cell| cell.get())
+}
 
 /// Provenance tracks which anamnesis cells a value depends on.
 ///
@@ -80,7 +97,7 @@ impl Provenance {
     pub fn from_set(addrs: BTreeSet<Address>) -> Self {
         if addrs.is_empty() {
             Self::none()
-        } else if addrs.len() > PROVENANCE_SATURATION_LIMIT {
+        } else if addrs.len() > saturation_limit() {
             Self::saturated()
         } else {
             Self { deps: Some(Arc::new(addrs)), saturated: false }
@@ -110,7 +127,7 @@ impl Provenance {
     /// - Returns Saturated immediately if either operand is saturated
     /// - Returns existing Arc if both point to same set (Arc::ptr_eq)
     /// - Reuses larger set without cloning if smaller is a subset
-    /// - Saturates if the merged set exceeds PROVENANCE_SATURATION_LIMIT
+    /// - Saturates if the merged set exceeds the saturation limit
     #[cold]
     #[inline(never)]
     fn merge_slow(&self, other: &Self) -> Self {
@@ -138,7 +155,7 @@ impl Provenance {
                 let mut new_set = (**d1).clone();
                 new_set.extend(d2.iter().copied());
                 // Check saturation threshold
-                if new_set.len() > PROVENANCE_SATURATION_LIMIT {
+                if new_set.len() > saturation_limit() {
                     return Self::saturated();
                 }
                 Self { deps: Some(Arc::new(new_set)), saturated: false }
@@ -613,10 +630,10 @@ mod tests {
 
     #[test]
     fn test_saturation_triggered_by_chain_merge() {
-        // Merging more than PROVENANCE_SATURATION_LIMIT single-address provenances
+        // Merging more than DEFAULT_PROVENANCE_SATURATION_LIMIT single-address provenances
         // should trigger saturation.
         let mut accumulated = Provenance::none();
-        for i in 0..(PROVENANCE_SATURATION_LIMIT + 50) {
+        for i in 0..(DEFAULT_PROVENANCE_SATURATION_LIMIT + 50) {
             accumulated = accumulated.merge(&Provenance::single(i as Address));
         }
         assert!(accumulated.is_saturated(), "Should be saturated after exceeding limit");
@@ -658,11 +675,11 @@ mod tests {
     #[test]
     fn test_below_threshold_not_saturated() {
         let mut accumulated = Provenance::none();
-        for i in 0..PROVENANCE_SATURATION_LIMIT {
+        for i in 0..DEFAULT_PROVENANCE_SATURATION_LIMIT {
             accumulated = accumulated.merge(&Provenance::single(i as Address));
         }
         assert!(!accumulated.is_saturated(), "Exactly at threshold should not saturate");
-        assert_eq!(accumulated.dependency_count(), PROVENANCE_SATURATION_LIMIT);
+        assert_eq!(accumulated.dependency_count(), DEFAULT_PROVENANCE_SATURATION_LIMIT);
     }
 
     #[test]
@@ -670,5 +687,26 @@ mod tests {
         let p = Provenance::saturated();
         let debug = format!("{:?}", p);
         assert!(debug.contains("Saturated"), "Debug output should indicate saturation");
+    }
+
+    #[test]
+    fn test_configurable_saturation_limit() {
+        // Save original limit
+        let original = saturation_limit();
+
+        // Set a low limit
+        set_saturation_limit(10);
+        assert_eq!(saturation_limit(), 10);
+
+        // Merge 15 provenances - should saturate at 10
+        let mut accumulated = Provenance::none();
+        for i in 0..15 {
+            accumulated = accumulated.merge(&Provenance::single(i as Address));
+        }
+        assert!(accumulated.is_saturated(), "Should saturate with limit of 10 after 15 merges");
+
+        // Restore original limit
+        set_saturation_limit(original);
+        assert_eq!(saturation_limit(), original);
     }
 }

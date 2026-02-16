@@ -64,7 +64,7 @@ pub enum TraceOp {
 #[derive(Debug, Clone)]
 enum CompiledTrace {
     /// Specialised Rust function for this trace pattern.
-    Specialised(TracePattern),
+    Specialised(()),
     /// Native code pointer (with Cranelift).
     #[cfg(feature = "jit")]
     Native(*const u8),
@@ -710,12 +710,7 @@ impl<'a> TemporalContext<'a> {
     pub fn is_within_threshold(&self, addr: u16) -> bool {
         let oracle_val = self.anamnesis.read(addr).val;
         let present_val = self.present.read(addr).val;
-        let diff = if oracle_val > present_val {
-            oracle_val - present_val
-        } else {
-            present_val - oracle_val
-        };
-        diff <= self.convergence_threshold
+        oracle_val.abs_diff(present_val) <= self.convergence_threshold
     }
 }
 
@@ -735,8 +730,7 @@ pub struct TemporalExecutionResult {
 impl Trace {
     /// Compile this trace to specialised code.
     pub fn compile(&mut self) {
-        let pattern = self.detect_pattern();
-        self.compiled_fn = Some(CompiledTrace::Specialised(pattern));
+        self.compiled_fn = Some(CompiledTrace::Specialised(()));
         self.compiled = true;
     }
 
@@ -1042,7 +1036,7 @@ impl TracingJit {
     /// This is the public interface for JIT execution.
     pub fn execute_fibonacci_trace_direct(
         &mut self,
-        stack: &mut Vec<u64>,
+        stack: &mut [u64],
         iterations_limit: u64,
     ) -> Result<u64, String> {
         self.stats.compiled_executions += 1;
@@ -1060,7 +1054,7 @@ impl TracingJit {
     /// So we must increment counter, THEN do fib step.
     fn execute_fibonacci_trace(
         &mut self,
-        stack: &mut Vec<u64>,
+        stack: &mut [u64],
         iterations_limit: u64,
     ) -> Result<u64, String> {
         // Stack layout for Fibonacci: ... start_time a b counter
@@ -1130,7 +1124,7 @@ impl TracingJit {
     /// Loop: sum += counter; counter += 1
     fn execute_sum_trace(
         &mut self,
-        stack: &mut Vec<u64>,
+        stack: &mut [u64],
         iterations_limit: u64,
     ) -> Result<u64, String> {
         if stack.len() < 2 {
@@ -1172,7 +1166,7 @@ impl TracingJit {
     /// Loop: result *= counter; counter -= 1
     fn execute_factorial_trace(
         &mut self,
-        stack: &mut Vec<u64>,
+        stack: &mut [u64],
         iterations_limit: u64,
     ) -> Result<u64, String> {
         if stack.len() < 2 {
@@ -1205,7 +1199,7 @@ impl TracingJit {
     /// Loop: result *= base; exponent -= 1
     fn execute_power_trace(
         &mut self,
-        stack: &mut Vec<u64>,
+        stack: &mut [u64],
         _iterations_limit: u64,
     ) -> Result<u64, String> {
         if stack.len() < 3 {
@@ -1249,7 +1243,7 @@ impl TracingJit {
     /// Loop: result = (result * base) % modulus; exponent -= 1
     fn execute_modpower_trace(
         &mut self,
-        stack: &mut Vec<u64>,
+        stack: &mut [u64],
         _iterations_limit: u64,
     ) -> Result<u64, String> {
         if stack.len() < 4 {
@@ -1298,7 +1292,7 @@ impl TracingJit {
     /// Algorithm: Euclidean GCD
     fn execute_gcd_trace(
         &mut self,
-        stack: &mut Vec<u64>,
+        stack: &mut [u64],
     ) -> Result<u64, String> {
         if stack.len() < 2 {
             return Err("Stack too small for GCD trace".to_string());
@@ -1329,7 +1323,7 @@ impl TracingJit {
     /// Stack layout: [current_minmax, value]
     fn execute_minmax_trace(
         &mut self,
-        stack: &mut Vec<u64>,
+        stack: &mut [u64],
         iterations_limit: u64,
     ) -> Result<u64, String> {
         if stack.len() < 2 {
@@ -1365,7 +1359,7 @@ impl TracingJit {
     /// Common patterns: popcount, leading zeros, etc.
     fn execute_bitwise_trace(
         &mut self,
-        stack: &mut Vec<u64>,
+        stack: &mut [u64],
         _iterations_limit: u64,
     ) -> Result<u64, String> {
         if stack.len() < 2 {
@@ -1482,7 +1476,7 @@ impl TracingJit {
             let step = if oracle_val < expected {
                 (expected - oracle_val).min(iterations_limit / 10 + 1)
             } else {
-                ((oracle_val - expected).min(iterations_limit / 10 + 1)) as u64
+                (oracle_val - expected).min(iterations_limit / 10 + 1)
             };
 
             let new_val = if oracle_val < expected {
@@ -2251,9 +2245,7 @@ impl JitFastExecutor {
             let jit_pattern = self.jit.on_loop_header(header_hash);
 
             // Try JIT execution for known patterns
-            if let Some(pattern) = jit_pattern {
-                match pattern {
-                    TracePattern::FibonacciStep => {
+            if let Some(TracePattern::FibonacciStep) = jit_pattern {
                 // For Fibonacci, we need to extract the iteration limit
                 // The condition is typically: DUP ITERATIONS LT
                 // We evaluate it once to see if we should continue, and extract the limit
@@ -2298,11 +2290,6 @@ impl JitFastExecutor {
                             // If still true, continue with interpreted execution
                             // (shouldn't happen if we calculated limit correctly)
                         }
-                    }
-                }
-                    }
-                    _ => {
-                        // Other patterns - fall through to interpreted execution
                     }
                 }
             }
@@ -2618,7 +2605,7 @@ impl JitFastExecutor {
                 let n = self.stack.pop().ok_or("Stack underflow: ROLL")? as usize;
                 let depth = self.stack.depth();
                 if n >= depth {
-                    return Err(format!("ROLL out of bounds"));
+                    return Err("ROLL out of bounds".to_string());
                 }
                 let mut vec = self.stack.to_value_vec();
                 let idx = depth - 1 - n;
@@ -2632,7 +2619,7 @@ impl JitFastExecutor {
                 let n = self.stack.pop().ok_or("Stack underflow: REVERSE")? as usize;
                 let depth = self.stack.depth();
                 if n > depth {
-                    return Err(format!("REVERSE out of bounds"));
+                    return Err("REVERSE out of bounds".to_string());
                 }
                 if n > 1 {
                     let mut vec = self.stack.to_value_vec();
@@ -3137,7 +3124,7 @@ impl ProfileGuidedJit {
         // Temporarily adjust thresholds for hot loops
         if is_hot {
             let original_threshold = self.jit.compilation_threshold;
-            self.jit.compilation_threshold = self.jit.compilation_threshold / 2;
+            self.jit.compilation_threshold /= 2;
             let result = self.jit.on_loop_header(header_hash);
             self.jit.compilation_threshold = original_threshold;
 

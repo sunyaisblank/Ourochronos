@@ -26,6 +26,16 @@ pub struct TemporalDependencyGraph {
     prophecy_writes: HashSet<Address>,
 }
 
+/// Mutable state bundle for Tarjan's SCC algorithm.
+struct TarjanState {
+    index: usize,
+    stack: Vec<Address>,
+    on_stack: HashSet<Address>,
+    indices: HashMap<Address, usize>,
+    lowlinks: HashMap<Address, usize>,
+    sccs: Vec<Vec<Address>>,
+}
+
 impl TemporalDependencyGraph {
     /// Build TDG from a program via abstract interpretation.
     pub fn build(program: &Program) -> Self {
@@ -95,64 +105,59 @@ impl TemporalDependencyGraph {
     
     /// Tarjan's algorithm for SCCs.
     fn tarjan_scc(&self) -> Vec<Vec<Address>> {
-        let mut index = 0;
-        let mut stack = Vec::new();
-        let mut on_stack = HashSet::new();
-        let mut indices = HashMap::new();
-        let mut lowlinks = HashMap::new();
-        let mut sccs = Vec::new();
-        
+        let mut state = TarjanState {
+            index: 0,
+            stack: Vec::new(),
+            on_stack: HashSet::new(),
+            indices: HashMap::new(),
+            lowlinks: HashMap::new(),
+            sccs: Vec::new(),
+        };
+
         let all_nodes: HashSet<_> = self.edges.keys().cloned()
             .chain(self.edges.values().flat_map(|e| e.iter().map(|(t, _)| *t)))
             .collect();
-        
+
         for v in &all_nodes {
-            if !indices.contains_key(v) {
-                self.strongconnect(*v, &mut index, &mut stack, &mut on_stack,
-                                  &mut indices, &mut lowlinks, &mut sccs);
+            if !state.indices.contains_key(v) {
+                self.strongconnect(*v, &mut state);
             }
         }
-        
-        sccs
+
+        state.sccs
     }
-    
-    fn strongconnect(&self, v: Address, 
-                     index: &mut usize, 
-                     stack: &mut Vec<Address>,
-                     on_stack: &mut HashSet<Address>,
-                     indices: &mut HashMap<Address, usize>,
-                     lowlinks: &mut HashMap<Address, usize>,
-                     sccs: &mut Vec<Vec<Address>>) {
-        indices.insert(v, *index);
-        lowlinks.insert(v, *index);
-        *index += 1;
-        stack.push(v);
-        on_stack.insert(v);
-        
+
+    fn strongconnect(&self, v: Address, state: &mut TarjanState) {
+        state.indices.insert(v, state.index);
+        state.lowlinks.insert(v, state.index);
+        state.index += 1;
+        state.stack.push(v);
+        state.on_stack.insert(v);
+
         if let Some(edges) = self.edges.get(&v) {
             for (w, _) in edges {
-                if !indices.contains_key(w) {
-                    self.strongconnect(*w, index, stack, on_stack, indices, lowlinks, sccs);
-                    let low_w = *lowlinks.get(w).unwrap();
-                    let low_v = lowlinks.get_mut(&v).unwrap();
+                if !state.indices.contains_key(w) {
+                    self.strongconnect(*w, state);
+                    let low_w = *state.lowlinks.get(w).unwrap();
+                    let low_v = state.lowlinks.get_mut(&v).unwrap();
                     *low_v = (*low_v).min(low_w);
-                } else if on_stack.contains(w) {
-                    let idx_w = *indices.get(w).unwrap();
-                    let low_v = lowlinks.get_mut(&v).unwrap();
+                } else if state.on_stack.contains(w) {
+                    let idx_w = *state.indices.get(w).unwrap();
+                    let low_v = state.lowlinks.get_mut(&v).unwrap();
                     *low_v = (*low_v).min(idx_w);
                 }
             }
         }
-        
-        if lowlinks.get(&v) == indices.get(&v) {
+
+        if state.lowlinks.get(&v) == state.indices.get(&v) {
             let mut scc = Vec::new();
             loop {
-                let w = stack.pop().unwrap();
-                on_stack.remove(&w);
+                let w = state.stack.pop().unwrap();
+                state.on_stack.remove(&w);
                 scc.push(w);
                 if w == v { break; }
             }
-            sccs.push(scc);
+            state.sccs.push(scc);
         }
     }
     
@@ -473,7 +478,7 @@ impl TDGBuilder {
                     // Add edges from val_prov dependencies to this address
                     for (src, neg) in val_prov.dependencies() {
                         self.edges.entry(src)
-                            .or_insert_with(HashSet::new)
+                            .or_default()
                             .insert((addr, neg));
                     }
                 }

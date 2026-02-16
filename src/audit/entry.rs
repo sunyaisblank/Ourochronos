@@ -1,6 +1,7 @@
 //! Audit entry types and structures.
 
 use std::collections::HashMap;
+use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
 use super::escape_json;
 
@@ -32,15 +33,18 @@ impl Severity {
             Severity::Critical => "CRITICAL",
         }
     }
+}
 
-    /// Parse from string.
-    pub fn from_str(s: &str) -> Option<Self> {
+impl FromStr for Severity {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_uppercase().as_str() {
-            "INFO" | "INFORMATION" => Some(Severity::Info),
-            "WARN" | "WARNING" => Some(Severity::Warning),
-            "ERROR" | "ERR" => Some(Severity::Error),
-            "CRITICAL" | "CRIT" => Some(Severity::Critical),
-            _ => None,
+            "INFO" | "INFORMATION" => Ok(Severity::Info),
+            "WARN" | "WARNING" => Ok(Severity::Warning),
+            "ERROR" | "ERR" => Ok(Severity::Error),
+            "CRITICAL" | "CRIT" => Ok(Severity::Critical),
+            _ => Err(format!("unknown severity: {}", s)),
         }
     }
 }
@@ -72,14 +76,17 @@ impl Outcome {
             Outcome::Partial => "PARTIAL",
         }
     }
+}
 
-    /// Parse from string.
-    pub fn from_str(s: &str) -> Option<Self> {
+impl FromStr for Outcome {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_uppercase().as_str() {
-            "SUCCESS" | "OK" => Some(Outcome::Success),
-            "FAILURE" | "FAIL" | "FAILED" => Some(Outcome::Failure),
-            "PARTIAL" => Some(Outcome::Partial),
-            _ => None,
+            "SUCCESS" | "OK" => Ok(Outcome::Success),
+            "FAILURE" | "FAIL" | "FAILED" => Ok(Outcome::Failure),
+            "PARTIAL" => Ok(Outcome::Partial),
+            _ => Err(format!("unknown outcome: {}", s)),
         }
     }
 }
@@ -569,9 +576,9 @@ impl AuditEntry {
         total_epochs: usize,
         total_duration_us: u64,
     ) -> Self {
-        let severity = if outcome.is_success() {
-            Severity::Info
-        } else if matches!(outcome, ConvergenceOutcome::Iterating) {
+        let severity = if outcome.is_success()
+            || matches!(outcome, ConvergenceOutcome::Iterating)
+        {
             Severity::Info
         } else {
             Severity::Warning
@@ -691,7 +698,7 @@ impl AuditEntry {
         let mut remaining_days = days_since_epoch;
 
         loop {
-            let days_in_year = if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) {
+            let days_in_year = if year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400)) {
                 366
             } else {
                 365
@@ -703,7 +710,7 @@ impl AuditEntry {
             year += 1;
         }
 
-        let days_in_months: [u64; 12] = if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) {
+        let days_in_months: [u64; 12] = if year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400)) {
             [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
         } else {
             [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]

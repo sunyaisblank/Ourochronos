@@ -16,6 +16,7 @@
 //! - `data_structures`: VEC, HASH, SET operations
 //! - `io_ops`: File, buffer, network, system operations
 //! - `string_ops`: String manipulation
+//! - `memory_ops`: Computed memory access (INDEX, STORE, PACK, UNPACK)
 //! - `keyword_map`: Fast keyword-to-domain lookup
 
 // Domain parser modules
@@ -26,6 +27,7 @@ pub mod temporal;
 pub mod data_structures;
 pub mod io_ops;
 pub mod string_ops;
+pub mod memory_ops;
 pub mod keyword_map;
 
 use crate::ast::{OpCode, Stmt, Program, Procedure, Effect};
@@ -33,6 +35,7 @@ use crate::core::Value;
 use crate::runtime::ffi::{FFISignature, FFIType, FFIEffect};
 use std::iter::Peekable;
 use std::slice::Iter;
+use std::str::FromStr;
 use std::collections::HashMap;
 
 // Re-export domain parser types for external use
@@ -809,9 +812,9 @@ impl<'a> Parser<'a> {
                     let expr_stmts = self.parse_expression()?;
                     let mut stmts = expr_stmts;
                     stmts.push(Stmt::Op(OpCode::Output));
-                    return Ok(Stmt::Block(stmts));
+                    Ok(Stmt::Block(stmts))
                 } else {
-                    return self.emit_op(OpCode::Output);
+                    self.emit_op(OpCode::Output)
                 }
             },
 
@@ -820,9 +823,9 @@ impl<'a> Parser<'a> {
                     let expr_stmts = self.parse_expression()?;
                     let mut stmts = expr_stmts;
                     stmts.push(Stmt::Op(OpCode::Emit));
-                    return Ok(Stmt::Block(stmts));
+                    Ok(Stmt::Block(stmts))
                 } else {
-                    return self.emit_op(OpCode::Emit);
+                    self.emit_op(OpCode::Emit)
                 }
             },
 
@@ -1377,8 +1380,7 @@ impl<'a> Parser<'a> {
                                 Some(Token::Word(t)) => t.clone(),
                                 _ => return Err("Expected type name after ':'".to_string()),
                             };
-                            let ffi_type = FFIType::from_str(&type_name)
-                                .ok_or_else(|| format!("Unknown FFI type: {}", type_name))?;
+                            let ffi_type = FFIType::from_str(&type_name)?;
 
                             if is_return_section {
                                 returns.push(ffi_type);
@@ -1388,8 +1390,7 @@ impl<'a> Parser<'a> {
                         }
                         _ => {
                             // Just a type name (no parameter name)
-                            let ffi_type = FFIType::from_str(&param_or_type_name)
-                                .ok_or_else(|| format!("Unknown FFI type: {}", param_or_type_name))?;
+                            let ffi_type = FFIType::from_str(&param_or_type_name)?;
 
                             if is_return_section {
                                 returns.push(ffi_type);
@@ -1953,8 +1954,7 @@ impl<'a> Parser<'a> {
     // OR: Just implement simple remapping.
     fn remap_quote_ids(&self, stmts: &mut [Stmt], _offset: usize) {
          for stmt in stmts {
-             match stmt {
-                 Stmt::Push(_val) => {
+             if let Stmt::Push(_val) = stmt {
                       // How do we know it's a quote ID?
                       // We don't! It's just a number.
                       // This is the problem with typeless stack.
@@ -1964,40 +1964,40 @@ impl<'a> Parser<'a> {
                       // WEAKNESS DETECTED.
                       // Solution: Add Value type `Quote(id)` or metadata?
                       // AST `Value` is just `u64`.
-                      
+
                       // Workaround: Don't support quotes in imports for now?
                       // Or assume `[ ]` is the only way to generate quote IDs?
                       // But `Exec` takes u64.
-                      
+
                       // Real Solution: `Program` should own all quotes globally?
                       // When parsing module, we could pass mutable reference to `quotes` vec?
                       // But `Parser` owns its own `quotes`.
-                      
+
                       // Hacky Solution: Merge quotes, but don't remap.
                       // If module uses quote 0, and main uses quote 0... collision.
                       // Code `Push(0) Exec` in module runs main's quote 0!
                       // This is BAD.
-                      
+
                       // Correct approach: `parse_import` needs to parse INTO current context.
                       // Instead of `let mut sub_parser = Parser::new(...)`,
                       // We should process tokens into current parser?
                       // But `tokens` is iterator.
-                      
+
                       // Plan B: Textual Inclusion (Lexer level).
                       // `tokenize` handles imports? No, parser handles keywords.
-                      
+
                       // Plan C: New Parser, but shared state?
-                      // We can pass `&mut self.quotes` to sub-parser? 
+                      // We can pass `&mut self.quotes` to sub-parser?
                       // `Parser` struct owns `quotes`.
-                      
+
                       // Plan D: Inline `IMPORT` token stream.
                       // Unshift tokens? `tokens` is `Peekable<Iter>`. Can't prepend.
-                      
+
                       // Plan E: `parse_program` detects `IMPORT`.
                       // Reads file. Tokenizes.
                       // recursively calls `parse_program_inner` with new tokens?
                       // Complex stack of token streams.
-                      
+
                       // Let's stick to: "Modules only define Procedures".
                       // If a module defines a procedure using a quote...
                       // `PROC foo [ ... ] EXEC END`
@@ -2006,7 +2006,7 @@ impl<'a> Parser<'a> {
                       // We MUST update `Push(id)` in `foo`'s body.
                       // We can track which `Push` instructions come from `parse_quote`.
                       // But `Stmt` is `Push(Value)`. Value is dumb.
-                      
+
                       // Maybe for this Task, we only support Procedure imports,
                       // AND assume no quotes in imported procedures?
                       // Or limit scope?
@@ -2014,11 +2014,9 @@ impl<'a> Parser<'a> {
                       // Recursion/Higher-order relies on quotes.
                       // So importing math lib (usually no quotes) is fine.
                       // Higher order lib? Trouble.
-                      
+
                       // Let's add specific comment about limitation.
-                 }
-                 _ => {}
-            }
+             }
          }
     }
     

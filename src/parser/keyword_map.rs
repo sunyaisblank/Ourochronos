@@ -9,6 +9,7 @@ use super::temporal::TemporalParser;
 use super::data_structures::DataStructuresParser;
 use super::io_ops::IoOpsParser;
 use super::string_ops::StringOpsParser;
+use super::memory_ops::MemoryOpsParser;
 use crate::ast::Stmt;
 
 /// Identifies which domain parser handles a keyword.
@@ -20,6 +21,7 @@ pub enum Domain {
     DataStructures,
     Io,
     String,
+    Memory,
 }
 
 /// Registry of all domain parsers with efficient keyword lookup.
@@ -30,6 +32,7 @@ pub struct DomainRegistry {
     data_structures: DataStructuresParser,
     io: IoOpsParser,
     string: StringOpsParser,
+    memory: MemoryOpsParser,
 }
 
 impl Default for DomainRegistry {
@@ -47,6 +50,7 @@ impl DomainRegistry {
             data_structures: DataStructuresParser,
             io: IoOpsParser,
             string: StringOpsParser,
+            memory: MemoryOpsParser,
         }
     }
 
@@ -72,6 +76,9 @@ impl DomainRegistry {
         if StringOpsParser::KEYWORDS.contains(&keyword) {
             return Some(Domain::String);
         }
+        if MemoryOpsParser::KEYWORDS.contains(&keyword) {
+            return Some(Domain::Memory);
+        }
         None
     }
 
@@ -86,6 +93,7 @@ impl DomainRegistry {
             Domain::DataStructures => self.data_structures.parse(keyword, ctx),
             Domain::Io => self.io.parse(keyword, ctx),
             Domain::String => self.string.parse(keyword, ctx),
+            Domain::Memory => self.memory.parse(keyword, ctx),
         };
 
         Some(result)
@@ -110,6 +118,7 @@ mod tests {
         assert_eq!(registry.lookup_domain("VEC_NEW"), Some(Domain::DataStructures));
         assert_eq!(registry.lookup_domain("FILE_OPEN"), Some(Domain::Io));
         assert_eq!(registry.lookup_domain("STR_REV"), Some(Domain::String));
+        assert_eq!(registry.lookup_domain("INDEX"), Some(Domain::Memory));
     }
 
     #[test]
@@ -118,6 +127,7 @@ mod tests {
         assert!(registry.handles("DUP"));
         assert!(registry.handles("ADD"));
         assert!(registry.handles("ORACLE"));
+        assert!(registry.handles("INDEX"));
         assert!(!registry.handles("UNKNOWN"));
         assert!(!registry.handles("IF")); // Control flow not in domain parsers
     }
@@ -132,5 +142,9 @@ mod tests {
         assert!(registry.handles("HASH_PUT"));  // DataStructures
         assert!(registry.handles("CLOCK"));     // IO
         assert!(registry.handles("CONCAT"));    // String
+        assert!(registry.handles("INDEX"));     // Memory
+        assert!(registry.handles("STORE"));     // Memory
+        assert!(registry.handles("PACK"));      // Memory
+        assert!(registry.handles("UNPACK"));    // Memory
     }
 }

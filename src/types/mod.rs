@@ -68,13 +68,14 @@ use crate::core::Address;
 use std::collections::{HashMap, HashSet};
 
 /// Temporal type for compile-time causal tracking.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum TemporalType {
     /// Value has no temporal dependency (constant, ground truth).
     Pure,
     /// Value depends on at least one oracle read.
     Temporal,
     /// Type is not yet determined (for inference).
+    #[default]
     Unknown,
 }
 
@@ -109,12 +110,6 @@ impl TemporalType {
             TemporalType::Temporal => "Temporal",
             TemporalType::Unknown => "Unknown",
         }
-    }
-}
-
-impl Default for TemporalType {
-    fn default() -> Self {
-        TemporalType::Unknown
     }
 }
 
@@ -257,9 +252,10 @@ impl StackType {
 ///
 /// Effects form a lattice where composition is join (least upper bound).
 /// This enables modular reasoning about side effects.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum ComputedEffect {
     /// No effects: pure, referentially transparent computation.
+    #[default]
     Pure,
     /// Reads from memory (INDEX, FETCH-like operations).
     Reads,
@@ -314,11 +310,6 @@ impl ComputedEffect {
     }
 }
 
-impl Default for ComputedEffect {
-    fn default() -> Self {
-        ComputedEffect::Pure
-    }
-}
 
 /// Set of effects for comprehensive effect tracking.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -347,8 +338,10 @@ impl EffectSet {
 
     /// Create an effect set for ORACLE operation.
     pub fn oracle(addr: Option<Address>) -> Self {
-        let mut set = Self::default();
-        set.oracle = true;
+        let mut set = Self {
+            oracle: true,
+            ..Default::default()
+        };
         if let Some(a) = addr {
             set.read_addresses.insert(a);
         }
@@ -357,8 +350,10 @@ impl EffectSet {
 
     /// Create an effect set for PROPHECY operation.
     pub fn prophecy(addr: Option<Address>) -> Self {
-        let mut set = Self::default();
-        set.prophecy = true;
+        let mut set = Self {
+            prophecy: true,
+            ..Default::default()
+        };
         if let Some(a) = addr {
             set.write_addresses.insert(a);
         }
@@ -367,23 +362,26 @@ impl EffectSet {
 
     /// Create an effect set for memory read.
     pub fn reads() -> Self {
-        let mut set = Self::default();
-        set.reads = true;
-        set
+        Self {
+            reads: true,
+            ..Default::default()
+        }
     }
 
     /// Create an effect set for memory write.
     pub fn writes() -> Self {
-        let mut set = Self::default();
-        set.writes = true;
-        set
+        Self {
+            writes: true,
+            ..Default::default()
+        }
     }
 
     /// Create an effect set for I/O.
     pub fn io() -> Self {
-        let mut set = Self::default();
-        set.io = true;
-        set
+        Self {
+            io: true,
+            ..Default::default()
+        }
     }
 
     /// Join two effect sets.
@@ -836,15 +834,15 @@ impl TypeChecker {
         self.check_statements(&proc.body);
 
         // Verify declared effects cover actual effects
-        if !proc.effects.is_empty() {
-            if !self.current_effects.is_covered_by(&proc.effects) {
-                self.effect_violations.push(EffectViolation {
-                    procedure_name: proc.name.clone(),
-                    declared: proc.effects.clone(),
-                    actual: self.current_effects.clone(),
-                    location: Some(self.stmt_index),
-                });
-            }
+        if !proc.effects.is_empty()
+            && !self.current_effects.is_covered_by(&proc.effects)
+        {
+            self.effect_violations.push(EffectViolation {
+                procedure_name: proc.name.clone(),
+                declared: proc.effects.clone(),
+                actual: self.current_effects.clone(),
+                location: Some(self.stmt_index),
+            });
         }
 
         // Restore state
@@ -1445,11 +1443,6 @@ impl TypeChecker {
     /// Pop a type from the abstract stack (consuming it).
     fn pop_type(&mut self) -> StackType {
         self.stack.pop().unwrap_or(StackType::UNKNOWN)
-    }
-
-    /// Pop a type and extract just the temporal component.
-    fn pop_temporal(&mut self) -> TemporalType {
-        self.pop_type().temporal
     }
 
     /// Peek at the top type.

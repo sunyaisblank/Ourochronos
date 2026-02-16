@@ -46,7 +46,7 @@ impl AnalysisResult {
     pub fn is_ok(&self) -> bool {
         self.negative_loops.is_empty() &&
         self.linearity_violations.is_empty() &&
-        self.type_result.as_ref().map_or(true, |r| r.errors.is_empty())
+        self.type_result.as_ref().is_none_or(|r| r.errors.is_empty())
     }
 
     /// Get all errors as strings.
@@ -200,9 +200,10 @@ pub struct AnalysisStats {
 impl AnalysisStats {
     /// Build stats from analysis result.
     pub fn from_result(result: &AnalysisResult, program: &crate::ast::Program) -> Self {
-        let mut stats = Self::default();
-
-        stats.statements = count_statements(program);
+        let mut stats = Self {
+            statements: count_statements(program),
+            ..Self::default()
+        };
 
         if let Some(ref type_result) = result.type_result {
             stats.warning_count = type_result.warnings.len();

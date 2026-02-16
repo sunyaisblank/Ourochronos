@@ -4,7 +4,7 @@
 //! for temporal code libraries.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::fs;
 
 /// Package metadata.
@@ -94,7 +94,7 @@ impl PackageManager {
     }
     
     /// Initialize a new package in the current directory.
-    pub fn init(&self, name: &str, path: &PathBuf) -> Result<PackageManifest, String> {
+    pub fn init(&self, name: &str, path: &Path) -> Result<PackageManifest, String> {
         let manifest = PackageManifest {
             name: name.to_string(),
             version: "0.1.0".to_string(),
@@ -132,7 +132,7 @@ main = "{}"
     }
     
     /// Load a package manifest from a directory.
-    pub fn load_manifest(&self, path: &PathBuf) -> Result<PackageManifest, String> {
+    pub fn load_manifest(&self, path: &Path) -> Result<PackageManifest, String> {
         let manifest_path = path.join("ouro.toml");
         let content = fs::read_to_string(&manifest_path)
             .map_err(|e| format!("Failed to read manifest: {}", e))?;

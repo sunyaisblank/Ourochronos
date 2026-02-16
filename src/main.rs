@@ -2,7 +2,7 @@ use ourochronos::{TimeLoop, ConvergenceStatus, Config, ExecutionMode, tokenize, 
 use ourochronos::vm::fast_vm::{is_program_pure, FastExecutor};
 use ourochronos::optimization::tracing_jit::JitFastExecutor;
 use ourochronos::vm::EpochStatus;
-use ourochronos::audit::{self, AuditEntry, AuditConfig, AuditFormat, ActionCategory, Severity, Outcome};
+use ourochronos::audit::{self, AuditEntry, AuditConfig, AuditFormat, ActionCategory, Severity};
 use std::env;
 use std::fs;
 use std::time::Instant;
@@ -45,6 +45,7 @@ fn main() {
         println!("  --permissive    Permissive error handling (wrap addresses, zero on underflow)");
         println!("  --audit [file]  Enable audit logging (default: ourochronos-audit.log)");
         println!("  --audit-json    Use JSON Lines format for audit output");
+        println!("  --provenance-limit <n>  Provenance saturation limit (default: 256)");
         return;
     }
 
@@ -88,6 +89,14 @@ fn main() {
     if let Some(idx) = args.iter().position(|a| a == "--max-inst") {
         if idx + 1 < args.len() {
              max_instructions = args[idx+1].parse().unwrap_or(10_000_000);
+        }
+    }
+
+    // Parse provenance limit: --provenance-limit <usize>
+    let mut provenance_limit: usize = ourochronos::DEFAULT_PROVENANCE_SATURATION_LIMIT;
+    if let Some(idx) = args.iter().position(|a| a == "--provenance-limit") {
+        if idx + 1 < args.len() {
+            provenance_limit = args[idx + 1].parse().unwrap_or(provenance_limit);
         }
     }
 
@@ -201,10 +210,8 @@ fn main() {
                         }
                     }
                     return;
-                } else {
-                    if diagnostic {
-                        println!("Programme contains temporal operations, falling back to standard VM");
-                    }
+                } else if diagnostic {
+                    println!("Programme contains temporal operations, falling back to standard VM");
                 }
             }
 
@@ -246,10 +253,8 @@ fn main() {
                         }
                     }
                     return;
-                } else {
-                    if diagnostic {
-                        println!("Programme contains temporal operations, falling back to standard VM");
-                    }
+                } else if diagnostic {
+                    println!("Programme contains temporal operations, falling back to standard VM");
                 }
             }
 
@@ -275,6 +280,7 @@ fn main() {
                 frozen_inputs: Vec::new(),
                 max_instructions,
                 error_config: error_config.clone(),
+                provenance_limit,
             };
             
             let mut driver = TimeLoop::new(config.clone());

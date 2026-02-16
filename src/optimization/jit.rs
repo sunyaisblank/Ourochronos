@@ -18,7 +18,7 @@ use cranelift_jit::{JITBuilder, JITModule};
 #[cfg(feature = "jit")]
 use cranelift_module::{Module, Linkage};
 
-use crate::ast::{OpCode, Program, Stmt};
+use crate::ast::Program;
 use crate::core::Memory;
 
 /// Error type for JIT compilation.

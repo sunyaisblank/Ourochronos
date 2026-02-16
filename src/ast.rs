@@ -80,10 +80,6 @@ pub enum OpCode {
     
     // ════ String Operations ════
     
-    // ════ String Operations ════
-    
-    // ════ String Operations ════
-    
     /// Reverse a string (len-suffixed sequence).
     /// Stack: ( chars... len -- reversed_chars... len )
     StrRev,

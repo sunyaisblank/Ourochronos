@@ -399,7 +399,7 @@ impl DistributionalMeasures {
         sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
         let n = sorted.len();
-        if n % 2 == 0 {
+        if n.is_multiple_of(2) {
             (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
         } else {
             sorted[n / 2]
@@ -408,7 +408,7 @@ impl DistributionalMeasures {
 
     /// Percentile (0-100).
     pub fn percentile(&self, p: f64) -> f64 {
-        if self.values.is_empty() || p < 0.0 || p > 100.0 {
+        if self.values.is_empty() || !(0.0..=100.0).contains(&p) {
             return f64::NAN;
         }
 
@@ -442,6 +442,18 @@ impl Default for DistributionalMeasures {
 // =============================================================================
 // Convergence Metrics
 // =============================================================================
+
+/// Parameters for recording an epoch's metrics.
+#[derive(Debug, Clone)]
+pub struct EpochRecord {
+    pub duration_us: u64,
+    pub instructions: u64,
+    pub oracle_ops: u64,
+    pub prophecy_ops: u64,
+    pub changed_cells: usize,
+    pub total_delta: u64,
+    pub state_hash: u64,
+}
 
 /// Metrics specific to temporal convergence analysis.
 #[derive(Debug, Clone)]
@@ -497,34 +509,25 @@ impl ConvergenceMetrics {
     }
 
     /// Record an epoch's metrics.
-    pub fn record_epoch(
-        &mut self,
-        duration_us: u64,
-        instructions: u64,
-        oracle_ops: u64,
-        prophecy_ops: u64,
-        changed_cells: usize,
-        total_delta: u64,
-        state_hash: u64,
-    ) {
-        self.epoch_durations.push_u64(duration_us);
-        self.instructions_per_epoch.push_u64(instructions);
-        self.oracle_ops_per_epoch.push_u64(oracle_ops);
-        self.prophecy_ops_per_epoch.push_u64(prophecy_ops);
-        self.changes_per_epoch.push_u64(changed_cells as u64);
-        self.delta_per_epoch.push_u64(total_delta);
+    pub fn record_epoch(&mut self, record: &EpochRecord) {
+        self.epoch_durations.push_u64(record.duration_us);
+        self.instructions_per_epoch.push_u64(record.instructions);
+        self.oracle_ops_per_epoch.push_u64(record.oracle_ops);
+        self.prophecy_ops_per_epoch.push_u64(record.prophecy_ops);
+        self.changes_per_epoch.push_u64(record.changed_cells as u64);
+        self.delta_per_epoch.push_u64(record.total_delta);
 
         // Calculate convergence rate
-        let total_ops = oracle_ops + prophecy_ops;
+        let total_ops = record.oracle_ops + record.prophecy_ops;
         let rate = if total_ops == 0 {
             1.0
         } else {
-            1.0 - (changed_cells as f64 / total_ops as f64).min(1.0)
+            1.0 - (record.changed_cells as f64 / total_ops as f64).min(1.0)
         };
         self.convergence_rate.push(rate);
 
         // Cycle detection
-        self.add_state_hash(state_hash);
+        self.add_state_hash(record.state_hash);
     }
 
     /// Add a state hash and check for cycles.
@@ -924,15 +927,15 @@ mod tests {
 
         // Record some epochs
         for i in 0..5 {
-            cm.record_epoch(
-                1000 + i * 100,  // duration
-                500,             // instructions
-                10,              // oracle ops
-                10,              // prophecy ops
-                5 - i as usize,  // changed cells (decreasing)
-                50,              // delta
-                i as u64,        // unique hashes
-            );
+            cm.record_epoch(&EpochRecord {
+                duration_us: 1000 + i * 100,
+                instructions: 500,
+                oracle_ops: 10,
+                prophecy_ops: 10,
+                changed_cells: 5 - i as usize,
+                total_delta: 50,
+                state_hash: i as u64,
+            });
         }
 
         assert_eq!(cm.epoch_count(), 5);
@@ -945,7 +948,15 @@ mod tests {
 
         // Create a cycle: hashes 1, 2, 3, 1, 2, 3...
         for hash in [1u64, 2, 3, 1] {
-            cm.record_epoch(1000, 100, 10, 10, 1, 10, hash);
+            cm.record_epoch(&EpochRecord {
+                duration_us: 1000,
+                instructions: 100,
+                oracle_ops: 10,
+                prophecy_ops: 10,
+                changed_cells: 1,
+                total_delta: 10,
+                state_hash: hash,
+            });
         }
 
         assert_eq!(cm.detected_period, Some(3));

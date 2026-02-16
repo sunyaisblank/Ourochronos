@@ -1449,18 +1449,20 @@ impl Executor {
         state.stack.last().cloned().ok_or_else(|| "Stack underflow".to_string())
     }
     
-    /// Get a mutable reference to the I/O context, or return an error if absent.
+    /// Get a mutable reference to the I/O context, lazily initialising if absent.
     fn io_ctx(&mut self) -> Result<&mut IOContext, String> {
-        self.io_context.as_mut().ok_or_else(|| {
-            "I/O operations require an IOContext; construct executor via with_contexts()".to_string()
-        })
+        if self.io_context.is_none() {
+            self.io_context = Some(IOContext::new());
+        }
+        Ok(self.io_context.as_mut().unwrap())
     }
 
-    /// Get a mutable reference to the FFI context, or return an error if absent.
+    /// Get a mutable reference to the FFI context, lazily initialising if absent.
     fn ffi_ctx(&mut self) -> Result<&mut FFIContext, String> {
-        self.ffi_context.as_mut().ok_or_else(|| {
-            "FFI operations require an FFIContext; construct executor via with_contexts()".to_string()
-        })
+        if self.ffi_context.is_none() {
+            self.ffi_context = Some(FFIContext::new());
+        }
+        Ok(self.ffi_context.as_mut().unwrap())
     }
 
     /// Read input interactively.

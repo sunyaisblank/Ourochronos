@@ -40,8 +40,6 @@ enum CseTransform {
     Keep(Stmt),
     /// Replace with different statements.
     Replace(Vec<Stmt>),
-    /// Remove the statement entirely.
-    Remove,
 }
 
 /// State for value numbering during CSE pass.
@@ -129,22 +127,17 @@ impl ValueNumberingState {
 }
 
 /// Optimization level for the compiler.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum OptLevel {
     /// No optimizations.
     None,
     /// Basic instruction fusion (combine consecutive ops).
+    #[default]
     Basic,
     /// Full optimizations including pattern matching and AOT passes.
     Full,
     /// Aggressive optimizations with speculative transforms.
     Aggressive,
-}
-
-impl Default for OptLevel {
-    fn default() -> Self {
-        OptLevel::Basic
-    }
 }
 
 /// Optimized instruction representation.
@@ -1003,9 +996,7 @@ impl Optimizer {
         let pass3 = self.cse_pass(&pass2);
         let pass4 = self.basic_optimize(&pass3);
         let pass5 = self.peephole_optimize(pass4);
-        let pass6 = self.tail_call_optimize(pass5);
-
-        pass6
+        self.tail_call_optimize(pass5)
     }
 
     /// Aggressive optimization: includes speculative transforms and loop unrolling.
@@ -1016,9 +1007,7 @@ impl Optimizer {
         // Then apply aggressive passes
         let unrolled = self.loop_unroll_pass(full);
         let inline_cached = self.inline_caching_pass(unrolled);
-        let speculative = self.speculative_optimize_pass(inline_cached);
-
-        speculative
+        self.speculative_optimize_pass(inline_cached)
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -1287,7 +1276,7 @@ impl Optimizer {
             }
             OpCode::Over => {
                 if stack.len() >= 2 {
-                    let val = stack[stack.len() - 2].clone();
+                    let val = stack[stack.len() - 2];
                     stack.push(val);
                 }
             }
@@ -1423,9 +1412,6 @@ impl Optimizer {
                 CseTransform::Replace(replacement) => {
                     self.stats.cse_eliminated += 1;
                     result.extend(replacement);
-                }
-                CseTransform::Remove => {
-                    self.stats.cse_eliminated += 1;
                 }
             }
         }
@@ -1914,11 +1900,7 @@ impl Optimizer {
                 }
                 // a != b: |a - b| iterations (assumes convergence)
                 OpCode::Neq => {
-                    let diff = if val_a > val_b {
-                        val_a - val_b
-                    } else {
-                        val_b - val_a
-                    };
+                    let diff = val_a.abs_diff(val_b);
                     if diff > 0 && diff <= u16::MAX as u64 {
                         return Some(diff as usize);
                     }
@@ -1967,7 +1949,7 @@ impl Optimizer {
                 }
                 Stmt::Op(OpCode::Over) => {
                     if stack.len() >= 2 {
-                        let val = stack[stack.len() - 2].clone();
+                        let val = stack[stack.len() - 2];
                         stack.push(val);
                     } else {
                         stack.push(None);

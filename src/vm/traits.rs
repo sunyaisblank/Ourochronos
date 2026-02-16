@@ -332,7 +332,7 @@ impl ArithmeticOps for PureOps {
     #[inline]
     fn value_abs(a: u64) -> u64 {
         let signed = a as i64;
-        signed.abs() as u64
+        signed.unsigned_abs()
     }
 
     #[inline]

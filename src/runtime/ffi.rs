@@ -23,6 +23,7 @@ use crate::core::{Value, Handle};
 use crate::vm::VmState;
 use crate::core::error::{OuroError, OuroResult, SourceLocation};
 use std::collections::HashMap;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::path::PathBuf;
 
@@ -95,25 +96,28 @@ pub enum FFIType {
     BufferHandle,
 }
 
-impl FFIType {
-    /// Parse a type name from a string.
-    pub fn from_str(s: &str) -> Option<Self> {
+impl FromStr for FFIType {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, String> {
         match s.to_uppercase().as_str() {
-            "U64" | "UINT64" | "ULONG" => Some(FFIType::U64),
-            "I64" | "INT64" | "LONG" => Some(FFIType::I64),
-            "U32" | "UINT32" | "UINT" => Some(FFIType::U32),
-            "I32" | "INT32" | "INT" => Some(FFIType::I32),
-            "BOOL" | "BOOLEAN" => Some(FFIType::Bool),
-            "PTR" | "POINTER" | "ADDR" => Some(FFIType::Ptr),
-            "STR" | "STRING" => Some(FFIType::Str),
-            "VOID" | "()" => Some(FFIType::Void),
-            "FILE" | "FILEHANDLE" => Some(FFIType::FileHandle),
-            "SOCKET" | "SOCKETHANDLE" => Some(FFIType::SocketHandle),
-            "BUFFER" | "BUFFERHANDLE" => Some(FFIType::BufferHandle),
-            _ => None,
+            "U64" | "UINT64" | "ULONG" => Ok(FFIType::U64),
+            "I64" | "INT64" | "LONG" => Ok(FFIType::I64),
+            "U32" | "UINT32" | "UINT" => Ok(FFIType::U32),
+            "I32" | "INT32" | "INT" => Ok(FFIType::I32),
+            "BOOL" | "BOOLEAN" => Ok(FFIType::Bool),
+            "PTR" | "POINTER" | "ADDR" => Ok(FFIType::Ptr),
+            "STR" | "STRING" => Ok(FFIType::Str),
+            "VOID" | "()" => Ok(FFIType::Void),
+            "FILE" | "FILEHANDLE" => Ok(FFIType::FileHandle),
+            "SOCKET" | "SOCKETHANDLE" => Ok(FFIType::SocketHandle),
+            "BUFFER" | "BUFFERHANDLE" => Ok(FFIType::BufferHandle),
+            _ => Err(format!("Unknown FFI type: {}", s)),
         }
     }
+}
 
+impl FFIType {
     /// Get the stack representation size (number of values).
     pub fn stack_size(&self) -> usize {
         match self {
@@ -457,7 +461,7 @@ impl FFIContext {
                 .returns_type(FFIType::BufferHandle)
                 .effects(vec![FFIEffect::Alloc]),
             |_state, args| {
-                let size = args.get(0).map(|v| v.val as usize).unwrap_or(0);
+                let size = args.first().map(|v| v.val as usize).unwrap_or(0);
                 // Note: Actual allocation happens via FFIContext, not here
                 // This is a placeholder - actual implementation in VM
                 Ok(vec![Value::new(size as u64)])
@@ -471,7 +475,7 @@ impl FFIContext {
                 .returns_type(FFIType::U64)
                 .pure(),
             |_state, args| {
-                let _handle = args.get(0).map(|v| v.val).unwrap_or(0);
+                let _handle = args.first().map(|v| v.val).unwrap_or(0);
                 // Placeholder - actual implementation accesses buffer
                 Ok(vec![Value::new(0)])
             },
@@ -513,7 +517,7 @@ impl FFIContext {
                 .param("milliseconds", FFIType::U64)
                 .effects(vec![FFIEffect::IO]),
             |_state, args| {
-                let ms = args.get(0).map(|v| v.val).unwrap_or(0);
+                let ms = args.first().map(|v| v.val).unwrap_or(0);
                 std::thread::sleep(std::time::Duration::from_millis(ms));
                 Ok(vec![])
             },
@@ -745,6 +749,7 @@ impl DynamicLibraryManager {
     }
 
     /// Find a library file by name.
+    #[cfg(feature = "dynamic-ffi")]
     fn find_library(&self, name: &str) -> Option<PathBuf> {
         // Try different file extensions based on platform
         let extensions = if cfg!(target_os = "windows") {
@@ -1015,12 +1020,12 @@ mod tests {
 
     #[test]
     fn test_ffi_type_parse() {
-        assert_eq!(FFIType::from_str("u64"), Some(FFIType::U64));
-        assert_eq!(FFIType::from_str("i32"), Some(FFIType::I32));
-        assert_eq!(FFIType::from_str("bool"), Some(FFIType::Bool));
-        assert_eq!(FFIType::from_str("ptr"), Some(FFIType::Ptr));
-        assert_eq!(FFIType::from_str("VOID"), Some(FFIType::Void));
-        assert_eq!(FFIType::from_str("unknown"), None);
+        assert_eq!(FFIType::from_str("u64"), Ok(FFIType::U64));
+        assert_eq!(FFIType::from_str("i32"), Ok(FFIType::I32));
+        assert_eq!(FFIType::from_str("bool"), Ok(FFIType::Bool));
+        assert_eq!(FFIType::from_str("ptr"), Ok(FFIType::Ptr));
+        assert_eq!(FFIType::from_str("VOID"), Ok(FFIType::Void));
+        assert!(FFIType::from_str("unknown").is_err());
     }
 
     #[test]
@@ -1042,7 +1047,7 @@ mod tests {
                 .returns_type(FFIType::U64)
                 .pure(),
             |_state, args| {
-                let a = args.get(0).map(|v| v.val).unwrap_or(0);
+                let a = args.first().map(|v| v.val).unwrap_or(0);
                 let b = args.get(1).map(|v| v.val).unwrap_or(0);
                 Ok(vec![Value::new(a + b)])
             },

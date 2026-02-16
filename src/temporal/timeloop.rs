@@ -145,6 +145,8 @@ pub struct TimeLoopConfig {
     pub max_instructions: u64,
     /// Error handling configuration for bounds checking, division, etc.
     pub error_config: ErrorConfig,
+    /// Provenance saturation limit. Defaults to DEFAULT_PROVENANCE_SATURATION_LIMIT.
+    pub provenance_limit: usize,
 }
 
 impl Default for TimeLoopConfig {
@@ -157,6 +159,7 @@ impl Default for TimeLoopConfig {
             frozen_inputs: Vec::new(),
             max_instructions: 10_000_000,
             error_config: ErrorConfig::default(),
+            provenance_limit: crate::core::provenance::DEFAULT_PROVENANCE_SATURATION_LIMIT,
         }
     }
 }
@@ -175,10 +178,15 @@ pub struct TimeLoop {
 impl TimeLoop {
     /// Create a new time loop with given configuration.
     pub fn new(config: TimeLoopConfig) -> Self {
-        let mut exec_config = ExecutorConfig::default();
-        exec_config.immediate_output = config.verbose;
-        exec_config.max_instructions = config.max_instructions;
-        exec_config.error_config = config.error_config.clone();
+        // Apply provenance saturation limit
+        crate::core::provenance::set_saturation_limit(config.provenance_limit);
+
+        let mut exec_config = ExecutorConfig {
+            immediate_output: config.verbose,
+            max_instructions: config.max_instructions,
+            error_config: config.error_config.clone(),
+            ..ExecutorConfig::default()
+        };
 
         // Use frozen inputs if provided
         if !config.frozen_inputs.is_empty() {
@@ -236,12 +244,10 @@ impl TimeLoop {
                 message: e,
                 epoch: 1,
             },
-            EpochStatus::Running => {
-                return ConvergenceStatus::Error {
-                    message: "Epoch terminated in Running state: executor failed to produce a terminal status".to_string(),
-                    epoch: 1,
-                };
-            }
+            EpochStatus::Running => ConvergenceStatus::Error {
+                message: "Epoch terminated in Running state: executor failed to produce a terminal status".to_string(),
+                epoch: 1,
+            },
         }
     }
     

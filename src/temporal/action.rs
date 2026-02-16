@@ -133,7 +133,7 @@ impl ActionConfig {
     /// # Example
     ///
     /// ```
-    /// use ourochronos::action::ActionConfig;
+    /// use ourochronos::ActionConfig;
     /// let config = ActionConfig::derive_from_analysis(100, 65536, 2.0);
     /// ```
     pub fn derive_from_analysis(
@@ -231,9 +231,10 @@ impl ActionConfig {
 
 /// Seed generation strategy for constraint-based seeding.
 /// Instead of always starting with zeros, use domain-appropriate seeds.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub enum SeedStrategy {
     /// All zeros (classic default).
+    #[default]
     Zero,
     
     /// Random values in a specified range.
@@ -340,12 +341,6 @@ impl SeedStrategy {
             }
             _ => {}
         }
-    }
-}
-
-impl Default for SeedStrategy {
-    fn default() -> Self {
-        SeedStrategy::Zero
     }
 }
 

@@ -51,7 +51,7 @@ pub use core::error::{OuroError, OuroResult, ErrorConfig, ErrorCategory, SourceL
                  DivisionByZeroPolicy, BoundsPolicy, StackPolicy, MemoryOperation, ErrorCollector};
 pub use core::{Value, Address, Memory, OutputItem, Stack, MEMORY_SIZE};
 pub use core::Handle;
-pub use core::provenance::Provenance;
+pub use core::provenance::{Provenance, DEFAULT_PROVENANCE_SATURATION_LIMIT};
 
 // AST and parser
 pub use ast::{OpCode, Stmt, Program};
