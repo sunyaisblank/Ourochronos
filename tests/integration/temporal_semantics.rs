@@ -14,7 +14,7 @@
 use crate::common::*;
 
 use ourochronos::*;
-use ourochronos::timeloop::ConvergenceStatus;
+use ourochronos::temporal::timeloop::ConvergenceStatus;
 
 // =============================================================================
 // Closed Timelike Curve (CTC) Tests

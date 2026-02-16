@@ -25,8 +25,8 @@
 use std::time::{Duration, Instant};
 use ourochronos::*;
 use ourochronos::vm::{Executor, ExecutorConfig, EpochStatus};
-use ourochronos::fast_vm::{FastExecutor, is_program_pure};
-use ourochronos::timeloop::TimeLoop;
+use ourochronos::vm::fast_vm::{FastExecutor, is_program_pure};
+use ourochronos::temporal::timeloop::TimeLoop;
 
 /// Minimum iterations for stable timing.
 const MIN_ITERATIONS: u32 = 10;
@@ -108,6 +108,7 @@ fn benchmark_vm(name: &str, program: &Program, max_instructions: u64) -> Benchma
         max_instructions,
         immediate_output: false,
         input: Vec::new(),
+        ..Default::default()
     };
 
     let start = Instant::now();
@@ -198,7 +199,7 @@ fn benchmark_fast_vm(name: &str, program: &Program, max_instructions: u64) -> Be
 /// Benchmark JIT compilation (if available).
 #[cfg(feature = "jit")]
 fn benchmark_jit(name: &str, program: &Program) -> BenchmarkResult {
-    use ourochronos::jit::JitCompiler;
+    use ourochronos::optimization::jit::JitCompiler;
 
     let start = Instant::now();
 
@@ -488,6 +489,7 @@ fn benchmark_timeloop_convergence() {
         verbose: false,
         frozen_inputs: Vec::new(),
         max_instructions: 10_000_000,
+        ..Default::default()
     };
 
     let start = Instant::now();
@@ -560,6 +562,7 @@ fn invariant_fastvm_matches_vm() {
             max_instructions: 10_000,
             immediate_output: false,
             input: Vec::new(),
+            ..Default::default()
         };
         let mut vm_exec = Executor::with_config(config);
         let anamnesis = Memory::new();

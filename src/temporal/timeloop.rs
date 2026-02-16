@@ -13,9 +13,10 @@
 //! output-producing solutions.
 
 use crate::core::{Memory, Address, Value, OutputItem};
+use crate::core::error::ErrorConfig;
 use crate::ast::Program;
 use crate::vm::{Executor, ExecutorConfig, EpochStatus};
-use crate::action::{ActionConfig, ActionPrinciple, FixedPointSelector};
+use crate::temporal::action::{ActionConfig, ActionPrinciple, FixedPointSelector};
 use crate::optimization::memo::{EpochCache, MemoizedResult};
 use std::collections::HashMap;
 
@@ -142,6 +143,8 @@ pub struct TimeLoopConfig {
     pub frozen_inputs: Vec<u64>,
     /// Maximum instructions per epoch (gas limit).
     pub max_instructions: u64,
+    /// Error handling configuration for bounds checking, division, etc.
+    pub error_config: ErrorConfig,
 }
 
 impl Default for TimeLoopConfig {
@@ -153,6 +156,7 @@ impl Default for TimeLoopConfig {
             verbose: false,
             frozen_inputs: Vec::new(),
             max_instructions: 10_000_000,
+            error_config: ErrorConfig::default(),
         }
     }
 }
@@ -174,6 +178,7 @@ impl TimeLoop {
         let mut exec_config = ExecutorConfig::default();
         exec_config.immediate_output = config.verbose;
         exec_config.max_instructions = config.max_instructions;
+        exec_config.error_config = config.error_config.clone();
 
         // Use frozen inputs if provided
         if !config.frozen_inputs.is_empty() {
@@ -231,7 +236,12 @@ impl TimeLoop {
                 message: e,
                 epoch: 1,
             },
-            _ => unreachable!(),
+            EpochStatus::Running => {
+                return ConvergenceStatus::Error {
+                    message: "Epoch terminated in Running state: executor failed to produce a terminal status".to_string(),
+                    epoch: 1,
+                };
+            }
         }
     }
     
@@ -300,7 +310,7 @@ impl TimeLoop {
                 result.output.clone(),
                 result.status.clone(),
             ));
-            
+
             match result.status {
                 EpochStatus::Finished => {
                     // Check for fixed point
@@ -314,34 +324,34 @@ impl TimeLoop {
                             epochs: epoch + 1,
                         };
                     }
-                    
+
                     // Continue iteration
                     anamnesis = result.present;
                 }
-                
+
                 EpochStatus::Paradox => {
                     return ConvergenceStatus::Paradox {
                         message: "Explicit PARADOX instruction".to_string(),
                         epoch: epoch + 1,
                     };
                 }
-                
+
                 EpochStatus::Error(e) => {
                     return ConvergenceStatus::Error {
                         message: e,
                         epoch: epoch + 1,
                     };
                 }
-                
-                _ => {}
+
+                EpochStatus::Running => {}
             }
         }
-        
+
         ConvergenceStatus::Timeout {
             max_epochs: self.config.max_epochs,
         }
     }
-    
+
     /// Diagnostic execution with full trajectory recording.
     fn run_diagnostic(&mut self, program: &Program) -> ConvergenceStatus {
         let mut anamnesis = self.create_initial_anamnesis();
@@ -405,16 +415,16 @@ impl TimeLoop {
                         epoch: epoch + 1,
                     };
                 }
-                
-                _ => {}
+
+                EpochStatus::Running => {}
             }
         }
-        
+
         ConvergenceStatus::Timeout {
             max_epochs: self.config.max_epochs,
         }
     }
-    
+
     /// Pure execution (unbounded, for theoretical exploration).
     fn run_pure(&mut self, program: &Program) -> ConvergenceStatus {
         let mut anamnesis = self.create_initial_anamnesis();
@@ -449,10 +459,10 @@ impl TimeLoop {
                         epoch,
                     };
                 }
-                
-                _ => {}
+
+                EpochStatus::Running => {}
             }
-            
+
             // Safety check for interactive use
             if epoch > 1_000_000 {
                 return ConvergenceStatus::Timeout { max_epochs: epoch };
@@ -551,10 +561,10 @@ impl TimeLoop {
                         epoch: epoch + 1,
                     };
                 }
-                _ => {}
+                EpochStatus::Running => {}
             }
         }
-        
+
         ConvergenceStatus::Timeout { max_epochs: self.config.max_epochs }
     }
     
@@ -568,8 +578,9 @@ impl TimeLoop {
         num_workers: usize,
         num_seeds: usize,
     ) -> ConvergenceStatus {
-        // NOTE: True parallel execution is blocked because Provenance uses Rc<BTreeSet>
-        // which is not Send. A future refactor could use Arc for thread-safety.
+        // NOTE: Provenance uses Arc<BTreeSet> which is Send+Sync, but the sequential
+        // fallback remains appropriate because data-dependent iteration order makes
+        // true parallelism non-trivial to implement correctly.
         // For now, we use sequential multi-seed exploration (same as action-guided).
         
         #[cfg(feature = "parallel")]
@@ -687,25 +698,19 @@ impl TimeLoop {
     }
     
     /// Find cells that change within a cycle.
+    /// Uses Memory::diff() to scan all 65,536 cells rather than just the first 256.
     fn find_oscillating_cells(&self, states: &[Memory]) -> Vec<Address> {
-        if states.is_empty() {
+        if states.len() < 2 {
             return Vec::new();
         }
-        
-        let mut oscillating = Vec::new();
-        let first = &states[0];
-        
-        for addr in 0..256u16 { // Check first 256 cells for efficiency
-            let base_val = first.read(addr).val;
-            for state in states.iter().skip(1) {
-                if state.read(addr).val != base_val {
-                    oscillating.push(addr);
-                    break;
-                }
-            }
+
+        let mut oscillating = std::collections::HashSet::new();
+        for window in states.windows(2) {
+            oscillating.extend(window[0].diff(&window[1]));
         }
-        
-        oscillating
+        let mut result: Vec<_> = oscillating.into_iter().collect();
+        result.sort();
+        result
     }
     
     /// Create a diagnosis of the oscillation.
@@ -745,24 +750,30 @@ impl TimeLoop {
     }
     
     /// Detect divergence (monotonic unbounded growth).
+    /// Scans all addresses that changed across the trajectory, not just the first 256.
     fn detect_divergence(&self, trajectory: &[Memory]) -> Option<(Vec<Address>, Direction)> {
         if trajectory.len() < 5 {
             return None;
         }
-        
+
+        // Find addresses that changed across the trajectory
+        let mut changed = std::collections::HashSet::new();
+        for window in trajectory.windows(2) {
+            changed.extend(window[0].diff(&window[1]));
+        }
+
         let mut diverging = Vec::new();
         let mut direction = Direction::Increasing;
-        
-        // Check each cell for monotonic growth
-        for addr in 0..256u16 {
+
+        // Check monotonicity only for addresses that actually changed
+        for &addr in &changed {
             let values: Vec<u64> = trajectory.iter()
                 .map(|m| m.read(addr).val)
                 .collect();
-            
-            // Check if strictly increasing
+
             let increasing = values.windows(2).all(|w| w[1] > w[0]);
             let decreasing = values.windows(2).all(|w| w[1] < w[0]);
-            
+
             if increasing {
                 diverging.push(addr);
                 direction = Direction::Increasing;
@@ -878,11 +889,42 @@ mod tests {
     fn test_divergence() {
         // Reads A[0], writes A[0]+1 → diverges
         let status = run_program("0 ORACLE 1 ADD 0 PROPHECY");
-        
+
         // Either detected as divergence or timeout
-        assert!(matches!(status, 
-            ConvergenceStatus::Divergence { .. } | 
+        assert!(matches!(status,
+            ConvergenceStatus::Divergence { .. } |
             ConvergenceStatus::Timeout { .. }
         ));
+    }
+
+    #[test]
+    fn test_oscillation_detected_above_256() {
+        // Programme that oscillates at address 500 (above the previous 256-cell limit).
+        // Reads A[500], writes NOT(A[500]) at address 500.
+        let status = run_program("500 ORACLE NOT 500 PROPHECY");
+        match &status {
+            ConvergenceStatus::Oscillation { oscillating_cells, .. } => {
+                assert!(
+                    oscillating_cells.contains(&500),
+                    "Address 500 should be in oscillating cells, got {:?}",
+                    oscillating_cells
+                );
+            }
+            _ => panic!("Expected Oscillation, got {:?}", status),
+        }
+    }
+
+    #[test]
+    fn test_find_oscillating_cells_uses_diff() {
+        // Verify that find_oscillating_cells detects changes at high addresses.
+        let mut m1 = Memory::new();
+        let mut m2 = Memory::new();
+        m1.write(1000, crate::core::Value::new(42));
+        m2.write(1000, crate::core::Value::new(99));
+
+        let config = TimeLoopConfig::default();
+        let tl = TimeLoop::new(config);
+        let cells = tl.find_oscillating_cells(&[m1, m2]);
+        assert!(cells.contains(&1000), "Should detect oscillation at address 1000");
     }
 }

@@ -1,6 +1,6 @@
-use ourochronos::{TimeLoop, ConvergenceStatus, Config, ExecutionMode, tokenize, Parser, ActionConfig, type_check, types};
-use ourochronos::fast_vm::{is_program_pure, FastExecutor};
-use ourochronos::tracing_jit::JitFastExecutor;
+use ourochronos::{TimeLoop, ConvergenceStatus, Config, ExecutionMode, tokenize, Parser, ActionConfig, type_check, types, ErrorConfig};
+use ourochronos::vm::fast_vm::{is_program_pure, FastExecutor};
+use ourochronos::optimization::tracing_jit::JitFastExecutor;
 use ourochronos::vm::EpochStatus;
 use ourochronos::audit::{self, AuditEntry, AuditConfig, AuditFormat, ActionCategory, Severity, Outcome};
 use std::env;
@@ -14,7 +14,7 @@ fn main() {
     #[cfg(feature = "lsp")]
     if args.contains(&"--lsp".to_string()) {
         eprintln!("Starting OUROCHRONOS Language Server...");
-        if let Err(e) = ourochronos::lsp::server::run_server() {
+        if let Err(e) = ourochronos::tooling::lsp::server::run_server() {
             eprintln!("LSP Server error: {}", e);
             std::process::exit(1);
         }
@@ -41,6 +41,8 @@ fn main() {
         println!("  --fast          Use fast VM for pure (non-temporal) programmes");
         println!("  --jit           Use JIT-enabled fast VM with hot loop compilation");
         println!("  --lsp           Start Language Server Protocol server");
+        println!("  --strict        Strict error handling (bounds violations produce errors)");
+        println!("  --permissive    Permissive error handling (wrap addresses, zero on underflow)");
         println!("  --audit [file]  Enable audit logging (default: ourochronos-audit.log)");
         println!("  --audit-json    Use JSON Lines format for audit output");
         return;
@@ -53,7 +55,18 @@ fn main() {
     let typecheck_mode = args.contains(&"--typecheck".to_string());
     let fast_mode = args.contains(&"--fast".to_string());
     let jit_mode = args.contains(&"--jit".to_string());
-    
+    let strict_mode = args.contains(&"--strict".to_string());
+    let permissive_mode = args.contains(&"--permissive".to_string());
+
+    // Determine error config from CLI flags
+    let error_config = if strict_mode {
+        ErrorConfig::strict()
+    } else if permissive_mode {
+        ErrorConfig::permissive()
+    } else {
+        ErrorConfig::default()
+    };
+
     // Parse seed: --seed <u64>
     let mut seed = 0;
     if let Some(idx) = args.iter().position(|a| a == "--seed") {
@@ -261,6 +274,7 @@ fn main() {
                 verbose: diagnostic || action_mode,
                 frozen_inputs: Vec::new(),
                 max_instructions,
+                error_config: error_config.clone(),
             };
             
             let mut driver = TimeLoop::new(config.clone());
@@ -295,11 +309,11 @@ fn main() {
                     
                     if diagnostic {
                         match diagnosis {
-                            ourochronos::timeloop::ParadoxDiagnosis::NegativeLoop { explanation, .. } => {
+                            ourochronos::temporal::timeloop::ParadoxDiagnosis::NegativeLoop { explanation, .. } => {
                                 println!("\nDIAGNOSIS (Grandfather Paradox):");
                                 println!("{}", explanation);
                             },
-                            ourochronos::timeloop::ParadoxDiagnosis::Oscillation { cycle } => {
+                            ourochronos::temporal::timeloop::ParadoxDiagnosis::Oscillation { cycle } => {
                                 println!("\nCycle states:");
                                 for (i, state) in cycle.iter().enumerate() {
                                      // Only print non-empty states for brevity
@@ -309,7 +323,7 @@ fn main() {
                                      }
                                 }
                             },
-                            ourochronos::timeloop::ParadoxDiagnosis::Unknown => {
+                            ourochronos::temporal::timeloop::ParadoxDiagnosis::Unknown => {
                                 println!("\nDIAGNOSIS: Unknown cause");
                             }
                         }

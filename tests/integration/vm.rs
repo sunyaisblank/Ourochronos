@@ -16,7 +16,7 @@
 use crate::common::*;
 
 use ourochronos::*;
-use ourochronos::core_types::{Value, Address};
+use ourochronos::core::{Value, Address};
 
 // =============================================================================
 // Stack Operation Tests

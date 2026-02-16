@@ -16,6 +16,7 @@ mod tests {
             verbose: false,
             frozen_inputs: Vec::new(),
             max_instructions: 10_000_000,
+            ..Default::default()
         }
     }
 
@@ -30,6 +31,7 @@ mod tests {
             verbose: false,
             frozen_inputs: Vec::new(),
             max_instructions: 10_000_000,
+            ..Default::default()
         }
     }
 
@@ -129,13 +131,14 @@ mod tests {
             verbose: false,
             frozen_inputs: Vec::new(),
             max_instructions: 10_000_000,
+            ..Default::default()
         };
         let result = TimeLoop::new(config).run(&program);
         
         // Diagnostic mode in new timeloop returns Oscillation with Diagnosis
         if let ConvergenceStatus::Oscillation { diagnosis, .. } = result {
              match diagnosis {
-                 crate::timeloop::ParadoxDiagnosis::NegativeLoop { .. } => {
+                 crate::temporal::timeloop::ParadoxDiagnosis::NegativeLoop { .. } => {
                      // Pass
                  },
                  _ => panic!("Expected NegativeLoop diagnosis"),

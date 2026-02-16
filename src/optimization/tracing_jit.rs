@@ -2103,7 +2103,7 @@ pub struct JitFastExecutor {
     /// Underlying fast executor state.
     pub stack: FastStack,
     /// Memory state.
-    pub present: crate::core_types::Memory,
+    pub present: crate::core::Memory,
     /// Output buffer.
     pub output: Vec<OutputItem>,
     /// Instruction count.
@@ -2120,7 +2120,7 @@ impl JitFastExecutor {
         Self {
             jit: TracingJit::new(),
             stack: FastStack::with_capacity(64),
-            present: crate::core_types::Memory::new(),
+            present: crate::core::Memory::new(),
             output: Vec::new(),
             instructions_executed: 0,
             max_instructions,
@@ -2137,7 +2137,7 @@ impl JitFastExecutor {
         Self {
             jit: TracingJit::with_thresholds(recording_threshold, compilation_threshold),
             stack: FastStack::with_capacity(64),
-            present: crate::core_types::Memory::new(),
+            present: crate::core::Memory::new(),
             output: Vec::new(),
             instructions_executed: 0,
             max_instructions,

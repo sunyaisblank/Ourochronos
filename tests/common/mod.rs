@@ -14,7 +14,7 @@
 //! - Assert: Verify the expected outcome
 
 use ourochronos::*;
-use ourochronos::timeloop::{ConvergenceStatus, ParadoxDiagnosis};
+use ourochronos::temporal::timeloop::{ConvergenceStatus, ParadoxDiagnosis};
 
 // =============================================================================
 // Program Parsing Utilities
@@ -50,6 +50,7 @@ pub fn default_config() -> Config {
         verbose: false,
         frozen_inputs: Vec::new(),
         max_instructions: 10_000_000,
+        ..Default::default()
     }
 }
 
@@ -73,6 +74,7 @@ pub fn action_config() -> Config {
         verbose: false,
         frozen_inputs: Vec::new(),
         max_instructions: 10_000_000,
+        ..Default::default()
     }
 }
 
@@ -88,6 +90,7 @@ pub fn action_config_with_seeds(num_seeds: usize) -> Config {
         verbose: false,
         frozen_inputs: Vec::new(),
         max_instructions: 10_000_000,
+        ..Default::default()
     }
 }
 
@@ -100,6 +103,7 @@ pub fn diagnostic_config() -> Config {
         verbose: false,
         frozen_inputs: Vec::new(),
         max_instructions: 10_000_000,
+        ..Default::default()
     }
 }
 

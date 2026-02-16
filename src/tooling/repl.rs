@@ -20,7 +20,7 @@ use std::fs::File;
 use std::path::Path;
 
 use crate::parser::Parser;
-use crate::timeloop::{TimeLoop, TimeLoopConfig, ConvergenceStatus};
+use crate::temporal::timeloop::{TimeLoop, TimeLoopConfig, ConvergenceStatus};
 use crate::core::Memory;
 use crate::types::TypeChecker;
 use super::debugger::Debugger;
@@ -331,8 +331,8 @@ impl Repl {
                     print!("      Output: ");
                     for o in &snap.output {
                         match o {
-                            crate::core_types::OutputItem::Val(v) => print!("[{}]", v.val),
-                            crate::core_types::OutputItem::Char(c) => print!("{}", *c as char),
+                            crate::core::OutputItem::Val(v) => print!("[{}]", v.val),
+                            crate::core::OutputItem::Char(c) => print!("{}", *c as char),
                         }
                     }
                     println!();
@@ -419,8 +419,8 @@ impl Repl {
                     print!("Output: ");
                     for val in output {
                         match val {
-                            crate::core_types::OutputItem::Val(v) => print!("[{}]", v.val),
-                            crate::core_types::OutputItem::Char(c) => print!("{}", *c as char),
+                            crate::core::OutputItem::Val(v) => print!("[{}]", v.val),
+                            crate::core::OutputItem::Char(c) => print!("{}", *c as char),
                         }
                     }
                     println!();

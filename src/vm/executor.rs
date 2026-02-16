@@ -11,7 +11,7 @@ use crate::ast::{OpCode, Stmt, Program};
 use crate::core::provenance::Provenance;
 use crate::runtime::io::{IOContext, FileMode, SeekOrigin};
 use crate::runtime::ffi::{FFIContext, FFICaller};
-use crate::core::error::SourceLocation;
+use crate::core::error::{SourceLocation, ErrorConfig};
 use std::io::{self, Write, BufRead};
 
 /// Status of epoch execution.
@@ -86,6 +86,8 @@ pub struct ExecutorConfig {
     pub immediate_output: bool,
     /// Input values (simulated input).
     pub input: Vec<u64>,
+    /// Error handling policy for bounds checking, division, etc.
+    pub error_config: ErrorConfig,
 }
 
 impl Default for ExecutorConfig {
@@ -94,6 +96,7 @@ impl Default for ExecutorConfig {
             max_instructions: 10_000_000,
             immediate_output: true,
             input: Vec::new(),
+            error_config: ErrorConfig::default(),
         }
     }
 }
@@ -105,42 +108,46 @@ pub struct Executor {
     /// Inputs consumed during the current epoch (for capture).
     inputs_consumed: Vec<u64>,
     /// I/O context for file, network, and buffer operations.
-    pub io_context: IOContext,
+    /// None when running pure temporal computations without I/O support.
+    pub io_context: Option<IOContext>,
     /// FFI context for foreign function calls.
-    pub ffi_context: FFIContext,
+    /// None when running pure temporal computations without FFI support.
+    pub ffi_context: Option<FFIContext>,
 }
 
 impl Executor {
     /// Create a new executor with default configuration.
+    /// I/O and FFI contexts are not initialised; use `with_contexts()` for full-featured execution.
     pub fn new() -> Self {
         Self {
             config: ExecutorConfig::default(),
             input_cursor: 0,
             inputs_consumed: Vec::new(),
-            io_context: IOContext::new(),
-            ffi_context: FFIContext::with_stdlib(),
+            io_context: None,
+            ffi_context: None,
         }
     }
 
     /// Create an executor with custom configuration.
+    /// I/O and FFI contexts are not initialised; use `with_contexts()` for full-featured execution.
     pub fn with_config(config: ExecutorConfig) -> Self {
         Self {
             config,
             input_cursor: 0,
             inputs_consumed: Vec::new(),
-            io_context: IOContext::new(),
-            ffi_context: FFIContext::with_stdlib(),
+            io_context: None,
+            ffi_context: None,
         }
     }
 
-    /// Create an executor with custom I/O and FFI contexts.
+    /// Create an executor with I/O and FFI contexts for full-featured execution.
     pub fn with_contexts(config: ExecutorConfig, io_context: IOContext, ffi_context: FFIContext) -> Self {
         Self {
             config,
             input_cursor: 0,
             inputs_consumed: Vec::new(),
-            io_context,
-            ffi_context,
+            io_context: Some(io_context),
+            ffi_context: Some(ffi_context),
         }
     }
     
@@ -828,35 +835,43 @@ impl Executor {
             
             OpCode::Oracle => {
                 let addr_val = self.pop(state)?;
-                let addr = addr_val.val as Address;
-                
-                // Read from anamnesis
-                let mut val = state.anamnesis.read(addr);
-                
-                // Inject oracle provenance
+                let location = SourceLocation::at_stmt(state.instructions_executed as usize);
+                let policy = self.config.error_config.memory_bounds;
+
+                // Bounds-checked read from anamnesis
+                let mut val = state.anamnesis.oracle_read(addr_val.val, policy, location)
+                    .map_err(|e| e.to_string())?;
+
+                // Inject oracle provenance using the validated address
+                let addr = Memory::validate_address(addr_val.val, policy, crate::core::error::MemoryOperation::Oracle, SourceLocation::default())
+                    .unwrap_or(addr_val.val as Address);
                 let oracle_prov = Provenance::single(addr);
                 val.prov = val.prov.merge(&oracle_prov).merge(&addr_val.prov);
-                
+
                 state.stack.push(val);
             }
-            
+
             OpCode::Prophecy => {
                 let addr_val = self.pop(state)?;
                 let val = self.pop(state)?;
-                let addr = addr_val.val as Address;
-                
-                // Write to present
-                state.present.write(addr, val);
+                let location = SourceLocation::at_stmt(state.instructions_executed as usize);
+                let policy = self.config.error_config.memory_bounds;
+
+                // Bounds-checked write to present
+                state.present.prophecy_write(addr_val.val, val, policy, location)
+                    .map_err(|e| e.to_string())?;
             }
-            
+
             OpCode::PresentRead => {
                 let addr_val = self.pop(state)?;
-                let addr = addr_val.val as Address;
-                
-                // Read from present (current epoch's memory)
-                let mut val = state.present.read(addr);
+                let location = SourceLocation::at_stmt(state.instructions_executed as usize);
+                let policy = self.config.error_config.memory_bounds;
+
+                // Bounds-checked read from present
+                let mut val = state.present.read_checked(addr_val.val, policy, location)
+                    .map_err(|e| e.to_string())?;
                 val.prov = val.prov.merge(&addr_val.prov);
-                
+
                 state.stack.push(val);
             }
             
@@ -909,37 +924,51 @@ impl Executor {
             OpCode::Pack => {
                 // Pack n values into contiguous memory at base address
                 let n = self.pop(state)?.val as usize;
-                let base = self.pop(state)?.val as Address;
-                for i in 0..n {
-                    let val = self.pop(state)?;
-                    state.present.write(base + (n - 1 - i) as Address, val);
+                let base_val = self.pop(state)?;
+                let location = SourceLocation::at_stmt(state.instructions_executed as usize);
+                let policy = self.config.error_config.memory_bounds;
+                let mut values = Vec::with_capacity(n);
+                for _ in 0..n {
+                    values.push(self.pop(state)?);
                 }
+                values.reverse();
+                state.present.pack_checked(base_val.val, &values, policy, location)
+                    .map_err(|e| e.to_string())?;
             }
-            
+
             OpCode::Unpack => {
                 // Unpack n values from contiguous memory at base address
                 let n = self.pop(state)?.val as usize;
-                let base = self.pop(state)?.val as Address;
-                for i in 0..n {
-                    let val = state.present.read(base + i as Address);
+                let base_val = self.pop(state)?;
+                let location = SourceLocation::at_stmt(state.instructions_executed as usize);
+                let policy = self.config.error_config.memory_bounds;
+                let values = state.present.unpack_checked(base_val.val, n, policy, location)
+                    .map_err(|e| e.to_string())?;
+                for val in values {
                     state.stack.push(val);
                 }
             }
-            
+
             OpCode::Index => {
                 // Read from base + index
-                let index = self.pop(state)?.val as Address;
-                let base = self.pop(state)?.val as Address;
-                let val = state.present.read(base + index);
+                let index_val = self.pop(state)?;
+                let base_val = self.pop(state)?;
+                let location = SourceLocation::at_stmt(state.instructions_executed as usize);
+                let policy = self.config.error_config.memory_bounds;
+                let val = state.present.read_indexed(base_val.val, index_val.val, policy, location)
+                    .map_err(|e| e.to_string())?;
                 state.stack.push(val);
             }
-            
+
             OpCode::Store => {
                 // Store value at base + index
-                let index = self.pop(state)?.val as Address;
-                let base = self.pop(state)?.val as Address;
+                let index_val = self.pop(state)?;
+                let base_val = self.pop(state)?;
                 let val = self.pop(state)?;
-                state.present.write(base + index, val);
+                let location = SourceLocation::at_stmt(state.instructions_executed as usize);
+                let policy = self.config.error_config.memory_bounds;
+                state.present.write_indexed(base_val.val, index_val.val, val, policy, location)
+                    .map_err(|e| e.to_string())?;
             }
 
             // ═══════════════════════════════════════════════════════════
@@ -1096,8 +1125,9 @@ impl Executor {
                 // ( arg1..argN function_id -- result1..resultM )
                 let id_val = self.pop(state)?;
                 let id = id_val.val as u32;
+                let ctx = self.ffi_ctx()?;
                 FFICaller::call_by_id(
-                    &mut self.ffi_context,
+                    ctx,
                     state,
                     id,
                     SourceLocation::default(),
@@ -1115,8 +1145,9 @@ impl Executor {
                 name_chars.reverse();
                 let name: String = name_chars.into_iter().collect();
 
+                let ctx = self.ffi_ctx()?;
                 FFICaller::call_by_name(
-                    &mut self.ffi_context,
+                    ctx,
                     state,
                     &name,
                     SourceLocation::default(),
@@ -1140,7 +1171,7 @@ impl Executor {
                 path_chars.reverse();
                 let path: String = path_chars.into_iter().collect();
 
-                let handle = self.io_context.file_open(&path, mode)
+                let handle = self.io_ctx()?.file_open(&path, mode)
                     .map_err(|e| e.to_string())?;
                 state.stack.push(Value::new(handle));
             }
@@ -1150,7 +1181,7 @@ impl Executor {
                 let max_bytes = self.pop(state)?.val as usize;
                 let file_handle = self.pop(state)?.val;
 
-                let (buffer_handle, bytes_read) = self.io_context.file_read(file_handle, max_bytes)
+                let (buffer_handle, bytes_read) = self.io_ctx()?.file_read(file_handle, max_bytes)
                     .map_err(|e| e.to_string())?;
 
                 state.stack.push(Value::new(file_handle));
@@ -1163,7 +1194,7 @@ impl Executor {
                 let buffer_handle = self.pop(state)?.val;
                 let file_handle = self.pop(state)?.val;
 
-                let bytes_written = self.io_context.file_write(file_handle, buffer_handle)
+                let bytes_written = self.io_ctx()?.file_write(file_handle, buffer_handle)
                     .map_err(|e| e.to_string())?;
 
                 state.stack.push(Value::new(file_handle));
@@ -1177,7 +1208,7 @@ impl Executor {
                 let file_handle = self.pop(state)?.val;
 
                 let origin = SeekOrigin::from_u64(origin_val);
-                let new_pos = self.io_context.file_seek(file_handle, origin, offset)
+                let new_pos = self.io_ctx()?.file_seek(file_handle, origin, offset)
                     .map_err(|e| e.to_string())?;
 
                 state.stack.push(Value::new(file_handle));
@@ -1188,7 +1219,7 @@ impl Executor {
                 // ( file_handle -- file_handle )
                 let file_handle = self.pop(state)?.val;
 
-                self.io_context.file_flush(file_handle)
+                self.io_ctx()?.file_flush(file_handle)
                     .map_err(|e| e.to_string())?;
 
                 state.stack.push(Value::new(file_handle));
@@ -1198,7 +1229,7 @@ impl Executor {
                 // ( file_handle -- )
                 let file_handle = self.pop(state)?.val;
 
-                self.io_context.file_close(file_handle)
+                self.io_ctx()?.file_close(file_handle)
                     .map_err(|e| e.to_string())?;
             }
 
@@ -1212,7 +1243,7 @@ impl Executor {
                 path_chars.reverse();
                 let path: String = path_chars.into_iter().collect();
 
-                let exists = self.io_context.file_exists(&path);
+                let exists = self.io_ctx()?.file_exists(&path);
                 state.stack.push(Value::new(if exists { 1 } else { 0 }));
             }
 
@@ -1226,7 +1257,7 @@ impl Executor {
                 path_chars.reverse();
                 let path: String = path_chars.into_iter().collect();
 
-                let size = self.io_context.file_size(&path)
+                let size = self.io_ctx()?.file_size(&path)
                     .unwrap_or(0);
                 state.stack.push(Value::new(size));
             }
@@ -1238,7 +1269,7 @@ impl Executor {
             OpCode::BufferNew => {
                 // ( capacity -- buffer_handle )
                 let capacity = self.pop(state)?.val as usize;
-                let handle = self.io_context.buffer_new(capacity);
+                let handle = self.io_ctx()?.buffer_new(capacity);
                 state.stack.push(Value::new(handle));
             }
 
@@ -1250,14 +1281,14 @@ impl Executor {
                     bytes.push(self.pop(state)?);
                 }
                 bytes.reverse();
-                let handle = self.io_context.buffer_from_values(&bytes);
+                let handle = self.io_ctx()?.buffer_from_values(&bytes);
                 state.stack.push(Value::new(handle));
             }
 
             OpCode::BufferToStack => {
                 // ( buffer_handle -- byte1..byteN n )
                 let handle = self.pop(state)?.val;
-                let values = self.io_context.buffer_to_values(handle)
+                let values = self.io_ctx()?.buffer_to_values(handle)
                     .map_err(|e| e.to_string())?;
                 let len = values.len();
                 for v in values {
@@ -1269,7 +1300,7 @@ impl Executor {
             OpCode::BufferLen => {
                 // ( buffer_handle -- buffer_handle length )
                 let handle = self.pop(state)?.val;
-                let length = self.io_context.buffer_len(handle)
+                let length = self.io_ctx()?.buffer_len(handle)
                     .map_err(|e| e.to_string())?;
                 state.stack.push(Value::new(handle));
                 state.stack.push(Value::new(length as u64));
@@ -1278,7 +1309,7 @@ impl Executor {
             OpCode::BufferReadByte => {
                 // ( buffer_handle -- buffer_handle byte )
                 let handle = self.pop(state)?.val;
-                let byte = self.io_context.buffer_read_byte(handle)
+                let byte = self.io_ctx()?.buffer_read_byte(handle)
                     .map_err(|e| e.to_string())?
                     .unwrap_or(0);
                 state.stack.push(Value::new(handle));
@@ -1289,7 +1320,7 @@ impl Executor {
                 // ( buffer_handle byte -- buffer_handle )
                 let byte = self.pop(state)?.val as u8;
                 let handle = self.pop(state)?.val;
-                self.io_context.buffer_write_byte(handle, byte)
+                self.io_ctx()?.buffer_write_byte(handle, byte)
                     .map_err(|e| e.to_string())?;
                 state.stack.push(Value::new(handle));
             }
@@ -1297,7 +1328,7 @@ impl Executor {
             OpCode::BufferFree => {
                 // ( buffer_handle -- )
                 let handle = self.pop(state)?.val;
-                self.io_context.buffer_free(handle);
+                self.io_ctx()?.buffer_free(handle);
             }
 
             // ═══════════════════════════════════════════════════════════
@@ -1315,7 +1346,7 @@ impl Executor {
                 host_chars.reverse();
                 let host: String = host_chars.into_iter().collect();
 
-                let handle = self.io_context.tcp_connect(&host, port)
+                let handle = self.io_ctx()?.tcp_connect(&host, port)
                     .map_err(|e| e.to_string())?;
                 state.stack.push(Value::new(handle));
             }
@@ -1325,7 +1356,7 @@ impl Executor {
                 let buffer_handle = self.pop(state)?.val;
                 let socket_handle = self.pop(state)?.val;
 
-                let bytes_sent = self.io_context.socket_send(socket_handle, buffer_handle)
+                let bytes_sent = self.io_ctx()?.socket_send(socket_handle, buffer_handle)
                     .map_err(|e| e.to_string())?;
 
                 state.stack.push(Value::new(socket_handle));
@@ -1337,7 +1368,7 @@ impl Executor {
                 let max_bytes = self.pop(state)?.val as usize;
                 let socket_handle = self.pop(state)?.val;
 
-                let (buffer_handle, bytes_recv) = self.io_context.socket_recv(socket_handle, max_bytes)
+                let (buffer_handle, bytes_recv) = self.io_ctx()?.socket_recv(socket_handle, max_bytes)
                     .map_err(|e| e.to_string())?;
 
                 state.stack.push(Value::new(socket_handle));
@@ -1349,7 +1380,7 @@ impl Executor {
                 // ( socket_handle -- )
                 let socket_handle = self.pop(state)?.val;
 
-                self.io_context.socket_close(socket_handle)
+                self.io_ctx()?.socket_close(socket_handle)
                     .map_err(|e| e.to_string())?;
             }
 
@@ -1367,7 +1398,7 @@ impl Executor {
                 cmd_chars.reverse();
                 let command: String = cmd_chars.into_iter().collect();
 
-                let (output_handle, exit_code) = self.io_context.exec(&command)
+                let (output_handle, exit_code) = self.io_ctx()?.exec(&command)
                     .map_err(|e| e.to_string())?;
 
                 state.stack.push(Value::new(output_handle));
@@ -1418,6 +1449,20 @@ impl Executor {
         state.stack.last().cloned().ok_or_else(|| "Stack underflow".to_string())
     }
     
+    /// Get a mutable reference to the I/O context, or return an error if absent.
+    fn io_ctx(&mut self) -> Result<&mut IOContext, String> {
+        self.io_context.as_mut().ok_or_else(|| {
+            "I/O operations require an IOContext; construct executor via with_contexts()".to_string()
+        })
+    }
+
+    /// Get a mutable reference to the FFI context, or return an error if absent.
+    fn ffi_ctx(&mut self) -> Result<&mut FFIContext, String> {
+        self.ffi_context.as_mut().ok_or_else(|| {
+            "FFI operations require an FFIContext; construct executor via with_contexts()".to_string()
+        })
+    }
+
     /// Read input interactively.
     fn read_input_interactive(&self) -> u64 {
         print!("INPUT> ");
@@ -1533,7 +1578,7 @@ mod tests {
         let result = executor.run_epoch(&program, &Memory::new());
         assert_eq!(result.status, EpochStatus::Finished);
         // -1 < 0 in signed => 1
-        if let Some(crate::core_types::OutputItem::Val(v)) = result.output.first() {
+        if let Some(crate::core::OutputItem::Val(v)) = result.output.first() {
             assert_eq!(v.val, 1);
         }
 
@@ -1543,7 +1588,7 @@ mod tests {
         let result = executor.run_epoch(&program, &Memory::new());
         assert_eq!(result.status, EpochStatus::Finished);
         // u64::MAX < 0 in unsigned => 0
-        if let Some(crate::core_types::OutputItem::Val(v)) = result.output.first() {
+        if let Some(crate::core::OutputItem::Val(v)) = result.output.first() {
             assert_eq!(v.val, 0);
         }
     }
@@ -1556,7 +1601,7 @@ mod tests {
         executor.config.immediate_output = false;
         let result = executor.run_epoch(&program, &Memory::new());
         assert_eq!(result.status, EpochStatus::Finished);
-        if let Some(crate::core_types::OutputItem::Val(v)) = result.output.first() {
+        if let Some(crate::core::OutputItem::Val(v)) = result.output.first() {
             assert_eq!(v.val, 2); // Vector has 2 elements
         }
     }
@@ -1570,7 +1615,7 @@ mod tests {
         let result = executor.run_epoch(&program, &Memory::new());
         assert_eq!(result.status, EpochStatus::Finished);
         // First element is 100
-        if let Some(crate::core_types::OutputItem::Val(v)) = result.output.first() {
+        if let Some(crate::core::OutputItem::Val(v)) = result.output.first() {
             assert_eq!(v.val, 100);
         }
     }
@@ -1584,7 +1629,7 @@ mod tests {
         let result = executor.run_epoch(&program, &Memory::new());
         assert_eq!(result.status, EpochStatus::Finished);
         // Found flag should be 1
-        if let Some(crate::core_types::OutputItem::Val(v)) = result.output.first() {
+        if let Some(crate::core::OutputItem::Val(v)) = result.output.first() {
             assert_eq!(v.val, 1);
         }
     }
@@ -1598,11 +1643,11 @@ mod tests {
         let result = executor.run_epoch(&program, &Memory::new());
         assert_eq!(result.status, EpochStatus::Finished);
         // First output: 42 exists => 1
-        if let Some(crate::core_types::OutputItem::Val(v)) = result.output.get(0) {
+        if let Some(crate::core::OutputItem::Val(v)) = result.output.get(0) {
             assert_eq!(v.val, 1);
         }
         // Second output: 100 doesn't exist => 0
-        if let Some(crate::core_types::OutputItem::Val(v)) = result.output.get(1) {
+        if let Some(crate::core::OutputItem::Val(v)) = result.output.get(1) {
             assert_eq!(v.val, 0);
         }
     }
@@ -1616,11 +1661,11 @@ mod tests {
         let result = executor.run_epoch(&program, &Memory::new());
         assert_eq!(result.status, EpochStatus::Finished);
         // 42 exists => 1
-        if let Some(crate::core_types::OutputItem::Val(v)) = result.output.get(0) {
+        if let Some(crate::core::OutputItem::Val(v)) = result.output.get(0) {
             assert_eq!(v.val, 1);
         }
         // 100 doesn't exist => 0
-        if let Some(crate::core_types::OutputItem::Val(v)) = result.output.get(1) {
+        if let Some(crate::core::OutputItem::Val(v)) = result.output.get(1) {
             assert_eq!(v.val, 0);
         }
     }
@@ -1634,7 +1679,7 @@ mod tests {
         let result = executor.run_epoch(&program, &Memory::new());
         assert_eq!(result.status, EpochStatus::Finished);
         // Set has 2 unique elements (1, 2) - adding 1 again doesn't change size
-        if let Some(crate::core_types::OutputItem::Val(v)) = result.output.first() {
+        if let Some(crate::core::OutputItem::Val(v)) = result.output.first() {
             assert_eq!(v.val, 2);
         }
     }

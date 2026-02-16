@@ -132,7 +132,7 @@ mod tests {
         fn prop_selection_idempotent(
             vals in prop::collection::vec(0u64..1000, 2..10),
         ) {
-            use crate::action::{ActionPrinciple, ActionConfig, FixedPointSelector};
+            use crate::temporal::action::{ActionPrinciple, ActionConfig, FixedPointSelector};
             
             let principle = ActionPrinciple::new(ActionConfig::default());
             let seed = Memory::new();
@@ -179,7 +179,7 @@ mod tests {
             let mut parser = Parser::new(&tokens);
             
             if let Ok(program) = parser.parse_program() {
-                let config = timeloop::TimeLoopConfig::default();
+                let config = crate::temporal::timeloop::TimeLoopConfig::default();
                 let mut driver = TimeLoop::new(config);
                 let result = driver.run(&program);
                 

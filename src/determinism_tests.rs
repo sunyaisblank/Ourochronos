@@ -7,7 +7,7 @@
 #[cfg(test)]
 mod tests {
     use crate::*;
-    use crate::timeloop::TimeLoopConfig;
+    use crate::temporal::timeloop::TimeLoopConfig;
     use crate::core::OutputItem;
 
     /// Extract numeric values from output items.
@@ -36,6 +36,7 @@ mod tests {
                 verbose: false,
                 frozen_inputs: Vec::new(),
                 max_instructions: 10_000_000,
+                ..Default::default()
             };
             
             let mut driver = TimeLoop::new(config);
@@ -89,6 +90,7 @@ mod tests {
                 verbose: false,
                 frozen_inputs: Vec::new(),
                 max_instructions: 10_000_000,
+                ..Default::default()
             };
             
             let mut driver = TimeLoop::new(config);
@@ -230,7 +232,7 @@ mod tests {
     
     #[test] 
     fn test_selection_rule_determinism() {
-        use crate::action::{FixedPointSelector, ActionPrinciple, ActionConfig};
+        use crate::temporal::action::{FixedPointSelector, ActionPrinciple, ActionConfig};
         
         let principle = ActionPrinciple::new(ActionConfig::default());
         let seed = Memory::new();
