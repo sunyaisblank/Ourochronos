@@ -30,13 +30,6 @@ pub fn parse(code: &str) -> Program {
     parser.parse_program().expect("Failed to parse program")
 }
 
-/// Parse and validate a program, returning parsing errors if any.
-pub fn try_parse(code: &str) -> Result<Program, String> {
-    let tokens = tokenize(code);
-    let mut parser = Parser::new(&tokens);
-    parser.parse_program().map_err(|e| format!("{:?}", e))
-}
-
 // =============================================================================
 // Configuration Builders
 // =============================================================================
@@ -107,14 +100,6 @@ pub fn diagnostic_config() -> Config {
     }
 }
 
-/// Create a configuration with frozen inputs.
-pub fn config_with_frozen_inputs(inputs: Vec<u64>) -> Config {
-    Config {
-        frozen_inputs: inputs,
-        ..default_config()
-    }
-}
-
 // =============================================================================
 // Assertion Helpers
 // =============================================================================
@@ -173,15 +158,6 @@ pub fn assert_timeout_or_divergence(result: &ConvergenceStatus) {
             ConvergenceStatus::Timeout { .. } | ConvergenceStatus::Divergence { .. }
         ),
         "Expected Timeout or Divergence, got {:?}",
-        result
-    );
-}
-
-/// Assert that a program hits a paradox.
-pub fn assert_paradox(result: &ConvergenceStatus) {
-    assert!(
-        matches!(result, ConvergenceStatus::Paradox { .. }),
-        "Expected Paradox, got {:?}",
         result
     );
 }
@@ -282,7 +258,7 @@ pub fn verify_determinism(code: &str, runs: usize) -> bool {
         let result = TimeLoop::new(config.clone()).run(&program);
         if let ConvergenceStatus::Consistent { memory, .. } = result {
             // Collect all non-zero memory values
-            let mut values: Vec<u64> = (0..256u16)
+            let values: Vec<u64> = (0..256u16)
                 .map(|addr| memory.read(addr).val)
                 .collect();
             results.push(values);

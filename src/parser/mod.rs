@@ -1545,7 +1545,6 @@ impl<'a> Parser<'a> {
     // ========================================================================
     
     /// Check if next token starts an expression (for detecting expression context)
-    #[allow(dead_code)]
     fn is_expression_start(&mut self) -> bool {
         match self.tokens.peek() {
             Some(Token::LParen) | Some(Token::Number(_)) => true,

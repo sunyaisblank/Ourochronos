@@ -13,10 +13,12 @@
 
 #[cfg(feature = "jit")]
 use cranelift::prelude::*;
-#[cfg(feature = "jit")]  
+#[cfg(feature = "jit")]
 use cranelift_jit::{JITBuilder, JITModule};
 #[cfg(feature = "jit")]
 use cranelift_module::{Module, Linkage};
+#[cfg(feature = "jit")]
+use crate::ast::{Stmt, OpCode};
 
 use crate::ast::Program;
 use crate::core::Memory;

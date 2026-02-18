@@ -164,6 +164,30 @@ impl Default for TimeLoopConfig {
     }
 }
 
+impl TimeLoopConfig {
+    /// Validate configuration values, returning any constraint violations.
+    pub fn validate(&self) -> Result<(), Vec<String>> {
+        let mut errors = Vec::new();
+
+        if self.max_epochs == 0 {
+            errors.push("max_epochs must be > 0".to_string());
+        }
+        if self.max_instructions == 0 {
+            errors.push("max_instructions must be > 0".to_string());
+        }
+        if self.provenance_limit == 0 {
+            errors.push("provenance_limit must be > 0".to_string());
+        }
+        if let ExecutionMode::ActionGuided { num_seeds, .. } = &self.mode {
+            if *num_seeds == 0 {
+                errors.push("num_seeds must be > 0 in ActionGuided mode".to_string());
+            }
+        }
+
+        if errors.is_empty() { Ok(()) } else { Err(errors) }
+    }
+}
+
 /// The temporal loop driver.
 pub struct TimeLoop {
     config: TimeLoopConfig,
@@ -176,6 +200,14 @@ pub struct TimeLoop {
 }
 
 impl TimeLoop {
+    /// Create a new time loop, validating the configuration first.
+    ///
+    /// Returns an error if any configuration constraints are violated.
+    pub fn validated(config: TimeLoopConfig) -> Result<Self, String> {
+        config.validate().map_err(|errs| errs.join("; "))?;
+        Ok(Self::new(config))
+    }
+
     /// Create a new time loop with given configuration.
     pub fn new(config: TimeLoopConfig) -> Self {
         // Apply provenance saturation limit

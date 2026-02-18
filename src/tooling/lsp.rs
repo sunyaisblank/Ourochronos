@@ -467,7 +467,7 @@ impl LanguageAnalyzer {
     /// Check for temporal safety issues.
     fn check_temporal_safety(&self, program: &Program, doc: &Document) -> Vec<Diagnostic> {
         let mut diagnostics = Vec::new();
-        let mut context = CheckContext::new(doc);
+        let mut context = CheckContext::new();
 
         // Collect procedure names from the program itself
         let program_procs: std::collections::HashSet<_> = program.procedures.iter()
@@ -964,19 +964,16 @@ impl LanguageAnalyzer {
 }
 
 /// Context for temporal checking.
-struct CheckContext<'a> {
-    #[allow(dead_code)]
-    doc: &'a Document,
+struct CheckContext {
     line: usize,
     in_loop: bool,
     oracle_count: usize,
     prophecy_count: usize,
 }
 
-impl<'a> CheckContext<'a> {
-    fn new(doc: &'a Document) -> Self {
+impl CheckContext {
+    fn new() -> Self {
         Self {
-            doc,
             line: 0,
             in_loop: false,
             oracle_count: 0,
@@ -1568,7 +1565,7 @@ pub mod server {
 
         let lsp_symbols: Vec<lsp_types::DocumentSymbol> = symbols
             .into_iter()
-            .map(|s| convert_document_symbol(s))
+            .map(convert_document_symbol)
             .collect();
 
         serde_json::to_value(DocumentSymbolResponse::Nested(lsp_symbols))

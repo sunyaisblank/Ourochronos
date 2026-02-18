@@ -2,9 +2,15 @@
 name = "ourochronos"
 version = "0.2.0"
 edition = "2021"
+rust-version = "1.75.0"
 authors = ["OUROCHRONOS Project"]
 description = "A closed timelike curve programming language"
 license = "MIT"
+repository = "https://github.com/sunyaisblank/Ourochronos"
+homepage = "https://github.com/sunyaisblank/Ourochronos"
+readme = "README.md"
+keywords = ["temporal", "programming-language", "time-loop", "fixed-point"]
+categories = ["compilers", "science"]
 
 [dependencies]
 rayon = { version = "1.10", optional = true }

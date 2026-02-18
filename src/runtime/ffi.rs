@@ -634,7 +634,7 @@ impl FFICaller {
         let function = ctx.registry.get(id).ok_or_else(|| OuroError::FFI {
             message: format!("FFI function ID {} not found", id),
             location: location.clone(),
-        })?;
+        })?.clone();
 
         let signature = function.signature.clone();
         let input_size = signature.input_stack_size();
@@ -651,15 +651,15 @@ impl FFICaller {
 
         let mut args = Vec::with_capacity(input_size);
         for _ in 0..input_size {
-            args.push(state.stack.pop().unwrap());
+            args.push(state.stack.pop().ok_or_else(|| OuroError::Internal {
+                message: "FFI call_by_id: stack unexpectedly empty during arg pop".to_string(),
+                location: Some(location.clone()),
+            })?);
         }
         args.reverse(); // Stack pops in reverse order
 
-        // Clone function for call (to avoid borrow issues)
-        let func = ctx.registry.get(id).unwrap().clone();
-
         // Call the function
-        let results = func.call(state, &args)?;
+        let results = function.call(state, &args)?;
 
         // Push results to stack
         for result in results {
@@ -849,7 +849,7 @@ impl DynamicLibraryManager {
     /// - Arguments are correctly formatted
     /// - The function is safe to call
     #[cfg(feature = "dynamic-ffi")]
-    pub unsafe fn call_extern<T, F>(&self, library: &str, symbol: &str) -> OuroResult<Symbol<F>>
+    pub unsafe fn call_extern<T, F>(&self, library: &str, symbol: &str) -> OuroResult<Symbol<'_, F>>
     where
         F: Copy,
     {

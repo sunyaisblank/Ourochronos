@@ -16,13 +16,14 @@ use std::collections::{HashMap, HashSet, VecDeque};
 /// "The value written to b depends on the oracle read of a,
 ///  with the given polarity (positive or negating)."
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct TemporalDependencyGraph {
     /// Forward edges: source → set of (target, is_negating)
     edges: HashMap<Address, HashSet<(Address, bool)>>,
     /// All addresses that are read via ORACLE
+    #[allow(dead_code)]
     oracle_reads: HashSet<Address>,
     /// All addresses that are written via PROPHECY
+    #[allow(dead_code)]
     prophecy_writes: HashSet<Address>,
 }
 

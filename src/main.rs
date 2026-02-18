@@ -100,6 +100,20 @@ fn main() {
         }
     }
 
+    // Validate domain constraints
+    if max_instructions == 0 {
+        eprintln!("Error: --max-inst must be greater than 0");
+        std::process::exit(1);
+    }
+    if provenance_limit == 0 {
+        eprintln!("Error: --provenance-limit must be greater than 0");
+        std::process::exit(1);
+    }
+    if action_mode && num_seeds == 0 {
+        eprintln!("Error: --seeds must be greater than 0 in action mode");
+        std::process::exit(1);
+    }
+
     // Parse audit options
     let audit_json = args.contains(&"--audit-json".to_string());
     if let Some(idx) = args.iter().position(|a| a == "--audit") {

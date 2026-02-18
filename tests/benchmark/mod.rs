@@ -573,10 +573,6 @@ fn invariant_fastvm_matches_vm() {
             let mut fast_exec = FastExecutor::new(10_000);
             let _ = fast_exec.execute_pure(&program, &program.quotes);
 
-            // Compare stacks (values should match)
-            let vm_stack: Vec<u64> = vm_exec.config.input.clone(); // placeholder
-            let fast_stack = fast_exec.stack.to_value_vec();
-
             // At minimum, both should complete successfully
             assert!(
                 vm_result.status == EpochStatus::Finished,

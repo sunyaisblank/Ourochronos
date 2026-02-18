@@ -46,7 +46,7 @@ impl AnalysisResult {
     pub fn is_ok(&self) -> bool {
         self.negative_loops.is_empty() &&
         self.linearity_violations.is_empty() &&
-        self.type_result.as_ref().is_none_or(|r| r.errors.is_empty())
+        self.type_result.as_ref().map_or(true, |r| r.errors.is_empty())
     }
 
     /// Get all errors as strings.

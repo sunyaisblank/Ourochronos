@@ -67,6 +67,7 @@ enum CompiledTrace {
     Specialised(()),
     /// Native code pointer (with Cranelift).
     #[cfg(feature = "jit")]
+    #[allow(dead_code)]
     Native(*const u8),
 }
 
@@ -781,6 +782,14 @@ impl Default for TracingJit {
     }
 }
 
+/// Pop from a trace-execution stack, returning an error instead of panicking
+/// if the stack is unexpectedly empty. All call sites check stack length
+/// beforehand; this provides defence-in-depth.
+#[inline]
+fn trace_pop(stack: &mut Vec<u64>, context: &str) -> Result<u64, String> {
+    stack.pop().ok_or_else(|| format!("Internal: stack unexpectedly empty in {}", context))
+}
+
 impl TracingJit {
     /// Create a new tracing JIT with default thresholds.
     pub fn new() -> Self {
@@ -1105,7 +1114,7 @@ impl TracingJit {
             return Err("Stack empty for counter trace".to_string());
         }
 
-        let mut counter = stack.pop().unwrap();
+        let mut counter = trace_pop(stack, "counter_trace")?;
         let mut iterations = 0u64;
 
         while counter < iterations_limit && iterations < 1_000_000_000 {
@@ -1404,7 +1413,7 @@ impl TracingJit {
             return Err("Stack empty for read-modify-write trace".to_string());
         }
 
-        let addr = stack.pop().unwrap() as u16;
+        let addr = trace_pop(stack, "read_modify_write_trace")? as u16;
         let mut iterations = 0u64;
         let mut modified = Vec::new();
 
@@ -1457,8 +1466,8 @@ impl TracingJit {
             return Err("Stack too small for convergence trace".to_string());
         }
 
-        let expected = stack.pop().unwrap();
-        let addr = stack.pop().unwrap() as u16;
+        let expected = trace_pop(stack, "convergence_trace")?;
+        let addr = trace_pop(stack, "convergence_trace")? as u16;
         let mut iterations = 0u64;
         let mut modified = Vec::new();
         let mut converged = false;
@@ -1527,8 +1536,8 @@ impl TracingJit {
             return Err("Stack too small for causal chain trace".to_string());
         }
 
-        let dst_addr = stack.pop().unwrap() as u16;
-        let src_addr = stack.pop().unwrap() as u16;
+        let dst_addr = trace_pop(stack, "causal_chain_trace")? as u16;
+        let src_addr = trace_pop(stack, "causal_chain_trace")? as u16;
         let mut iterations = 0u64;
         let mut modified = Vec::new();
 
@@ -1577,8 +1586,8 @@ impl TracingJit {
             return Err("Stack too small for bootstrap trace".to_string());
         }
 
-        let default_val = stack.pop().unwrap();
-        let addr = stack.pop().unwrap() as u16;
+        let default_val = trace_pop(stack, "bootstrap_trace")?;
+        let addr = trace_pop(stack, "bootstrap_trace")? as u16;
         let mut modified = Vec::new();
 
         // Oracle read with fallback
@@ -1628,9 +1637,9 @@ impl TracingJit {
             return Err("Stack too small for witness search trace".to_string());
         }
 
-        let target = stack.pop().unwrap();
-        let end_addr = stack.pop().unwrap() as u16;
-        let start_addr = stack.pop().unwrap() as u16;
+        let target = trace_pop(stack, "witness_search_trace")?;
+        let end_addr = trace_pop(stack, "witness_search_trace")? as u16;
+        let start_addr = trace_pop(stack, "witness_search_trace")? as u16;
         let mut iterations = 0u64;
         let mut found_addr: Option<u16> = None;
 
@@ -1679,8 +1688,8 @@ impl TracingJit {
             return Err("Stack too small for temporal scan trace".to_string());
         }
 
-        let count = stack.pop().unwrap();
-        let start_addr = stack.pop().unwrap() as u16;
+        let count = trace_pop(stack, "temporal_scan_trace")?;
+        let start_addr = trace_pop(stack, "temporal_scan_trace")? as u16;
         let mut sum = 0u64; // Accumulate values for scan
         let mut iterations = 0u64;
 
@@ -1724,9 +1733,9 @@ impl TracingJit {
             return Err("Stack too small for temporal scatter trace".to_string());
         }
 
-        let value = stack.pop().unwrap();
-        let count = stack.pop().unwrap();
-        let base_addr = stack.pop().unwrap() as u16;
+        let value = trace_pop(stack, "temporal_scatter_trace")?;
+        let count = trace_pop(stack, "temporal_scatter_trace")?;
+        let base_addr = trace_pop(stack, "temporal_scatter_trace")? as u16;
         let mut iterations = 0u64;
         let mut modified = Vec::new();
 
@@ -1770,7 +1779,7 @@ impl TracingJit {
             return Err("Stack empty for fixed-point trace".to_string());
         }
 
-        let addr = stack.pop().unwrap() as u16;
+        let addr = trace_pop(stack, "fixed_point_trace")? as u16;
         let mut iterations = 0u64;
         let mut prev_val = temporal.oracle(addr);
         let mut converged = false;
@@ -1856,9 +1865,9 @@ impl TracingJit {
             return Err("Stack too small for memory fill trace".to_string());
         }
 
-        let value = stack.pop().unwrap();
-        let end_addr = stack.pop().unwrap() as u16;
-        let start_addr = stack.pop().unwrap() as u16;
+        let value = trace_pop(stack, "memory_fill_trace")?;
+        let end_addr = trace_pop(stack, "memory_fill_trace")? as u16;
+        let start_addr = trace_pop(stack, "memory_fill_trace")? as u16;
 
         // Validate address range
         if end_addr < start_addr {
@@ -1898,9 +1907,9 @@ impl TracingJit {
             return Err("Stack too small for memory copy trace".to_string());
         }
 
-        let count = stack.pop().unwrap() as u16;
-        let dst_addr = stack.pop().unwrap() as u16;
-        let src_addr = stack.pop().unwrap() as u16;
+        let count = trace_pop(stack, "memory_copy_trace")? as u16;
+        let dst_addr = trace_pop(stack, "memory_copy_trace")? as u16;
+        let src_addr = trace_pop(stack, "memory_copy_trace")? as u16;
 
         let mut modified_addresses = Vec::with_capacity(count as usize);
 
@@ -1940,12 +1949,12 @@ impl TracingJit {
             return Err("Stack too small for reduction trace".to_string());
         }
 
-        let count = stack.pop().unwrap() as u16;
-        let start_addr = stack.pop().unwrap() as u16;
+        let count = trace_pop(stack, "reduction_trace")? as u16;
+        let start_addr = trace_pop(stack, "reduction_trace")? as u16;
 
         // Initial value is optional, default based on operation
         let initial = if !stack.is_empty() {
-            stack.pop().unwrap()
+            trace_pop(stack, "reduction_trace")?
         } else {
             0 // Default to 0 for sum
         };
@@ -1987,9 +1996,9 @@ impl TracingJit {
             return Err("Stack too small for dot product trace".to_string());
         }
 
-        let count = stack.pop().unwrap() as u16;
-        let addr_b = stack.pop().unwrap() as u16;
-        let addr_a = stack.pop().unwrap() as u16;
+        let count = trace_pop(stack, "dot_product_trace")? as u16;
+        let addr_b = trace_pop(stack, "dot_product_trace")? as u16;
+        let addr_a = trace_pop(stack, "dot_product_trace")? as u16;
 
         let mut result = 0u64;
 
@@ -2051,9 +2060,9 @@ impl TracingJit {
             return Err("Stack too small for polynomial trace".to_string());
         }
 
-        let x = stack.pop().unwrap();
-        let degree = stack.pop().unwrap() as u16;
-        let coeffs_addr = stack.pop().unwrap() as u16;
+        let x = trace_pop(stack, "polynomial_trace")?;
+        let degree = trace_pop(stack, "polynomial_trace")? as u16;
+        let coeffs_addr = trace_pop(stack, "polynomial_trace")? as u16;
 
         // Horner's method: start from highest degree coefficient
         let mut result = temporal.oracle(coeffs_addr.wrapping_add(degree));
@@ -3952,7 +3961,7 @@ impl EpochSpeculator {
         }
 
         // Sort by confidence
-        candidates.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap());
+        candidates.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap_or(std::cmp::Ordering::Equal));
         candidates.truncate(self.max_candidates);
 
         candidates
