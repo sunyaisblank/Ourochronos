@@ -65,7 +65,6 @@ pub use vm::{Executor, EpochStatus, FastExecutor};
 
 // Tooling
 pub use tooling::repl::{Repl, ReplConfig};
-pub use tooling::debugger::Debugger;
 
 // Standard library
 pub use stdlib::StdLib;

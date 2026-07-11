@@ -11,7 +11,6 @@
 //! - `:history` - Show command history
 //! - `:verbose` - Toggle verbose mode
 //! - `:type <code>` - Type check code without executing
-//! - `:trace <code>` - Execute with debugging trace
 //! - `:load <file>` - Load and execute a file
 
 use std::io::{self, Write, BufRead};
@@ -22,7 +21,6 @@ use crate::parser::Parser;
 use crate::temporal::timeloop::{TimeLoop, TimeLoopConfig, ConvergenceStatus};
 use crate::core::Memory;
 use crate::types::TypeChecker;
-use super::debugger::Debugger;
 
 /// REPL configuration.
 #[derive(Debug, Clone)]
@@ -56,7 +54,6 @@ pub struct Repl {
     config: ReplConfig,
     memory: Memory,
     history: Vec<String>,
-    debugger: Option<Debugger>,
 }
 
 impl Repl {
@@ -71,7 +68,6 @@ impl Repl {
             config,
             memory: Memory::new(),
             history: Vec::new(),
-            debugger: None,
         }
     }
     
@@ -153,27 +149,11 @@ impl Repl {
                     self.type_check(args);
                 }
             }
-            ":trace" => {
-                if args.is_empty() {
-                    println!("Usage: :trace <code>");
-                } else {
-                    self.trace(args);
-                }
-            }
             ":load" | ":l" => {
                 if args.is_empty() {
                     println!("Usage: :load <file>");
                 } else {
                     self.load_file(args);
-                }
-            }
-            ":debug" => {
-                if self.debugger.is_some() {
-                    self.debugger = None;
-                    println!("Debug mode disabled.");
-                } else {
-                    self.debugger = Some(Debugger::new());
-                    println!("Debug mode enabled. Use :trace to see execution details.");
                 }
             }
             _ => {
@@ -197,8 +177,6 @@ impl Repl {
         println!();
         println!("Analysis Commands:");
         println!("  :type <code>      Type check code without executing");
-        println!("  :trace <code>     Execute with debugging trace");
-        println!("  :debug            Toggle debug mode");
         println!("  :load <file>      Load and execute a file");
         println!();
         println!("Enter OUROCHRONOS code to evaluate.");
@@ -257,58 +235,6 @@ impl Repl {
             println!("  Linear violations:");
             for v in &result.linear_violations {
                 println!("    - {} at stmt {}: {}", v.operation, v.stmt_index, v.message);
-            }
-        }
-    }
-
-    /// Execute with debugging trace.
-    fn trace(&mut self, code: &str) {
-        let tokens = crate::parser::tokenize(code);
-        let mut parser = Parser::new(&tokens);
-        let program = match parser.parse_program() {
-            Ok(p) => p,
-            Err(e) => {
-                println!("Parse error: {}", e);
-                return;
-            }
-        };
-
-        // Use debugger to capture execution
-        let mut debugger = Debugger::new();
-        let anamnesis = Memory::new();
-        debugger.run(&program, anamnesis, self.config.max_epochs);
-
-        // Show trace information
-        println!("Execution Trace:");
-
-        let snapshots = debugger.history();
-        if !snapshots.is_empty() {
-            println!("  Epoch Snapshots ({} total):", snapshots.len());
-            for snap in snapshots {
-                println!("    Epoch {}: {:?}", snap.epoch, snap.status);
-                if !snap.output.is_empty() {
-                    print!("      Output: ");
-                    for o in &snap.output {
-                        match o {
-                            crate::core::OutputItem::Val(v) => print!("[{}]", v.val),
-                            crate::core::OutputItem::Char(c) => print!("{}", *c as char),
-                        }
-                    }
-                    println!();
-                }
-            }
-        }
-
-        // Show causality for non-zero addresses
-        if let Some(snapshot) = debugger.current() {
-            for (addr, _val) in snapshot.present.non_zero_cells() {
-                let history = debugger.trace_causality(addr);
-                if !history.is_empty() && history.len() > 1 {
-                    println!("\n  Causality trace for address {}:", addr);
-                    for (epoch, val) in history {
-                        println!("    Epoch {}: {}", epoch, val.val);
-                    }
-                }
             }
         }
     }
@@ -479,13 +405,6 @@ mod tests {
         let repl = Repl::new();
         // Type check should handle temporal operations
         repl.type_check("0 ORACLE 0 PROPHECY");
-    }
-
-    #[test]
-    fn test_repl_trace() {
-        let mut repl = Repl::new();
-        // Trace should not panic
-        repl.trace("1 2 ADD OUTPUT");
     }
 
     #[test]
