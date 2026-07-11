@@ -9,6 +9,7 @@
 //! - **Action Principle**: Selection mechanism for choosing among multiple fixed points
 //! - **SMT Encoder**: Generation of SMT-LIB2 formulas for constraint solving
 
+pub mod cache;
 pub mod timeloop;
 pub mod action;
 pub mod smt_encoder;

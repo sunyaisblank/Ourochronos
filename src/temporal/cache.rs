@@ -1,0 +1,262 @@
+//! Epoch result cache for the fixed-point search.
+//!
+//! During the search for a fixed point S = F(S), the same anamnesis state can
+//! recur (multi-seed exploration revisits states; oscillations revisit them by
+//! definition). Caching the epoch result keyed on the anamnesis hash avoids
+//! re-executing the programme for a state already evaluated.
+
+use std::collections::{HashMap, HashSet};
+use std::time::Duration;
+
+use crate::core::{Memory, OutputItem};
+use crate::vm::EpochStatus;
+
+/// Maximum cache size before eviction.
+const DEFAULT_MAX_CACHE_SIZE: usize = 1024;
+
+/// The result of a memoized epoch execution.
+#[derive(Debug, Clone)]
+pub struct MemoizedResult {
+    /// The resulting present state.
+    pub present: Memory,
+    /// Output produced.
+    pub output: Vec<OutputItem>,
+    /// Status of execution.
+    pub status: EpochStatus,
+    /// Cells that were modified.
+    pub modified_cells: HashSet<u16>,
+    /// Oracle addresses read.
+    pub oracle_reads: HashSet<u16>,
+    /// Prophecy addresses written.
+    pub prophecy_writes: HashSet<u16>,
+    /// Time taken to compute.
+    pub compute_time: Duration,
+    /// Number of instructions executed.
+    pub instruction_count: usize,
+}
+
+impl MemoizedResult {
+    /// Create a simple memoized result.
+    pub fn simple(present: Memory, output: Vec<OutputItem>, status: EpochStatus) -> Self {
+        Self {
+            present,
+            output,
+            status,
+            modified_cells: HashSet::new(),
+            oracle_reads: HashSet::new(),
+            prophecy_writes: HashSet::new(),
+            compute_time: Duration::ZERO,
+            instruction_count: 0,
+        }
+    }
+
+    /// Builder: set compute time.
+    pub fn with_compute_time(mut self, time: Duration) -> Self {
+        self.compute_time = time;
+        self
+    }
+
+    /// Builder: set instruction count.
+    pub fn with_instruction_count(mut self, count: usize) -> Self {
+        self.instruction_count = count;
+        self
+    }
+
+    /// Builder: set modified cells.
+    pub fn with_modified_cells(mut self, cells: HashSet<u16>) -> Self {
+        self.modified_cells = cells;
+        self
+    }
+}
+
+/// Cache of epoch results keyed by anamnesis state hash.
+///
+/// Bounded: when full, an arbitrary entry is evicted on insert. The time loop
+/// keys entries on `Memory::state_hash`; eviction only forces re-execution of
+/// an epoch, so eviction order affects performance, not results.
+#[derive(Debug)]
+pub struct EpochCache {
+    entries: HashMap<u64, MemoizedResult>,
+    max_size: usize,
+    hits: usize,
+    misses: usize,
+    evictions: usize,
+}
+
+impl Default for EpochCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl EpochCache {
+    /// Create a new empty cache.
+    pub fn new() -> Self {
+        Self::with_capacity(DEFAULT_MAX_CACHE_SIZE)
+    }
+
+    /// Create a cache with pre-allocated capacity.
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            entries: HashMap::with_capacity(capacity),
+            max_size: capacity,
+            hits: 0,
+            misses: 0,
+            evictions: 0,
+        }
+    }
+
+    /// Look up a cached result by state hash.
+    pub fn get(&mut self, state_hash: u64) -> Option<&MemoizedResult> {
+        if let Some(result) = self.entries.get(&state_hash) {
+            self.hits += 1;
+            Some(result)
+        } else {
+            self.misses += 1;
+            None
+        }
+    }
+
+    /// Store a result in the cache, evicting an arbitrary entry when full.
+    pub fn insert(&mut self, state_hash: u64, result: MemoizedResult) {
+        if self.entries.len() >= self.max_size {
+            if let Some(&key) = self.entries.keys().next() {
+                self.entries.remove(&key);
+                self.evictions += 1;
+            }
+        }
+        self.entries.insert(state_hash, result);
+    }
+
+    /// Check if a state is cached.
+    pub fn contains(&self, state_hash: u64) -> bool {
+        self.entries.contains_key(&state_hash)
+    }
+
+    /// Get cache statistics.
+    pub fn stats(&self) -> CacheStats {
+        CacheStats {
+            size: self.entries.len(),
+            hits: self.hits,
+            misses: self.misses,
+            evictions: self.evictions,
+            hit_rate: if self.hits + self.misses > 0 {
+                self.hits as f64 / (self.hits + self.misses) as f64
+            } else {
+                0.0
+            },
+        }
+    }
+
+    /// Clear the cache and statistics.
+    pub fn clear(&mut self) {
+        self.entries.clear();
+        self.hits = 0;
+        self.misses = 0;
+        self.evictions = 0;
+    }
+
+    /// Get current cache size.
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Check if cache is empty.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
+/// Statistics about cache performance.
+#[derive(Debug, Clone, Default)]
+pub struct CacheStats {
+    /// Number of entries in cache.
+    pub size: usize,
+    /// Number of cache hits.
+    pub hits: usize,
+    /// Number of cache misses.
+    pub misses: usize,
+    /// Number of evictions.
+    pub evictions: usize,
+    /// Hit rate (0.0 to 1.0).
+    pub hit_rate: f64,
+}
+
+impl std::fmt::Display for CacheStats {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Cache: {} entries, {}/{} hits ({:.1}%), {} evictions",
+            self.size, self.hits, self.hits + self.misses, self.hit_rate * 100.0,
+            self.evictions)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::Memory;
+
+    fn dummy_result() -> MemoizedResult {
+        MemoizedResult::simple(Memory::new(), Vec::new(), EpochStatus::Finished)
+    }
+
+    #[test]
+    fn cached_result_is_returned_on_hit_and_counted() {
+        let mut cache = EpochCache::new();
+        assert!(cache.get(42).is_none());
+        cache.insert(42, dummy_result());
+        assert!(cache.get(42).is_some());
+        assert!(cache.contains(42));
+        let stats = cache.stats();
+        assert_eq!(stats.hits, 1);
+        assert_eq!(stats.misses, 1);
+        assert_eq!(stats.size, 1);
+    }
+
+    #[test]
+    fn insert_beyond_capacity_evicts_and_stays_bounded() {
+        let mut cache = EpochCache::with_capacity(4);
+        for hash in 0..10u64 {
+            cache.insert(hash, dummy_result());
+        }
+        assert!(cache.len() <= 4);
+        assert_eq!(cache.stats().evictions, 6);
+    }
+
+    #[test]
+    fn clear_resets_entries_and_statistics() {
+        let mut cache = EpochCache::new();
+        cache.insert(1, dummy_result());
+        let _ = cache.get(1);
+        cache.clear();
+        assert!(cache.is_empty());
+        assert_eq!(cache.stats().hits, 0);
+    }
+
+    #[test]
+    fn cache_stats_display_reports_hit_rate() {
+        let stats = CacheStats {
+            size: 3,
+            hits: 9,
+            misses: 1,
+            evictions: 2,
+            hit_rate: 0.9,
+        };
+        let text = format!("{}", stats);
+        assert!(text.contains("3 entries"));
+        assert!(text.contains("90.0%"));
+        assert!(text.contains("2 evictions"));
+    }
+
+    #[test]
+    fn memoized_result_builders_set_metadata() {
+        let mut cells = HashSet::new();
+        cells.insert(7u16);
+        let result = dummy_result()
+            .with_compute_time(Duration::from_millis(5))
+            .with_instruction_count(123)
+            .with_modified_cells(cells.clone());
+        assert_eq!(result.compute_time, Duration::from_millis(5));
+        assert_eq!(result.instruction_count, 123);
+        assert_eq!(result.modified_cells, cells);
+    }
+}
