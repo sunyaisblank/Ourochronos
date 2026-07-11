@@ -85,7 +85,7 @@ mod tests {
     fn test_smt_generation_smoke() {
         let program = parse("0 ORACLE DUP 1 ADD 0 PROPHECY");
         let mut encoder = SmtEncoder::new();
-        let smt = encoder.encode(&program);
+        let smt = encoder.encode(&program).expect("within fragment");
         assert!(smt.contains("(declare-const anamnesis"));
         assert!(smt.contains("(check-sat)"));
     }
@@ -94,7 +94,7 @@ mod tests {
     fn test_smt_control_flow() {
         let program = parse("1 IF { 2 } ELSE { 3 } 0 PROPHECY");
         let mut encoder = SmtEncoder::new();
-        let smt = encoder.encode(&program);
+        let smt = encoder.encode(&program).expect("within fragment");
         
         assert!(smt.contains("ite"), "SMT output missing 'ite': {}", smt);
     }

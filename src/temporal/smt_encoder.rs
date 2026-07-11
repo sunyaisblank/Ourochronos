@@ -37,13 +37,23 @@ impl SmtEncoder {
     }
     
     /// Encode a program to SMT-LIB2.
-    pub fn encode(&mut self, program: &Program) -> String {
+    ///
+    /// The encoding covers a fragment of the language: stack manipulation,
+    /// arithmetic, bitwise and comparison operators, ORACLE/PROPHECY/PRESENT,
+    /// INDEX/STORE, IF, and bounded WHILE. Constructs outside the fragment
+    /// are hard errors: silently dropping them would let the solver report
+    /// SAT for a programme whose real semantics differ.
+    pub fn encode(&mut self, program: &Program) -> Result<String, String> {
         self.output.clear();
         self.var_counter = 0;
         
         // Header
         writeln!(self.output, "; OUROCHRONOS SMT-LIB2 Encoding").unwrap();
         writeln!(self.output, "; Fixed-point constraint: A = F(A)").unwrap();
+        writeln!(self.output, "; Fragment: stack/arithmetic/bitwise/comparison ops, ORACLE,").unwrap();
+        writeln!(self.output, ";   PROPHECY, PRESENT, INDEX, STORE, IF, bounded WHILE.").unwrap();
+        writeln!(self.output, "; WHILE loops are unrolled at most {} times; deeper iteration", self.max_unroll).unwrap();
+        writeln!(self.output, ";   is under-approximated. INPUT is a fresh symbolic constant.").unwrap();
         writeln!(self.output).unwrap();
         
         // Logic: Quantifier-Free Arrays and Bit-Vectors
@@ -67,7 +77,7 @@ impl SmtEncoder {
         let mut stack: Vec<String> = Vec::new();
         let mut present = "present_init".to_string();
         
-        self.encode_block(&program.body, &mut stack, &mut present, 0);
+        self.encode_block(&program.body, &mut stack, &mut present, 0)?;
         
         writeln!(self.output).unwrap();
         
@@ -80,7 +90,7 @@ impl SmtEncoder {
         writeln!(self.output, "(check-sat)").unwrap();
         writeln!(self.output, "(get-model)").unwrap();
         
-        self.output.clone()
+        Ok(self.output.clone())
     }
     
     /// Generate a fresh variable name.
@@ -94,54 +104,53 @@ impl SmtEncoder {
     fn encode_block(&mut self, stmts: &[Stmt], 
                     stack: &mut Vec<String>, 
                     present: &mut String,
-                    depth: usize) {
+                    depth: usize) -> Result<(), String> {
         for stmt in stmts {
-            self.encode_stmt(stmt, stack, present, depth);
+            self.encode_stmt(stmt, stack, present, depth)?;
         }
+        Ok(())
     }
     
     /// Encode a single statement.
     fn encode_stmt(&mut self, stmt: &Stmt, 
                    stack: &mut Vec<String>, 
                    present: &mut String,
-                   depth: usize) {
+                   depth: usize) -> Result<(), String> {
         match stmt {
             Stmt::Push(v) => {
                 stack.push(format!("(_ bv{} 64)", v.val));
+                Ok(())
             }
             
-            Stmt::Op(op) => {
-                self.encode_op(*op, stack, present);
-            }
+            Stmt::Op(op) => self.encode_op(*op, stack, present),
             
-            Stmt::Block(stmts) => {
-                self.encode_block(stmts, stack, present, depth);
-            }
+            Stmt::Block(stmts) => self.encode_block(stmts, stack, present, depth),
             
             Stmt::If { then_branch, else_branch } => {
-                self.encode_if(then_branch, else_branch.as_deref(), stack, present, depth);
+                self.encode_if(then_branch, else_branch.as_deref(), stack, present, depth)
             }
             
             Stmt::While { cond, body } => {
-                self.encode_while(cond, body, stack, present, depth);
+                self.encode_while(cond, body, stack, present, depth)
             }
             
-            Stmt::Call { name } => {
-                panic!("SMT encoding does not support procedure calls - inline procedures first: {}", name);
-            }
+            Stmt::Call { name } => Err(format!(
+                "SMT encoding does not support procedure calls; inline procedures first: {}",
+                name
+            )),
             
-            Stmt::TemporalScope { body, .. } => {
-                // Temporal scoping: encode body, but note isolation semantics
-                // are not fully expressible in SMT without memory regions
-                self.encode_block(body, stack, present, depth);
-            }
+            Stmt::TemporalScope { .. } => Err(
+                "TEMPORAL scope isolation semantics are not expressible in this SMT fragment"
+                    .to_string(),
+            ),
         }
     }
     
-    /// Encode an opcode.
-    fn encode_op(&mut self, op: OpCode, stack: &mut Vec<String>, present: &mut String) {
+    /// Encode an opcode. Anything outside the fragment is an error, never a
+    /// silent no-op: the solver's verdict must describe the whole programme.
+    fn encode_op(&mut self, op: OpCode, stack: &mut Vec<String>, present: &mut String) -> Result<(), String> {
         match op {
-            OpCode::Nop | OpCode::Halt | OpCode::Paradox => {}
+            OpCode::Nop | OpCode::Halt => {}
             
             OpCode::Pop => { stack.pop(); }
             
@@ -177,7 +186,7 @@ impl SmtEncoder {
                 stack.push(format!("(_ bv{} 64)", stack.len()));
             }
             OpCode::Pick => {
-                 panic!("SMT encoding for PICK not implemented");
+                return Err("PICK is outside the SMT fragment (runtime-computed stack index)".to_string());
             }
             OpCode::Add => {
                 if stack.len() >= 2 {
@@ -419,6 +428,28 @@ impl SmtEncoder {
                 }
             }
             
+            OpCode::Index => {
+                if stack.len() >= 2 {
+                    let index = stack.pop().unwrap();
+                    let base = stack.pop().unwrap();
+                    let addr16 = format!("((_ extract 15 0) (bvadd {} {}))", base, index);
+                    stack.push(format!("(select {} {})", present, addr16));
+                }
+            }
+            
+            OpCode::Store => {
+                if stack.len() >= 3 {
+                    let index = stack.pop().unwrap();
+                    let base = stack.pop().unwrap();
+                    let val = stack.pop().unwrap();
+                    let addr16 = format!("((_ extract 15 0) (bvadd {} {}))", base, index);
+                    let new_present = self.fresh_var("present");
+                    writeln!(self.output, "(declare-const {} (Array (_ BitVec 16) (_ BitVec 64)))", new_present).unwrap();
+                    writeln!(self.output, "(assert (= {} (store {} {} {})))", new_present, present, addr16, val).unwrap();
+                    *present = new_present;
+                }
+            }
+            
             OpCode::Input => {
                 // Fresh symbolic input
                 let input_var = self.fresh_var("input");
@@ -430,31 +461,29 @@ impl SmtEncoder {
                 stack.pop();
             }
             
-            // Array opcodes - not fully supported in SMT encoding
-            OpCode::Pack | OpCode::Unpack | OpCode::Index | OpCode::Store => {
-                // Array operations require complex memory theory
-                // Dynamic stack structure changes cannot be statically typed easily
+            // PARADOX conditionally aborts an epoch; encoding it as a no-op
+            // would report SAT for programmes whose real semantics reject
+            // the satisfying path.
+            OpCode::Paradox => {
+                return Err("PARADOX is outside the SMT fragment (conditional epoch abort)".to_string());
             }
 
-            // Data structure opcodes - not fully supported in SMT encoding
-            // These require complex heap/reference semantics
+            // Pack/Unpack move a runtime-computed number of stack items; the
+            // symbolic stack needs a concrete depth.
+            OpCode::Pack | OpCode::Unpack |
+            // Heap-backed structures would need a heap theory.
             OpCode::VecNew | OpCode::VecPush | OpCode::VecPop |
             OpCode::VecGet | OpCode::VecSet | OpCode::VecLen |
             OpCode::HashNew | OpCode::HashPut | OpCode::HashGet |
             OpCode::HashDel | OpCode::HashHas | OpCode::HashLen |
             OpCode::SetNew | OpCode::SetAdd | OpCode::SetHas |
-            OpCode::SetDel | OpCode::SetLen => {
-                // Data structure operations require heap theory
-                // For now, treat as uninterpreted operations
-            }
-
-            OpCode::Roll | OpCode::Reverse | OpCode::StrRev | OpCode::StrCat | OpCode::StrSplit | OpCode::Assert | OpCode::Exec | OpCode::Dip | OpCode::Keep | OpCode::Bi | OpCode::Rec => {
-                // Conservative approach: do nothing or invalidate stack?
-                // For this prototype, we ignore their effect on type stack structure
-            }
-
-            // FFI and I/O operations - not supported in SMT encoding
-            // These require modeling external state and side effects
+            OpCode::SetDel | OpCode::SetLen |
+            // Runtime stack restructuring and quotation dispatch.
+            OpCode::Roll | OpCode::Reverse |
+            OpCode::StrRev | OpCode::StrCat | OpCode::StrSplit |
+            OpCode::Assert |
+            OpCode::Exec | OpCode::Dip | OpCode::Keep | OpCode::Bi | OpCode::Rec |
+            // External state and effects.
             OpCode::FFICall | OpCode::FFICallNamed |
             OpCode::FileOpen | OpCode::FileRead | OpCode::FileWrite |
             OpCode::FileSeek | OpCode::FileFlush | OpCode::FileClose |
@@ -466,10 +495,10 @@ impl SmtEncoder {
             OpCode::SocketClose |
             OpCode::ProcExec |
             OpCode::Clock | OpCode::Sleep | OpCode::Random => {
-                // External operations cannot be encoded in SMT
-                // These inherently have side effects not captured by the logic
+                return Err(format!("{} is outside the SMT fragment", op.name()));
             }
         }
+        Ok(())
     }
     
     /// Encode IF statement using ITE.
@@ -478,7 +507,7 @@ impl SmtEncoder {
                  else_branch: Option<&[Stmt]>,
                  stack: &mut Vec<String>,
                  present: &mut String,
-                 depth: usize) {
+                 depth: usize) -> Result<(), String> {
         // Pop condition
         let cond = stack.pop().unwrap_or("(_ bv0 64)".to_string());
         let cond_bool = format!("(not (= {} (_ bv0 64)))", cond);
@@ -488,7 +517,7 @@ impl SmtEncoder {
         let present_before = present.clone();
         
         // Encode then branch
-        self.encode_block(then_branch, stack, present, depth + 1);
+        self.encode_block(then_branch, stack, present, depth + 1)?;
         let stack_then = stack.clone();
         let present_then = present.clone();
         
@@ -497,7 +526,7 @@ impl SmtEncoder {
         *present = present_before.clone();
         
         if let Some(else_stmts) = else_branch {
-            self.encode_block(else_stmts, stack, present, depth + 1);
+            self.encode_block(else_stmts, stack, present, depth + 1)?;
         }
         let stack_else = stack.clone();
         let present_else = present.clone();
@@ -516,6 +545,7 @@ impl SmtEncoder {
             let merged_val = format!("(ite {} {} {})", cond_bool, stack_then[i], stack_else[i]);
             stack.push(merged_val);
         }
+        Ok(())
     }
     
     /// Encode WHILE statement via bounded unrolling.
@@ -524,16 +554,16 @@ impl SmtEncoder {
                     body: &[Stmt],
                     stack: &mut Vec<String>,
                     present: &mut String,
-                    depth: usize) {
+                    depth: usize) -> Result<(), String> {
         if depth >= self.max_unroll {
             writeln!(self.output, "; Loop unroll limit reached").unwrap();
-            return;
+            return Ok(());
         }
         
         // Unroll: for i in 0..max_unroll: if cond then body
         for _ in 0..self.max_unroll {
             // Evaluate condition
-            self.encode_block(cond, stack, present, depth + 1);
+            self.encode_block(cond, stack, present, depth + 1)?;
             
             if stack.is_empty() {
                 break;
@@ -548,7 +578,7 @@ impl SmtEncoder {
             let present_before = present.clone();
             
             // Encode body
-            self.encode_block(body, stack, present, depth + 1);
+            self.encode_block(body, stack, present, depth + 1)?;
             
             // Merge: if cond was true, use new state; else keep old
             let merged_present = self.fresh_var("present");
@@ -564,6 +594,7 @@ impl SmtEncoder {
                 .collect();
             *stack = new_stack;
         }
+        Ok(())
     }
 }
 
@@ -582,17 +613,52 @@ mod tests {
     fn test_encode_simple() {
         let program = parse("0 ORACLE 0 PROPHECY").unwrap();
         let mut encoder = SmtEncoder::new();
-        let smt = encoder.encode(&program);
+        let smt = encoder.encode(&program).expect("within fragment");
         
         assert!(smt.contains("anamnesis"));
         assert!(smt.contains("check-sat"));
     }
     
     #[test]
+    fn constructs_outside_the_fragment_are_errors_not_noops() {
+        // A silently dropped opcode would let the solver report SAT for a
+        // programme whose real semantics differ.
+        for (source, needle) in [
+            ("0 ORACLE 0 PROPHECY VEC_NEW POP", "VEC_NEW"),
+            ("0 ORACLE 0 PROPHECY PARADOX", "PARADOX"),
+            ("0 ORACLE 0 PROPHECY CLOCK POP", "CLOCK"),
+            ("[ 1 ] EXEC 0 ORACLE 0 PROPHECY", "EXEC"),
+        ] {
+            let program = parse(source).unwrap();
+            let mut encoder = SmtEncoder::new();
+            let err = encoder.encode(&program).expect_err(source);
+            assert!(err.contains(needle), "{}: {}", source, err);
+        }
+    }
+
+    #[test]
+    fn index_and_store_encode_into_the_array_theory() {
+        let program = parse("42 10 0 STORE 10 0 INDEX 0 PROPHECY").unwrap();
+        let mut encoder = SmtEncoder::new();
+        let smt = encoder.encode(&program).expect("within fragment");
+        assert!(smt.contains("store"), "{}", smt);
+        assert!(smt.contains("select"), "{}", smt);
+    }
+
+    #[test]
+    fn header_states_the_fragment_and_unroll_bound() {
+        let program = parse("0 ORACLE 0 PROPHECY").unwrap();
+        let mut encoder = SmtEncoder::with_unroll_limit(7);
+        let smt = encoder.encode(&program).expect("within fragment");
+        assert!(smt.contains("Fragment:"));
+        assert!(smt.contains("unrolled at most 7 times"));
+    }
+
+    #[test]
     fn test_encode_arithmetic() {
         let program = parse("10 20 ADD 0 PROPHECY").unwrap();
         let mut encoder = SmtEncoder::new();
-        let smt = encoder.encode(&program);
+        let smt = encoder.encode(&program).expect("within fragment");
         
         assert!(smt.contains("bvadd"));
     }

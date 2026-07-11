@@ -293,10 +293,17 @@ fn run() -> i32 {
 
     if smt {
         let mut encoder = ourochronos::SmtEncoder::new();
-        let smt_code = encoder.encode(&program);
-        println!(";; Generated SMT-LIB2 for {}", filename);
-        println!("{}", smt_code);
-        return EXIT_OK;
+        return match encoder.encode(&program) {
+            Ok(smt_code) => {
+                println!(";; Generated SMT-LIB2 for {}", filename);
+                println!("{}", smt_code);
+                EXIT_OK
+            }
+            Err(e) => {
+                eprintln!("SMT encoding error: {}", e);
+                EXIT_ERROR
+            }
+        };
     }
 
     // Fast VM mode for pure programmes
