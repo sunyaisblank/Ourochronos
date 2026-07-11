@@ -228,3 +228,19 @@ mod tests {
     }
 }
 
+#[cfg(test)]
+mod temporal_op_count {
+    use crate::parser::parse;
+
+    #[test]
+    fn counts_oracle_and_prophecy_across_body_quotes_and_branches() {
+        let program = parse("0 ORACLE 0 PROPHECY [ 1 ORACLE POP ] EXEC 1 IF { 2 ORACLE POP }").unwrap();
+        assert_eq!(program.temporal_op_count(), 4);
+    }
+
+    #[test]
+    fn pure_programme_has_zero_temporal_core() {
+        let program = parse("1 2 ADD OUTPUT").unwrap();
+        assert_eq!(program.temporal_op_count(), 0);
+    }
+}

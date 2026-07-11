@@ -864,6 +864,28 @@ impl Program {
             && !self.procedures.iter().any(|p| self.contains_oracle(&p.body))
     }
 
+    /// Count the ORACLE and PROPHECY operations reachable by the executor
+    /// (body, quotations, and procedure bodies). Used as the temporal-core
+    /// size estimate when deriving Action Principle weights.
+    pub fn temporal_op_count(&self) -> usize {
+        fn count(stmts: &[Stmt]) -> usize {
+            stmts.iter().map(|stmt| match stmt {
+                Stmt::Op(OpCode::Oracle) | Stmt::Op(OpCode::Prophecy) => 1,
+                Stmt::Op(_) | Stmt::Push(_) | Stmt::Call { .. } => 0,
+                Stmt::If { then_branch, else_branch } => {
+                    count(then_branch)
+                        + else_branch.as_deref().map_or(0, count)
+                }
+                Stmt::While { cond, body } => count(cond) + count(body),
+                Stmt::Block(inner) => count(inner),
+                Stmt::TemporalScope { body, .. } => count(body),
+            }).sum()
+        }
+        count(&self.body)
+            + self.quotes.iter().map(|q| count(q)).sum::<usize>()
+            + self.procedures.iter().map(|p| count(&p.body)).sum::<usize>()
+    }
+
     // Exhaustive over Stmt (no wildcard) so a new statement kind cannot be
     // silently classified as oracle-free.
     fn contains_oracle(&self, stmts: &[Stmt]) -> bool {

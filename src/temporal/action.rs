@@ -579,9 +579,12 @@ impl ActionPrinciple {
             if value.prov.is_pure() {
                 action += self.config.pure_penalty;
             } else {
-                // Bonus for causal depth
+                // Bonus for causal depth, on the same piecewise curve as
+                // value_action: two curves selecting different fixed points
+                // for the same candidate set would make the Action Principle
+                // depend on which code path scored it.
                 let depth = value.prov.dependency_count();
-                action -= self.config.causal_bonus * (depth as f64).ln_1p();
+                action -= self.config.causal_bonus * ActionConfig::depth_scaling(depth);
             }
             
             // Penalty if value unchanged from seed

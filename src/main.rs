@@ -351,8 +351,17 @@ fn run() -> i32 {
     // Determine execution mode
     let mode = if action_mode {
         println!("Running in ACTION-GUIDED mode (exploring {} seeds).", num_seeds);
+        // Weights derived from the programme's own temporal footprint; the
+        // hand-tuned anti_trivial constants remain the zero-knowledge
+        // fallback for programmes with no measurable temporal core.
+        let temporal_core = program.temporal_op_count();
+        let action_config = if temporal_core > 0 {
+            ActionConfig::derive_from_analysis(temporal_core, ourochronos::MEMORY_SIZE, 2.0)
+        } else {
+            ActionConfig::anti_trivial()
+        };
         ExecutionMode::ActionGuided {
-            config: ActionConfig::anti_trivial(),
+            config: action_config,
             num_seeds,
         }
     } else if diagnostic {
