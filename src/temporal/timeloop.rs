@@ -117,14 +117,6 @@ pub enum ExecutionMode {
         /// Number of different seeds to try.
         num_seeds: usize,
     },
-    /// Parallel exploration of multiple seeds simultaneously.
-    /// Requires the `parallel` feature.
-    Parallel {
-        /// Number of parallel workers (0 = auto-detect).
-        num_workers: usize,
-        /// Number of seeds to explore.
-        num_seeds: usize,
-    },
 }
 
 /// Configuration for the time loop.
@@ -251,9 +243,6 @@ impl TimeLoop {
             ExecutionMode::Pure => self.run_pure(program),
             ExecutionMode::ActionGuided { config, num_seeds } => {
                 self.run_action_guided(program, config.clone(), *num_seeds)
-            }
-            ExecutionMode::Parallel { num_workers, num_seeds } => {
-                self.run_parallel(program, *num_workers, *num_seeds)
             }
         }
     }
@@ -604,42 +593,6 @@ impl TimeLoop {
         }
 
         ConvergenceStatus::Timeout { max_epochs: self.config.max_epochs }
-    }
-    
-    /// Parallel exploration of multiple seeds simultaneously.
-    /// 
-    /// When the `parallel` feature is enabled, this uses rayon for parallel execution.
-    /// Otherwise, it falls back to sequential execution (same as action-guided).
-    fn run_parallel(
-        &mut self,
-        program: &Program,
-        num_workers: usize,
-        num_seeds: usize,
-    ) -> ConvergenceStatus {
-        // NOTE: Provenance uses Arc<BTreeSet> which is Send+Sync, but the sequential
-        // fallback remains appropriate because data-dependent iteration order makes
-        // true parallelism non-trivial to implement correctly.
-        // For now, we use sequential multi-seed exploration (same as action-guided).
-        
-        #[cfg(feature = "parallel")]
-        {
-            if self.config.verbose {
-                println!(
-                    "Parallel mode requested ({} workers, {} seeds) - using optimized sequential exploration",
-                    if num_workers == 0 { num_cpus::get() } else { num_workers },
-                    num_seeds
-                );
-                println!("Note: True parallelism requires Arc-based Provenance (future work)");
-            }
-        }
-        
-        #[cfg(not(feature = "parallel"))]
-        {
-            let _ = num_workers;
-        }
-        
-        // Use action-guided search which explores multiple seeds sequentially
-        self.run_action_guided(program, ActionConfig::anti_trivial(), num_seeds)
     }
     
     /// Generate diverse seed memory states for action-guided search.
