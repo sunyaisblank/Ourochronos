@@ -152,6 +152,10 @@ pub enum ExecutionMode {
     },
 }
 
+/// Default epoch budget shared by the CLI, the REPL, and the library, so a
+/// programme behaves identically at every entry point unless overridden.
+pub const DEFAULT_MAX_EPOCHS: usize = 1000;
+
 /// Configuration for the time loop.
 #[derive(Debug, Clone)]
 pub struct TimeLoopConfig {
@@ -177,7 +181,7 @@ pub struct TimeLoopConfig {
 impl Default for TimeLoopConfig {
     fn default() -> Self {
         Self {
-            max_epochs: 10_000,
+            max_epochs: DEFAULT_MAX_EPOCHS,
             mode: ExecutionMode::Standard,
             seed: 0,
             verbose: false,
@@ -225,17 +229,16 @@ pub struct TimeLoop {
 }
 
 impl TimeLoop {
-    /// Create a new time loop, validating the configuration first.
+    /// Create a new time loop, rejecting invalid configurations.
     ///
-    /// Returns an error if any configuration constraints are violated.
-    pub fn validated(config: TimeLoopConfig) -> Result<Self, String> {
-        config.validate().map_err(|errs| errs.join("; "))?;
-        Ok(Self::new(config))
-    }
-
-    /// Create a new time loop with given configuration.
-    pub fn new(config: TimeLoopConfig) -> Self {
-        // Apply provenance saturation limit
+    /// Applies `config.provenance_limit` to the thread-local saturation
+    /// limit consulted by every Provenance merge. The limit is necessarily
+    /// thread-wide (Value's operator overloads cannot carry configuration),
+    /// so the most recently constructed TimeLoop on a thread wins; construct
+    /// one TimeLoop per run.
+    pub fn new(config: TimeLoopConfig) -> crate::core::error::OuroResult<Self> {
+        config.validate()
+            .map_err(|errors| crate::core::error::OuroError::InvalidConfiguration { errors })?;
         crate::core::provenance::set_saturation_limit(config.provenance_limit);
 
         let mut exec_config = ExecutorConfig {
@@ -250,12 +253,12 @@ impl TimeLoop {
             exec_config.input = config.frozen_inputs.clone();
         }
 
-        Self {
+        Ok(Self {
             config,
             executor: Executor::with_config(exec_config),
             captured_inputs: None,
             cache: EpochCache::with_capacity(1024),
-        }
+        })
     }
     
     /// Get cache statistics.
@@ -892,7 +895,7 @@ mod tests {
     fn run_program(source: &str) -> ConvergenceStatus {
         let program = parse(source).expect("Parse failed");
         let config = TimeLoopConfig::default();
-        let mut driver = TimeLoop::new(config);
+        let mut driver = TimeLoop::new(config).expect("valid configuration");
         driver.run(&program)
     }
     
@@ -954,7 +957,7 @@ mod tests {
         m2.write(1000, crate::core::Value::new(99));
 
         let config = TimeLoopConfig::default();
-        let tl = TimeLoop::new(config);
+        let tl = TimeLoop::new(config).expect("valid configuration");
         let cells = tl.find_oscillating_cells(&[m1, m2]);
         assert!(cells.contains(&1000), "Should detect oscillation at address 1000");
     }

@@ -440,7 +440,7 @@ fn benchmark_timeloop_convergence() {
     let mut iterations = 0u32;
 
     while iterations < MIN_ITERATIONS || start.elapsed().as_millis() < TARGET_DURATION_MS as u128 {
-        let _result = TimeLoop::new(config.clone()).run(&program);
+        let _result = TimeLoop::new(config.clone()).expect("valid configuration").run(&program);
         iterations += 1;
 
         if iterations > 1000 {

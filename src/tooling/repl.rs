@@ -41,7 +41,7 @@ impl Default for ReplConfig {
     fn default() -> Self {
         Self {
             prompt: "ouro> ".to_string(),
-            max_epochs: 100,
+            max_epochs: crate::temporal::timeloop::DEFAULT_MAX_EPOCHS,
             verbose: false,
             show_memory: false,
             show_types: false,
@@ -294,7 +294,13 @@ impl Repl {
             ..Default::default()
         };
         
-        let mut timeloop = TimeLoop::new(config);
+        let mut timeloop = match TimeLoop::new(config) {
+            Ok(timeloop) => timeloop,
+            Err(e) => {
+                println!("Configuration error: {}", e);
+                return None;
+            }
+        };
         let result = timeloop.run(&program);
         
         match &result {

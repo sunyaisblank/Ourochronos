@@ -39,7 +39,7 @@ mod tests {
                 ..Default::default()
             };
             
-            let mut driver = TimeLoop::new(config);
+            let mut driver = TimeLoop::new(config).expect("valid configuration");
             let result = driver.run(&program);
             
             if let ConvergenceStatus::Consistent { memory, output, epochs } = result {
@@ -93,7 +93,7 @@ mod tests {
                 ..Default::default()
             };
             
-            let mut driver = TimeLoop::new(config);
+            let mut driver = TimeLoop::new(config).expect("valid configuration");
             let result = driver.run(&program);
             
             if let ConvergenceStatus::Consistent { memory, output, epochs } = result {

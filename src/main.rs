@@ -337,17 +337,22 @@ fn run() -> i32 {
     };
 
     let config = Config {
-        max_epochs: 1000,
         mode,
         seed,
         verbose: diagnostic || action_mode,
-        frozen_inputs: Vec::new(),
         max_instructions,
         error_config: error_config.clone(),
         provenance_limit,
+        ..Config::default()
     };
 
-    let mut driver = TimeLoop::new(config.clone());
+    let mut driver = match TimeLoop::new(config.clone()) {
+        Ok(driver) => driver,
+        Err(e) => {
+            eprintln!("Error: {}", e);
+            return EXIT_ERROR;
+        }
+    };
     let outcome = driver.run(&program);
 
     // Record the run's outcome so --audit captures how the timeline resolved,

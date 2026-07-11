@@ -392,7 +392,7 @@ mod determinism {
         // Act
         let mut results: Vec<u64> = Vec::new();
         for _ in 0..100 {
-            let result = TimeLoop::new(default_config()).run(&program);
+            let result = TimeLoop::new(default_config()).expect("valid configuration").run(&program);
             if let ConvergenceStatus::Consistent { memory, .. } = result {
                 results.push(memory.read(0).val);
             }
@@ -525,7 +525,7 @@ mod edge_cases {
         let program = parse(code);
 
         // Act
-        let result = TimeLoop::new(default_config()).run(&program);
+        let result = TimeLoop::new(default_config()).expect("valid configuration").run(&program);
 
         // Assert: Should converge immediately
         assert_consistent(&result);
@@ -538,7 +538,7 @@ mod edge_cases {
         let program = parse(code);
 
         // Act
-        let result = TimeLoop::new(default_config()).run(&program);
+        let result = TimeLoop::new(default_config()).expect("valid configuration").run(&program);
 
         // Assert
         assert_consistent(&result);
@@ -558,19 +558,14 @@ mod edge_cases {
     }
 
     #[test]
-    fn zero_epoch_limit_handled() {
-        // Arrange
-        let code = programs::SELF_FULFILLING;
+    fn zero_epoch_limit_is_rejected_at_construction() {
+        // A zero epoch budget can only produce a degenerate 0..0 search, so
+        // the configuration is invalid by contract and unconstructable.
         let config = config_with_epochs(0);
-
-        // Act
-        let result = run_with_config(code, config);
-
-        // Assert: Should timeout immediately or handle gracefully
-        // Implementation may vary
+        let result = ourochronos::TimeLoop::new(config);
         assert!(matches!(
             result,
-            ConvergenceStatus::Timeout { .. } | ConvergenceStatus::Consistent { .. }
+            Err(ourochronos::OuroError::InvalidConfiguration { .. })
         ));
     }
 

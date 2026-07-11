@@ -38,21 +38,21 @@ mod tests {
     #[test]
     fn test_trivial_consistency() {
         let program = parse("10 20 ADD OUTPUT");
-        let result = TimeLoop::new(default_config()).run(&program);
+        let result = TimeLoop::new(default_config()).expect("valid configuration").run(&program);
         assert!(matches!(result, ConvergenceStatus::Consistent { epochs: 1, .. }));
     }
     
     #[test]
     fn test_self_fulfilling_prophecy() {
         let program = parse("0 ORACLE 0 PROPHECY");
-        let result = TimeLoop::new(default_config()).run(&program);
+        let result = TimeLoop::new(default_config()).expect("valid configuration").run(&program);
         assert!(matches!(result, ConvergenceStatus::Consistent { .. }));
     }
     
     #[test]
     fn test_grandfather_paradox() {
         let program = parse("0 ORACLE NOT 0 PROPHECY");
-        let result = TimeLoop::new(default_config()).run(&program);
+        let result = TimeLoop::new(default_config()).expect("valid configuration").run(&program);
         if let ConvergenceStatus::Oscillation { period, .. } = result {
             assert_eq!(period, 2);
         } else {
@@ -63,14 +63,14 @@ mod tests {
     #[test]
     fn test_divergence() {
         let program = parse("0 ORACLE 1 ADD 0 PROPHECY");
-        let result = TimeLoop::new(Config { max_epochs: 50, ..default_config() }).run(&program);
+        let result = TimeLoop::new(Config { max_epochs: 50, ..default_config() }).expect("valid configuration").run(&program);
         assert!(matches!(result, ConvergenceStatus::Timeout { .. } | ConvergenceStatus::Divergence { .. }));
     }
     
     #[test]
     fn test_witness_pattern_primality() {
         let program = parse("0 ORACLE DUP 3 EQ IF { DUP 0 PROPHECY } ELSE { POP 3 0 PROPHECY }");
-        let result = TimeLoop::new(default_config()).run(&program);
+        let result = TimeLoop::new(default_config()).expect("valid configuration").run(&program);
         
         match result {
             ConvergenceStatus::Consistent { memory, epochs, .. } => {
@@ -102,7 +102,7 @@ mod tests {
     #[test]
     fn test_div_by_zero() {
         let program = parse("10 0 DIV 0 PROPHECY");
-         let result = TimeLoop::new(default_config()).run(&program);
+         let result = TimeLoop::new(default_config()).expect("valid configuration").run(&program);
          if let ConvergenceStatus::Consistent { memory, .. } = result {
              assert_eq!(memory.read(0).val, 0);
          } else {
@@ -113,7 +113,7 @@ mod tests {
     #[test]
     fn test_new_opcodes() {
         let program = parse("1 2 3 ROT DEPTH 0 PROPHECY");
-        let result = TimeLoop::new(default_config()).run(&program);
+        let result = TimeLoop::new(default_config()).expect("valid configuration").run(&program);
          if let ConvergenceStatus::Consistent { memory, .. } = result {
              assert_eq!(memory.read(0).val, 3);
          } else {
@@ -133,7 +133,7 @@ mod tests {
             max_instructions: 10_000_000,
             ..Default::default()
         };
-        let result = TimeLoop::new(config).run(&program);
+        let result = TimeLoop::new(config).expect("valid configuration").run(&program);
         
         // Diagnostic mode in new timeloop returns Oscillation with Diagnosis
         if let ConvergenceStatus::Oscillation { diagnosis, .. } = result {
@@ -156,7 +156,7 @@ mod tests {
     fn test_action_guided_finds_fixed_point() {
         // Simple self-fulfilling prophecy should work with action-guided mode
         let program = parse("0 ORACLE 0 PROPHECY");
-        let result = TimeLoop::new(action_config()).run(&program);
+        let result = TimeLoop::new(action_config()).expect("valid configuration").run(&program);
         assert!(matches!(result, ConvergenceStatus::Consistent { .. }));
     }
     
@@ -165,7 +165,7 @@ mod tests {
         // Action-guided mode should prefer the fixed point that produces output
         // Program: reads oracle, if non-zero outputs it and stabilizes
         let program = parse("0 ORACLE DUP 0 EQ NOT IF { DUP OUTPUT DUP 0 PROPHECY } ELSE { 1 0 PROPHECY }");
-        let result = TimeLoop::new(action_config()).run(&program);
+        let result = TimeLoop::new(action_config()).expect("valid configuration").run(&program);
         
         match result {
             ConvergenceStatus::Consistent { output, .. } => {
@@ -198,7 +198,7 @@ mod tests {
             }
         "#);
         
-        let result = TimeLoop::new(action_config()).run(&program);
+        let result = TimeLoop::new(action_config()).expect("valid configuration").run(&program);
         
         match result {
             ConvergenceStatus::Consistent { memory, output, .. } => {

@@ -24,7 +24,7 @@ fn run_with_error_config(code: &str, error_config: ErrorConfig) -> ConvergenceSt
         error_config,
         ..Default::default()
     };
-    TimeLoop::new(config).run(&program)
+    TimeLoop::new(config).expect("valid configuration").run(&program)
 }
 
 /// Run a pre-built programme with a specific error config.
@@ -34,7 +34,7 @@ fn run_program_with_error_config(program: &Program, error_config: ErrorConfig) -
         error_config,
         ..Default::default()
     };
-    TimeLoop::new(config).run(program)
+    TimeLoop::new(config).expect("valid configuration").run(program)
 }
 
 /// Build a programme from a list of statements.

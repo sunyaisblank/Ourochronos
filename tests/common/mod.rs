@@ -222,25 +222,25 @@ pub fn assert_no_output(result: &ConvergenceStatus) {
 /// Execute a program with default configuration.
 pub fn run(code: &str) -> ConvergenceStatus {
     let program = parse(code);
-    TimeLoop::new(default_config()).run(&program)
+    TimeLoop::new(default_config()).expect("valid configuration").run(&program)
 }
 
 /// Execute a program with a specific configuration.
 pub fn run_with_config(code: &str, config: Config) -> ConvergenceStatus {
     let program = parse(code);
-    TimeLoop::new(config).run(&program)
+    TimeLoop::new(config).expect("valid configuration").run(&program)
 }
 
 /// Execute a program in action-guided mode.
 pub fn run_action_guided(code: &str) -> ConvergenceStatus {
     let program = parse(code);
-    TimeLoop::new(action_config()).run(&program)
+    TimeLoop::new(action_config()).expect("valid configuration").run(&program)
 }
 
 /// Execute a program in diagnostic mode.
 pub fn run_diagnostic(code: &str) -> ConvergenceStatus {
     let program = parse(code);
-    TimeLoop::new(diagnostic_config()).run(&program)
+    TimeLoop::new(diagnostic_config()).expect("valid configuration").run(&program)
 }
 
 // =============================================================================
@@ -255,7 +255,7 @@ pub fn verify_determinism(code: &str, runs: usize) -> bool {
     let mut results: Vec<Vec<u64>> = Vec::new();
 
     for _ in 0..runs {
-        let result = TimeLoop::new(config.clone()).run(&program);
+        let result = TimeLoop::new(config.clone()).expect("valid configuration").run(&program);
         if let ConvergenceStatus::Consistent { memory, .. } = result {
             // Collect all non-zero memory values
             let values: Vec<u64> = (0..256u16)

@@ -180,7 +180,7 @@ mod tests {
             
             if let Ok(program) = parser.parse_program() {
                 let config = crate::temporal::timeloop::TimeLoopConfig::default();
-                let mut driver = TimeLoop::new(config);
+                let mut driver = TimeLoop::new(config).expect("valid configuration");
                 let result = driver.run(&program);
                 
                 match result {

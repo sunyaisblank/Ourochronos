@@ -455,6 +455,11 @@ pub enum OuroError {
         message: String,
         location: Option<SourceLocation>,
     },
+
+    /// Configuration rejected at construction time.
+    InvalidConfiguration {
+        errors: Vec<String>,
+    },
 }
 
 /// Memory operation type for error context.
@@ -651,6 +656,10 @@ impl fmt::Display for OuroError {
                     write!(f, "Internal error: {}", message)
                 }
             }
+
+            OuroError::InvalidConfiguration { errors } => {
+                write!(f, "Invalid configuration: {}", errors.join("; "))
+            }
         }
     }
 }
@@ -808,7 +817,8 @@ impl OuroError {
             OuroError::ConnectionFailed { .. } |
             OuroError::Timeout { .. } => ErrorCategory::IO,
 
-            OuroError::Internal { .. } => ErrorCategory::Internal,
+            OuroError::Internal { .. } |
+            OuroError::InvalidConfiguration { .. } => ErrorCategory::Internal,
         }
     }
 
@@ -871,6 +881,7 @@ impl OuroError {
 
             // Internal: 9000-9999
             OuroError::Internal { .. } => 9001,
+            OuroError::InvalidConfiguration { .. } => 9002,
         }
     }
 
