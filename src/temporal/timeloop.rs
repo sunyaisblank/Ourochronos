@@ -247,6 +247,24 @@ impl TimeLoop {
         }
     }
     
+    /// Capture the inputs consumed by the first epoch that read any, and
+    /// replay them in every subsequent epoch.
+    ///
+    /// This is the Temporal Input Invariant: information flows from the
+    /// external world into the loop, never backwards. Without freezing, an
+    /// interactive INPUT would be re-read on every epoch of the search, so
+    /// the epoch function F would vary between iterations and the fixed
+    /// point would depend on how often the user was prompted.
+    fn freeze_inputs(&mut self, result: &crate::vm::EpochResult) {
+        if self.captured_inputs.is_none() && !result.inputs_consumed.is_empty() {
+            self.captured_inputs = Some(result.inputs_consumed.clone());
+            self.executor.config.input = result.inputs_consumed.clone();
+            if self.config.verbose {
+                println!("Input frozen: {:?}", self.captured_inputs.as_ref().unwrap());
+            }
+        }
+    }
+
     /// Run a trivially consistent program (no oracle operations).
     fn run_trivial(&mut self, program: &Program) -> ConvergenceStatus {
         let result = self.executor.run_epoch(program, &Memory::new());
@@ -321,16 +339,8 @@ impl TimeLoop {
             
             // Run epoch (cache miss)
             let result = self.executor.run_epoch(program, &anamnesis);
-            
-            // On epoch 0, capture inputs and freeze them for subsequent epochs
-            if epoch == 0 && !result.inputs_consumed.is_empty() && self.captured_inputs.is_none() {
-                self.captured_inputs = Some(result.inputs_consumed.clone());
-                self.executor.config.input = result.inputs_consumed;
-                if self.config.verbose {
-                    println!("Input frozen: {:?}", self.captured_inputs.as_ref().unwrap());
-                }
-            }
-            
+            self.freeze_inputs(&result);
+
             // Store in cache
             self.cache.insert(state_hash, MemoizedResult::simple(
                 result.present.clone(),
@@ -416,7 +426,8 @@ impl TimeLoop {
             
             // Run epoch
             let result = self.executor.run_epoch(program, &anamnesis);
-            
+            self.freeze_inputs(&result);
+
             match result.status {
                 EpochStatus::Finished => {
                     if result.present.values_equal(&anamnesis) {
@@ -428,14 +439,14 @@ impl TimeLoop {
                     }
                     anamnesis = result.present;
                 }
-                
+
                 EpochStatus::Paradox => {
                     return ConvergenceStatus::Paradox {
                         message: "Explicit PARADOX instruction".to_string(),
                         epoch: epoch + 1,
                     };
                 }
-                
+
                 EpochStatus::Error(e) => {
                     return ConvergenceStatus::Error {
                         message: e,
@@ -456,9 +467,10 @@ impl TimeLoop {
     fn run_pure(&mut self, program: &Program) -> ConvergenceStatus {
         let mut anamnesis = self.create_initial_anamnesis();
         let mut epoch = 0;
-        
+
         loop {
             let result = self.executor.run_epoch(program, &anamnesis);
+            self.freeze_inputs(&result);
             epoch += 1;
             
             match result.status {
@@ -560,10 +572,11 @@ impl TimeLoop {
             }
             
             seen_states.insert(state_hash, epoch);
-            
+
             // Run epoch
             let result = self.executor.run_epoch(program, &anamnesis);
-            
+            self.freeze_inputs(&result);
+
             match result.status {
                 EpochStatus::Finished => {
                     // Check for fixed point

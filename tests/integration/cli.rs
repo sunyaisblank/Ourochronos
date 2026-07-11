@@ -90,3 +90,38 @@ fn non_converging_program_exits_three() {
     assert_eq!(out.status.code(), Some(3), "stdout was: {}", text);
     assert!(text.contains("TIMEOUT"));
 }
+
+#[test]
+fn diagnostic_mode_freezes_interactive_input() {
+    // The Temporal Input Invariant: the first epoch's inputs are replayed in
+    // every later epoch. Before the fix only standard mode froze inputs;
+    // diagnostic mode re-read stdin each epoch, so with input lines 5, 9, 7
+    // the search would drift to the EOF fallback (0) instead of converging
+    // on the first value read.
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let dir = std::env::temp_dir().join("ouro-cli-tests");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("frozen_input.ouro");
+    std::fs::write(&path, "INPUT DUP 0 PROPHECY OUTPUT 0 ORACLE POP\n").expect("write programme");
+
+    let mut child = ouro()
+        .args([path.to_str().unwrap(), "--diagnostic"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("binary runs");
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin")
+        .write_all(b"5\n9\n7\n")
+        .expect("pipe input");
+    let out = child.wait_with_output().expect("binary finishes");
+
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(0), "stdout was: {}", text);
+    assert!(text.contains("[5]"), "expected frozen input 5, stdout was: {}", text);
+}
