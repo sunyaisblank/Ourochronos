@@ -1447,13 +1447,7 @@ Run with --effects unrestricted to permit this.",
 
             OpCode::Random => {
                 // ( -- random_value )
-                // Simple pseudo-random using time
-                use std::time::{SystemTime, UNIX_EPOCH};
-                let nanos = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .subsec_nanos();
-                state.stack.push(Value::new(nanos as u64));
+                state.stack.push(Value::new(random_u64()));
             }
         }
 
@@ -1488,18 +1482,34 @@ Run with --effects unrestricted to permit this.",
 
     /// Read input interactively.
     fn read_input_interactive(&self) -> u64 {
-        print!("INPUT> ");
-        io::stdout().flush().ok();
-        
-        let stdin = io::stdin();
-        let mut line = String::new();
-        
-        if stdin.lock().read_line(&mut line).is_ok() {
-            line.trim().parse().unwrap_or(0)
-        } else {
-            0
-        }
+        read_input_interactive()
     }
+}
+
+/// Read one line from stdin as a u64 (0 on EOF or parse failure).
+/// Shared by both VMs so INPUT has a single interactive semantics.
+pub(crate) fn read_input_interactive() -> u64 {
+    print!("INPUT> ");
+    io::stdout().flush().ok();
+
+    let stdin = io::stdin();
+    let mut line = String::new();
+
+    if stdin.lock().read_line(&mut line).is_ok() {
+        line.trim().parse().unwrap_or(0)
+    } else {
+        0
+    }
+}
+
+/// Time-derived pseudo-random value. Shared by both VMs so RANDOM has a
+/// single (deliberately non-deterministic) semantics.
+pub(crate) fn random_u64() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_nanos() as u64
 }
 
 impl Default for Executor {

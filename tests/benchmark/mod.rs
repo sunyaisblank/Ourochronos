@@ -461,42 +461,54 @@ fn benchmark_timeloop_convergence() {
 // Invariant Tests (Benchmark-Related)
 // =============================================================================
 
-/// Verify that FastVM produces identical results to VM for pure programs.
+/// Verify that FastVM is observably indistinguishable from the VM for pure
+/// programmes: identical output buffers and successful completion. This is
+/// the differential gate behind fast_vm's semantic-preservation claim.
 #[test]
 fn invariant_fastvm_matches_vm() {
     let pure_programs = [
-        "10 20 ADD",
-        "1 2 3 ROT",
-        "5 DUP MUL",
-        "100 50 SUB 25 ADD",
-        "7 3 MOD",
+        "10 20 ADD OUTPUT",
+        "1 2 3 ROT OUTPUT OUTPUT OUTPUT",
+        "5 DUP MUL OUTPUT",
+        "100 50 SUB 25 ADD OUTPUT",
+        "7 3 MOD OUTPUT",
+        "72 EMIT 73 EMIT",
+        "1 IF { 42 OUTPUT } ELSE { 7 OUTPUT }",
+        "3 WHILE { DUP 0 GT } { DUP OUTPUT 1 SUB } POP",
+        "INPUT OUTPUT INPUT OUTPUT",
     ];
+    let scripted_input = vec![11u64, 22u64];
 
     for code in &pure_programs {
         let program = parse(code);
+        assert!(is_program_pure(&program), "expected pure: {}", code);
 
-        // Run in VM
         let config = ExecutorConfig {
             max_instructions: 10_000,
             immediate_output: false,
-            input: Vec::new(),
+            input: scripted_input.clone(),
             ..Default::default()
         };
         let mut vm_exec = Executor::with_config(config);
         let anamnesis = Memory::new();
         let vm_result = vm_exec.run_epoch(&program, &anamnesis);
+        assert_eq!(vm_result.status, EpochStatus::Finished, "VM failed for: {}", code);
 
-        // Run in FastVM
-        if is_program_pure(&program) {
-            let mut fast_exec = FastExecutor::new(10_000);
-            let _ = fast_exec.execute_pure(&program, &program.quotes);
+        let mut fast_exec = FastExecutor::new(10_000).with_input(scripted_input.clone());
+        fast_exec
+            .execute_pure(&program, &program.quotes)
+            .unwrap_or_else(|e| panic!("FastVM failed for {}: {}", code, e));
 
-            // At minimum, both should complete successfully
-            assert!(
-                vm_result.status == EpochStatus::Finished,
-                "VM failed for: {}", code
-            );
-        }
+        let vm_out: Vec<String> = vm_result.output.iter().map(render_output_item).collect();
+        let fast_out: Vec<String> = fast_exec.output.iter().map(render_output_item).collect();
+        assert_eq!(vm_out, fast_out, "output diverged for: {}", code);
+    }
+}
+
+fn render_output_item(item: &ourochronos::OutputItem) -> String {
+    match item {
+        ourochronos::OutputItem::Val(v) => format!("v{}", v.val),
+        ourochronos::OutputItem::Char(c) => format!("c{}", c),
     }
 }
 

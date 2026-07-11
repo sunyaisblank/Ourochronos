@@ -15,9 +15,11 @@
 //!
 //! # Semantic Preservation
 //!
-//! The fast VM produces identical results to the standard VM for all pure
-//! programmes. Temporal semantics are preserved by falling back to the
-//! standard VM when ORACLE/PROPHECY operations are encountered.
+//! For pure programmes the fast VM must be observably indistinguishable from
+//! the standard VM: same output buffer, same status, same INPUT sourcing
+//! (scripted values, then interactive), same RANDOM implementation. The
+//! differential invariant test in tests/benchmark pins this. Temporal
+//! programmes fall back to the standard VM.
 
 use crate::ast::{OpCode, Stmt, Program};
 use crate::core::{Value, Memory, OutputItem};
@@ -312,6 +314,11 @@ pub struct FastExecutor {
     pub max_instructions: u64,
     /// Execution status
     pub status: EpochStatus,
+    /// Scripted input values, consumed before falling back to stdin
+    /// (mirrors ExecutorConfig::input).
+    pub input: Vec<u64>,
+    /// Position in the scripted input.
+    input_cursor: usize,
 }
 
 impl FastExecutor {
@@ -324,7 +331,16 @@ impl FastExecutor {
             instructions_executed: 0,
             max_instructions,
             status: EpochStatus::Running,
+            input: Vec::new(),
+            input_cursor: 0,
         }
+    }
+
+    /// Provide scripted input values, consumed by INPUT before stdin.
+    pub fn with_input(mut self, input: Vec<u64>) -> Self {
+        self.input = input;
+        self.input_cursor = 0;
+        self
     }
 
     /// Execute a pure program (no ORACLE/PROPHECY).
@@ -722,16 +738,26 @@ impl FastExecutor {
             }
 
             OpCode::Emit => {
+                // Buffered only, exactly like the standard VM: the caller
+                // prints the output buffer, so printing here as well would
+                // emit every character twice.
                 let val = self.stack.pop().ok_or("Stack underflow: EMIT")?;
                 let char_val = (val % 256) as u8;
-                print!("{}", char_val as char);
                 self.output.push(OutputItem::Char(char_val));
                 Ok(())
             }
 
             OpCode::Input => {
-                // Input returns 0 in fast mode (no interactive input)
-                self.stack.push(0);
+                // Scripted values first, then interactive stdin: the same
+                // sourcing as the standard VM.
+                let val = if self.input_cursor < self.input.len() {
+                    let v = self.input[self.input_cursor];
+                    self.input_cursor += 1;
+                    v
+                } else {
+                    super::executor::read_input_interactive()
+                };
+                self.stack.push(val);
                 Ok(())
             }
 
@@ -755,15 +781,7 @@ impl FastExecutor {
             }
 
             OpCode::Random => {
-                // Simple PRNG (xorshift)
-                static mut SEED: u64 = 0x12345678;
-                let val = unsafe {
-                    SEED ^= SEED << 13;
-                    SEED ^= SEED >> 7;
-                    SEED ^= SEED << 17;
-                    SEED
-                };
-                self.stack.push(val);
+                self.stack.push(super::executor::random_u64());
                 Ok(())
             }
 
