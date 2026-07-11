@@ -12,7 +12,6 @@
 //! - `:verbose` - Toggle verbose mode
 //! - `:type <code>` - Type check code without executing
 //! - `:trace <code>` - Execute with debugging trace
-//! - `:profile` - Toggle profiling mode
 //! - `:load <file>` - Load and execute a file
 
 use std::io::{self, Write, BufRead};
@@ -24,7 +23,6 @@ use crate::temporal::timeloop::{TimeLoop, TimeLoopConfig, ConvergenceStatus};
 use crate::core::Memory;
 use crate::types::TypeChecker;
 use super::debugger::Debugger;
-use super::profiler::{Profiler, ProfilerConfig};
 
 /// REPL configuration.
 #[derive(Debug, Clone)]
@@ -37,8 +35,6 @@ pub struct ReplConfig {
     pub verbose: bool,
     /// Show memory after each evaluation.
     pub show_memory: bool,
-    /// Enable profiling.
-    pub profiling: bool,
     /// Show type information.
     pub show_types: bool,
 }
@@ -50,7 +46,6 @@ impl Default for ReplConfig {
             max_epochs: 100,
             verbose: false,
             show_memory: false,
-            profiling: false,
             show_types: false,
         }
     }
@@ -61,7 +56,6 @@ pub struct Repl {
     config: ReplConfig,
     memory: Memory,
     history: Vec<String>,
-    profiler: Profiler,
     debugger: Option<Debugger>,
 }
 
@@ -77,7 +71,6 @@ impl Repl {
             config,
             memory: Memory::new(),
             history: Vec::new(),
-            profiler: Profiler::with_config(ProfilerConfig::minimal()),
             debugger: None,
         }
     }
@@ -142,8 +135,7 @@ impl Repl {
             }
             ":clear" | ":c" => {
                 self.memory = Memory::new();
-                self.profiler.reset();
-                println!("Memory and profiler cleared.");
+                println!("Memory cleared.");
             }
             ":history" => {
                 for (i, line) in self.history.iter().enumerate() {
@@ -168,28 +160,12 @@ impl Repl {
                     self.trace(args);
                 }
             }
-            ":profile" => {
-                self.config.profiling = !self.config.profiling;
-                if self.config.profiling {
-                    self.profiler = Profiler::with_config(ProfilerConfig::full());
-                    println!("Profiling enabled. Run code to collect metrics.");
-                } else {
-                    // Show summary before disabling
-                    let summary = self.profiler.summary();
-                    println!("{}", summary);
-                    println!("Profiling disabled.");
-                }
-            }
             ":load" | ":l" => {
                 if args.is_empty() {
                     println!("Usage: :load <file>");
                 } else {
                     self.load_file(args);
                 }
-            }
-            ":stats" => {
-                let summary = self.profiler.summary();
-                println!("{}", summary);
             }
             ":debug" => {
                 if self.debugger.is_some() {
@@ -198,20 +174,6 @@ impl Repl {
                 } else {
                     self.debugger = Some(Debugger::new());
                     println!("Debug mode enabled. Use :trace to see execution details.");
-                }
-            }
-            ":epochs" => {
-                let epochs = self.profiler.epochs();
-                if epochs.is_empty() {
-                    println!("No epoch data. Enable profiling first.");
-                } else {
-                    println!("Epoch History:");
-                    for ep in epochs {
-                        println!("  Epoch {}: {:?} ({} instrs, {} oracle, {} prophecy){}",
-                                 ep.epoch, ep.duration, ep.instruction_count,
-                                 ep.oracle_count, ep.prophecy_count,
-                                 if ep.paradox { " [PARADOX]" } else { "" });
-                    }
                 }
             }
             _ => {
@@ -229,16 +191,13 @@ impl Repl {
         println!("  :quit, :q         Exit the REPL");
         println!("  :help, :h         Show this help");
         println!("  :memory, :m       Show memory state");
-        println!("  :clear, :c        Clear memory and profiler");
+        println!("  :clear, :c        Clear memory");
         println!("  :history          Show command history");
         println!("  :verbose          Toggle verbose mode");
         println!();
         println!("Analysis Commands:");
         println!("  :type <code>      Type check code without executing");
         println!("  :trace <code>     Execute with debugging trace");
-        println!("  :profile          Toggle profiling mode");
-        println!("  :stats            Show current profiling statistics");
-        println!("  :epochs           Show epoch history");
         println!("  :debug            Toggle debug mode");
         println!("  :load <file>      Load and execute a file");
         println!();
@@ -530,34 +489,18 @@ mod tests {
     }
 
     #[test]
-    fn test_repl_profiling() {
-        let mut repl = Repl::new();
-        repl.config.profiling = true;
-
-        // Eval with profiling enabled should not panic
-        repl.eval("1 2 ADD");
-
-        // Verify profiler is accessible and produces a summary
-        let summary = repl.profiler.summary();
-        // The REPL eval path does not feed epoch data into the profiler,
-        // so we verify the summary is constructible without error.
-        assert_eq!(summary.total_epochs, 0);
-    }
-
-    #[test]
     fn test_repl_config() {
         let config = ReplConfig {
             prompt: "test> ".to_string(),
             max_epochs: 50,
             verbose: true,
             show_memory: true,
-            profiling: true,
             show_types: true,
         };
 
         let repl = Repl::with_config(config);
         assert!(repl.config.verbose);
-        assert!(repl.config.profiling);
+        assert!(repl.config.show_memory);
     }
 
     #[test]
@@ -569,12 +512,6 @@ mod tests {
         let quit = repl.handle_command(":verbose");
         assert!(!quit);
         assert!(repl.config.verbose);
-
-        // Test :profile toggle
-        assert!(!repl.config.profiling);
-        let quit = repl.handle_command(":profile");
-        assert!(!quit);
-        assert!(repl.config.profiling);
 
         // Test unknown command doesn't quit
         let quit = repl.handle_command(":unknown");

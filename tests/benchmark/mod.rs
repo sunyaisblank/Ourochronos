@@ -1,9 +1,8 @@
-//! Benchmark Tests for Ourochronos VM and JIT.
+//! Benchmark Tests for Ourochronos VM.
 //!
 //! This module provides performance comparison tests between:
 //! - Standard VM (with provenance tracking)
 //! - Fast VM (register-cached, no provenance)
-//! - JIT compilation (when enabled)
 //!
 //! ## Benchmark Categories
 //!
@@ -193,61 +192,6 @@ fn benchmark_fast_vm(name: &str, program: &Program, max_instructions: u64) -> Be
         iterations,
         total_instructions,
         success,
-    }
-}
-
-/// Benchmark JIT compilation (if available).
-#[cfg(feature = "jit")]
-fn benchmark_jit(name: &str, program: &Program) -> BenchmarkResult {
-    use ourochronos::optimization::jit::JitCompiler;
-
-    let start = Instant::now();
-
-    match JitCompiler::new() {
-        Ok(mut jit) => {
-            match jit.compile(program) {
-                Ok(_compiled) => {
-                    let compile_time = start.elapsed();
-
-                    BenchmarkResult {
-                        name: format!("JIT:{}", name),
-                        total_time: compile_time,
-                        iterations: 1,
-                        total_instructions: jit.stats.opcodes_translated as u64,
-                        success: true,
-                    }
-                }
-                Err(e) => {
-                    BenchmarkResult {
-                        name: format!("JIT:{}", name),
-                        total_time: start.elapsed(),
-                        iterations: 0,
-                        total_instructions: 0,
-                        success: false,
-                    }
-                }
-            }
-        }
-        Err(_) => {
-            BenchmarkResult {
-                name: format!("JIT:{}", name),
-                total_time: Duration::ZERO,
-                iterations: 0,
-                total_instructions: 0,
-                success: false,
-            }
-        }
-    }
-}
-
-#[cfg(not(feature = "jit"))]
-fn benchmark_jit(_name: &str, _program: &Program) -> BenchmarkResult {
-    BenchmarkResult {
-        name: "JIT:disabled".to_string(),
-        total_time: Duration::ZERO,
-        iterations: 0,
-        total_instructions: 0,
-        success: false,
     }
 }
 
@@ -511,32 +455,6 @@ fn benchmark_timeloop_convergence() {
         "TimeLoop:consistent: {:?}/iter ({} iters)",
         avg, iterations
     );
-}
-
-#[test]
-fn benchmark_jit_compilation() {
-    println!("\n=== JIT Compilation Benchmark ===");
-
-    let programs = [
-        ("fibonacci", FIBONACCI_N),
-        ("factorial", FACTORIAL),
-        ("arithmetic", ARITHMETIC_LOOP),
-        ("stack", STACK_STRESS),
-    ];
-
-    for (name, code) in &programs {
-        let program = parse(code);
-        let result = benchmark_jit(name, &program);
-
-        if result.success {
-            println!(
-                "JIT compile time for {}: {:?} ({} opcodes)",
-                name, result.total_time, result.total_instructions
-            );
-        } else {
-            println!("JIT: {} - not available or compilation failed", name);
-        }
-    }
 }
 
 // =============================================================================

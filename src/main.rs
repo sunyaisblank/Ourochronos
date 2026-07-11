@@ -1,6 +1,5 @@
 use ourochronos::{TimeLoop, ConvergenceStatus, Config, ExecutionMode, tokenize, Parser, ActionConfig, type_check, types, ErrorConfig};
 use ourochronos::vm::fast_vm::{is_program_pure, FastExecutor};
-use ourochronos::optimization::tracing_jit::JitFastExecutor;
 use ourochronos::vm::EpochStatus;
 use ourochronos::audit::{self, AuditEntry, AuditConfig, AuditFormat, ActionCategory, Severity};
 use std::env;
@@ -39,7 +38,6 @@ fn main() {
         println!("  --seeds <n>     Number of seeds to try in action mode (default: 4)");
         println!("  --max-inst <n>  Maximum instructions per epoch (default: 10000000)");
         println!("  --fast          Use fast VM for pure (non-temporal) programmes");
-        println!("  --jit           Use JIT-enabled fast VM with hot loop compilation");
         println!("  --lsp           Start Language Server Protocol server");
         println!("  --strict        Strict error handling (bounds violations produce errors)");
         println!("  --permissive    Permissive error handling (wrap addresses, zero on underflow)");
@@ -55,7 +53,6 @@ fn main() {
     let smt = args.contains(&"--smt".to_string());
     let typecheck_mode = args.contains(&"--typecheck".to_string());
     let fast_mode = args.contains(&"--fast".to_string());
-    let jit_mode = args.contains(&"--jit".to_string());
     let strict_mode = args.contains(&"--strict".to_string());
     let permissive_mode = args.contains(&"--permissive".to_string());
 
@@ -142,7 +139,7 @@ fn main() {
         AuditEntry::new("STARTUP", "System", "ourochronos", "CLI session started")
             .with_category(ActionCategory::System)
             .with_meta("file", filename)
-            .with_meta("mode", if action_mode { "action" } else if fast_mode { "fast" } else if jit_mode { "jit" } else { "standard" })
+            .with_meta("mode", if action_mode { "action" } else if fast_mode { "fast" } else { "standard" })
     );
 
     let source = fs::read_to_string(filename).expect("Failed to read file");
@@ -221,49 +218,6 @@ fn main() {
                         }
                         Err(e) => {
                             eprintln!("Fast VM Error: {}", e);
-                        }
-                    }
-                    return;
-                } else if diagnostic {
-                    println!("Programme contains temporal operations, falling back to standard VM");
-                }
-            }
-
-            // JIT-enabled fast VM mode for pure programmes
-            if jit_mode {
-                if is_program_pure(&program) {
-                    if diagnostic {
-                        println!("Using JIT-enabled fast VM (pure programme detected)");
-                    }
-                    let mut jit_exec = JitFastExecutor::new(max_instructions);
-                    match jit_exec.execute_pure(&program, &program.quotes) {
-                        Ok(()) => {
-                            if jit_exec.status == EpochStatus::Running {
-                                jit_exec.status = EpochStatus::Finished;
-                            }
-                            if jit_exec.status == EpochStatus::Finished {
-                                if !jit_exec.output.is_empty() {
-                                    for val in &jit_exec.output {
-                                        match val {
-                                            ourochronos::OutputItem::Val(v) => print!("[{}]", v.val),
-                                            ourochronos::OutputItem::Char(c) => print!("{}", *c as char),
-                                        }
-                                    }
-                                    println!();
-                                }
-                                // Print JIT stats if diagnostic
-                                if diagnostic {
-                                    let stats = jit_exec.jit_stats();
-                                    println!("JIT Stats: {} traces recorded, {} compiled, {} compiled executions",
-                                        stats.traces_recorded, stats.traces_compiled, stats.compiled_executions);
-                                    println!("Instructions saved: {}", stats.instructions_saved);
-                                }
-                            } else if let EpochStatus::Error(msg) = &jit_exec.status {
-                                eprintln!("ERROR: {}", msg);
-                            }
-                        }
-                        Err(e) => {
-                            eprintln!("JIT VM Error: {}", e);
                         }
                     }
                     return;

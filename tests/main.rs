@@ -12,7 +12,6 @@
 //!   - temporal_semantics: Core temporal mechanics
 //! - **benchmark**: Performance comparison tests
 //!   - VM vs FastVM performance
-//!   - JIT compilation benchmarks
 //! - **stress**: Heavy load stress tests (ignored by default)
 //!   - Memory operations
 //!   - Provenance merges

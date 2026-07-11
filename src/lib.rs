@@ -22,17 +22,12 @@ pub mod types;
 pub mod vm;
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Layer 4: Optimization (depends on vm, compiler)
-// ═══════════════════════════════════════════════════════════════════════════
-pub mod optimization;
-
-// ═══════════════════════════════════════════════════════════════════════════
-// Layer 5: Runtime (depends on core, vm)
+// Layer 4: Runtime (depends on core, vm)
 // ═══════════════════════════════════════════════════════════════════════════
 pub mod runtime;
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Layer 6: Tooling (depends on all)
+// Layer 5: Tooling (depends on all)
 // ═══════════════════════════════════════════════════════════════════════════
 pub mod tooling;
 
@@ -71,7 +66,6 @@ pub use vm::{Executor, EpochStatus, FastExecutor};
 // Tooling
 pub use tooling::repl::{Repl, ReplConfig};
 pub use tooling::debugger::Debugger;
-pub use tooling::profiler::Profiler;
 
 // Standard library
 pub use stdlib::StdLib;
