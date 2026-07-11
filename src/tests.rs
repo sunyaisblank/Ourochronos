@@ -314,3 +314,26 @@ mod opcode_registration {
         }
     }
 }
+
+#[cfg(test)]
+mod specification_drift {
+    use crate::ast::OpCode;
+
+    /// The specification's opcode reference must cover every opcode. The
+    /// table is derived from the enum; this gate keeps it that way when a
+    /// variant is added.
+    #[test]
+    fn specification_lists_every_opcode() {
+        let spec = include_str!("../docs/specification.md");
+        let missing: Vec<&str> = OpCode::ALL
+            .iter()
+            .map(|op| op.name())
+            .filter(|kw| !spec.contains(&format!("`{}`", kw)))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "opcodes absent from docs/specification.md: {:?}",
+            missing
+        );
+    }
+}

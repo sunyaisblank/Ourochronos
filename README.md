@@ -1,264 +1,66 @@
-# OUROCHRONOS
+# Ourochronos
 
-*A programming language where the future computes the past.*
+A programming language where programs read their own future.
 
-> "The distinction between past, present and future is only a stubbornly persistent illusion."  
-> — Albert Einstein
+Ourochronos implements Deutsch's self-consistency model of closed timelike curves as an executable language. A program is not run once; it defines a transformation F over a 65,536-cell memory, and execution searches for a state S with F(S) = S. Aaronson and Watrous proved that classical computation with access to this fixed-point constraint decides exactly PSPACE, so the language expresses search problems as consistency conditions: verify a witness read from the future, and stabilise the timeline when it is correct.
 
-## What Is This?
+## The two memories
 
-Ourochronos is a programming language built on a radical premise: **what if causality could flow backwards?**
-
-In conventional programming, cause precedes effect. You provide inputs, computation occurs, outputs emerge. Time flows in one direction. Ourochronos inverts this assumption. Programs can receive information from their own future, act upon it, and send information back to their past. Execution is not a linear transformation but a search for *temporal self-consistency*.
-
-This is not simulation. This is not metaphor. Ourochronos implements the actual computational model that physicists use to reason about closed timelike curves—the theoretical structures in spacetime that would permit genuine time travel.
+Every program sees two memory spaces. The *anamnesis* is read-only and holds the state of the world as it will be at the end of the run; reading it with `ORACLE` is how the future speaks. The *present* is read-write and holds the world being built; writing it with `PROPHECY` is how this run answers. Execution repeats the program, feeding each run's present back as the next run's anamnesis, until the two agree.
 
 ```ourochronos
 # Ask the future for a factor of 15
 0 ORACLE
 DUP 15 SWAP MOD 0 EQ
 IF {
-    # The future was correct. Stabilise the timeline.
-    DUP 0 PROPHECY
+    DUP 0 PROPHECY      # correct: stabilise the timeline
     OUTPUT
 } ELSE {
-    # The future was wrong. Change it.
-    1 ADD 0 PROPHECY
+    1 ADD 0 PROPHECY    # wrong: perturb, forcing another epoch
 }
 ```
 
-Run this program. The number `3` appears. Where did it come from? The program never searched for factors. It asked the future, verified the answer, and stabilised the only consistent timeline. The factor `3` exists because it must exist—no other value permits the causal loop to close.
+Running this prints `3`. The program never searches for factors; it verifies the future's claim and rejects timelines where the claim is false. The value exists because no other value permits the loop to close.
 
----
+Three outcomes are possible for any program. A *consistent* timeline is found and reported. A *paradox* is detected: the classic case is `0 ORACLE NOT 0 PROPHECY`, which negates whatever the future says and therefore oscillates with period 2 (the grandfather paradox). Or the search *times out* without a verdict. The process exit code distinguishes all three, so scripts can tell "no fixed point exists" from "gave up looking".
 
-## The Name
-
-**Ourochronos** fuses two Greek roots:
-
-- **Ouroboros** (οὐροβόρος): The serpent devouring its own tail. Symbol of cyclical return, self-reference, and eternal recurrence.
-- **Chronos** (Χρόνος): Time as sequence, measurement, duration. The river that flows from past to future.
-
-Together: *time consuming itself*. A timeline that curves back, where effect becomes cause becomes effect. The future reaches into the past; the past shapes the future that shaped it.
-
----
-
-## Why Does This Exist?
-
-### The Theoretical Motivation
-
-In 1991, physicist David Deutsch proposed a resolution to the paradoxes of time travel. If closed timelike curves exist, he argued, they must obey a *self-consistency condition*: the state entering the time loop must equal the state exiting it. Nature would be forced to find a fixed point.
-
-In 2008, Scott Aaronson and John Watrous proved a remarkable theorem: computers with access to such time loops would have exactly the power of PSPACE—the class of problems solvable with polynomial memory. This is vastly more powerful than ordinary computation, yet precisely bounded.
-
-Ourochronos makes these theoretical results *programmable*. It is, to our knowledge, the first language to implement Deutschian CTC semantics as executable code.
-
-### The Philosophical Motivation
-
-Programming languages encode assumptions about reality. Imperative languages assume time flows forward. Functional languages assume referential transparency. Logic languages assume the law of excluded middle.
-
-What assumptions does Ourochronos encode?
-
-- That causality is not fundamental, but emergent from consistency constraints
-- That "past" and "future" are perspectives, not ontological categories
-- That computation is not transformation but *equilibrium-finding*
-- That paradoxes are not errors but structural features of impossible programs
-
-You must not mistake these as mere technical choices as they are actually philosophical positions about the nature of time, causation, and reality itself.
-
----
-
-## Core Concepts
-
-### The Two Memories
-
-Every Ourochronos program operates on two memory spaces:
-
-**Anamnesis** (ἀνάμνησις, "recollection"): Read-only memory containing the state of the world as it will be at the end of execution. This is the voice of the future, whispering backwards through time.
-
-**Present**: Read-write memory being constructed during execution. This is the world you are building, which will become the anamnesis of the next iteration.
-
-### The Fixed-Point Condition
-
-A program is *temporally consistent* when Present equals Anamnesis:
-
-$$S = F(S)$$
-
-Where $F$ is the transformation defined by your program, and $S$ is the memory state. Execution is the search for such a fixed point.
-
-### The Temporal Operators
-
-```
-ORACLE   : Read from Anamnesis (receive from future)
-PROPHECY : Write to Present (send to past)
-```
-
-These are the primitives of retrocausation. Every other operation is conventional stack manipulation and arithmetic.
-
----
-
-## Installation
+## Install and run
 
 ```bash
-git clone https://github.com/yourusername/ourochronos.git
-cd ourochronos
+git clone https://github.com/sunyaisblank/Ourochronos.git
+cd Ourochronos
 cargo install --path .
+
+ourochronos examples/hello.ouro
+ourochronos examples/paradox.ouro     # exits 2: oscillation, period 2
+ourochronos repl
 ```
 
-## Usage
+| Flag | Purpose |
+|------|---------|
+| `--diagnostic` | Record the full trajectory; diagnose paradoxes and divergence |
+| `--action` | Explore several seeds and select the least-action fixed point |
+| `--seeds <n>`, `--seed <n>` | Control the action-mode search |
+| `--typecheck` | Static temporal-taint analysis before running |
+| `--smt` | Emit SMT-LIB2 constraints instead of running (`z3 program.smt2`) |
+| `--fast` | Fast VM for programs with no temporal operations |
+| `--max-inst <n>` | Instruction budget per epoch |
+| `--effects decline\|unrestricted` | Whether file writes, sockets, RANDOM, and CLOCK are permitted inside the search (default: decline) |
+| `--strict`, `--permissive` | Error-handling policy |
+| `--audit [file]`, `--audit-json` | Structured logging of the run and its outcome |
+| `--provenance-limit <n>` | Saturation limit for causal-dependency tracking |
+| `--lsp` | Language server (build with `--features lsp`) |
 
-```bash
-# Run a program
-ourochronos program.ouro
-
-# Diagnostic mode (trace causality)
-ourochronos program.ouro --diagnostic
-
-# Action-guided mode (find non-trivial fixed points)
-ourochronos program.ouro --action
-
-# Generate SMT constraints (formal verification)
-ourochronos program.ouro --smt > constraints.smt2
-
-# Type analysis (temporal tainting)
-ourochronos program.ouro --typecheck
-```
-
----
-
-## Examples
-
-### The Self-Fulfilling Prophecy
-
-```ourochronos
-0 ORACLE 0 PROPHECY
-```
-
-Read a value from the future, write it to the past. Any value is consistent. The runtime selects zero (the minimal fixed point).
-
-### The Grandfather Paradox
-
-```ourochronos
-0 ORACLE NOT 0 PROPHECY
-```
-
-Read a value, write its negation. If the future says 0, we write 1. If the future says 1, we write 0. No fixed point exists. The runtime detects this as an *oscillation* with period 2.
-
-### The Bootstrap Paradox
-
-```ourochronos
-# ASCII codes for "HELLO"
-0 ORACLE 1 ORACLE 2 ORACLE 3 ORACLE 4 ORACLE
-
-# Verify it spells HELLO
-4 PEEK 72 EQ   # H
-5 PEEK 79 EQ   # O
-AND
-
-IF {
-    # Correct! Stabilise.
-    4 PROPHECY 3 PROPHECY 2 PROPHECY 1 PROPHECY 0 PROPHECY
-    # Output
-    0 PRESENT OUTPUT
-    1 PRESENT OUTPUT
-    2 PRESENT OUTPUT
-    3 PRESENT OUTPUT
-    4 PRESENT OUTPUT
-} ELSE {
-    # Wrong. Seed the correct values.
-    72 0 PROPHECY   # H
-    69 1 PROPHECY   # E
-    76 2 PROPHECY   # L
-    76 3 PROPHECY   # L
-    79 4 PROPHECY   # O
-}
-```
-
-The string "HELLO" appears, but where did it originate? We read it from the future, verified it, and wrote it to the past. The information has no source—it exists because its existence is self-consistent.
-
----
-
-## Documentation
-
-The documentation is structured as a journey from philosophy to practice:
-
-| Document | Purpose |
-|----------|---------|
-| [Specification](docs/specification.md) | Formal definition of the abstract machine. |
-| [Foundations](docs/foundations.md) | Mathematical and computational theory. |
-
----
-
-## Complexity and Power
-
-Ourochronos programs with polynomial-size temporal state have the computational power of PSPACE. This means:
-
-- Every problem solvable with polynomial memory is solvable in Ourochronos
-- NP-complete problems (SAT, travelling salesman, graph colouring) become tractable
-- PSPACE-complete problems (quantified boolean formulae, generalised chess) become tractable
-- Problems beyond PSPACE remain intractable
-
-This is not magic. The work is done by the fixed-point search, which may require exponential time. But the *structure* of the solution can be expressed concisely.
-
----
+Exit codes: 0 consistent, 1 error, 2 paradox, 3 epoch exhaustion.
 
 ## The Action Principle
 
-When multiple fixed points exist, which should the runtime select? The trivial solution (all zeros) is always consistent but rarely meaningful.
+Many programs have several fixed points, and the all-zero timeline is usually one of them; a naive search finds it first and reports that nothing happened. Action-guided mode assigns every discovered fixed point a cost that penalises trivial and temporally independent states and rewards causal depth and output, then selects the minimum. The weights are derived from the program's own temporal footprint. `examples/sat.ouro` and `examples/quantum_suicide.ouro` show the difference it makes.
 
-Ourochronos implements an *Action Principle*, analogous to the principle of least action in physics. A cost function penalises trivial solutions and rewards:
+## Documentation and examples
 
-- Non-zero memory states
-- Values with genuine temporal dependency
-- Programs that produce output
-
-```bash
-ourochronos program.ouro --action
-```
-
-This selects the "most interesting" consistent timeline—the one where computation actually occurred.
-
----
-
-## What This Is Not
-
-**Not a debugger feature.** Time-travel debugging lets you step backwards through execution history. Ourochronos programs genuinely receive information from their future state.
-
-**Not branching timelines.** Some languages fork into parallel universes. Ourochronos demands a single self-consistent timeline.
-
-**Not speculative execution.** Speculative execution guesses future branches. Ourochronos *knows* future state via the fixed-point constraint.
-
-**Not simulation.** Ourochronos implements the computational model physicists use to reason about closed timelike curves. If CTCs existed, this is how you would program them.
-
----
-
-## Contributing
-
-Ourochronos is in active development. Contributions are welcome in:
-
-- Language semantics and new operators
-- Optimisation strategies (temporal core reduction, stratification)
-- SMT integration and formal verification
-- Documentation and examples
-- Theoretical foundations
-
----
+The [specification](docs/specification.md) is the single reference: the abstract machine, the state boundary (what is and is not part of the fixed point), all 99 opcodes, convergence semantics, the effect gate, provenance, the action functional, the SMT fragment, and the practical patterns for writing programs that converge. The `examples/` directory covers the canonical paradoxes, witness search (`sat.ouro`, `primality.ouro`), data structures, strings, procedures, and quotations.
 
 ## Licence
 
-GNU
-
----
-
-## Acknowledgements
-
-The theoretical foundations rest on work by:
-
-- **David Deutsch** — CTC self-consistency model (1991)
-- **Scott Aaronson & John Watrous** — CTC complexity results (2008)
-- **Kurt Gödel** — First CTC solutions in general relativity (1949)
-
----
-
-*The serpent devours its tail. The future computes the past. Time is not a river but a strange loop.*
-
-*Welcome to Ourochronos.*
+MIT. The theoretical foundations rest on Deutsch's CTC self-consistency model (1991) and the Aaronson and Watrous PSPACE characterisation (2008).
