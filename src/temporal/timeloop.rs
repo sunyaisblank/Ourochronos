@@ -176,6 +176,8 @@ pub struct TimeLoopConfig {
     pub error_config: ErrorConfig,
     /// Provenance saturation limit. Defaults to DEFAULT_PROVENANCE_SATURATION_LIMIT.
     pub provenance_limit: usize,
+    /// Policy for external effects and non-determinism during the search.
+    pub effects: crate::vm::EffectsPolicy,
 }
 
 impl Default for TimeLoopConfig {
@@ -189,6 +191,7 @@ impl Default for TimeLoopConfig {
             max_instructions: 10_000_000,
             error_config: ErrorConfig::default(),
             provenance_limit: crate::core::provenance::DEFAULT_PROVENANCE_SATURATION_LIMIT,
+            effects: crate::vm::EffectsPolicy::default(),
         }
     }
 }
@@ -245,6 +248,7 @@ impl TimeLoop {
             immediate_output: config.verbose,
             max_instructions: config.max_instructions,
             error_config: config.error_config.clone(),
+            effects_policy: config.effects,
             ..ExecutorConfig::default()
         };
 
@@ -268,10 +272,13 @@ impl TimeLoop {
     
     /// Run the fixed-point search.
     pub fn run(&mut self, program: &Program) -> ConvergenceStatus {
-        // Check for trivial consistency
+        // A trivially consistent programme's single epoch IS the consistent
+        // timeline, so the effect gate does not apply to it.
         if program.is_trivially_consistent() {
+            self.executor.config.in_fixed_point_search = false;
             return self.run_trivial(program);
         }
+        self.executor.config.in_fixed_point_search = true;
         
         match &self.config.mode {
             ExecutionMode::Standard => self.run_standard(program),

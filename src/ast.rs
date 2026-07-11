@@ -491,7 +491,42 @@ pub enum OpCode {
     Random,
 }
 
+/// How an opcode interacts with the world outside the machine state.
+///
+/// The fixed-point search iterates the epoch function F until S = F(S). That
+/// model is only meaningful when F is a fixed function of the memory state:
+/// an external effect fires once per epoch of the *search* (not once per
+/// consistent timeline), and a non-deterministic source makes F vary between
+/// iterations. The search declines both classes unless explicitly permitted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EffectClass {
+    /// A function of the machine state alone (or buffered, like OUTPUT).
+    Pure,
+    /// Irreversibly visible outside the process: writes, sends, spawns, delays.
+    External,
+    /// Result varies between invocations independently of machine state.
+    NonDeterministic,
+}
+
 impl OpCode {
+    /// Classify this opcode's interaction with the outside world.
+    ///
+    /// New opcodes that touch anything beyond the machine state MUST be
+    /// listed here; the wildcard means an unclassified opcode is treated as
+    /// pure and will silently escape the fixed-point search's effect gate.
+    pub fn effect_class(&self) -> EffectClass {
+        match self {
+            OpCode::FileWrite
+            | OpCode::SocketSend
+            | OpCode::TcpConnect
+            | OpCode::ProcExec
+            | OpCode::Sleep => EffectClass::External,
+            OpCode::Clock | OpCode::Random => EffectClass::NonDeterministic,
+            _ => EffectClass::Pure,
+        }
+    }
+
+
     /// Get the name of this opcode as it appears in source code.
     pub fn name(&self) -> &'static str {
         match self {

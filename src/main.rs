@@ -16,7 +16,7 @@ const EXIT_PARADOX: i32 = 2;
 const EXIT_TIMEOUT: i32 = 3;
 
 /// Flags that consume the following argument as a value.
-const VALUE_FLAGS: [&str; 4] = ["--seed", "--seeds", "--max-inst", "--provenance-limit"];
+const VALUE_FLAGS: [&str; 5] = ["--seed", "--seeds", "--max-inst", "--provenance-limit", "--effects"];
 
 /// Flags that stand alone.
 const UNARY_FLAGS: [&str; 9] = [
@@ -43,6 +43,10 @@ fn print_usage() {
     println!("  --audit [file]  Enable audit logging (default: ourochronos-audit.log)");
     println!("  --audit-json    Use JSON Lines format for audit output");
     println!("  --provenance-limit <n>  Provenance saturation limit (default: 256)");
+    println!("  --effects <policy>      Effects inside the fixed-point search:");
+    println!("                          'decline' (default) errors on FILE_WRITE, SOCKET_SEND,");
+    println!("                          TCP_CONNECT, PROC_EXEC, SLEEP, RANDOM, CLOCK;");
+    println!("                          'unrestricted' permits them on every search epoch");
     println!("  --help, -h      Show this help");
     println!("  --version, -V   Show version");
     println!();
@@ -191,6 +195,21 @@ fn run() -> i32 {
         eprintln!("Error: --seeds must be greater than 0 in action mode");
         return EXIT_ERROR;
     }
+
+    let effects_policy = match args.iter().position(|a| a == "--effects") {
+        None => ourochronos::vm::EffectsPolicy::Decline,
+        Some(idx) => match args.get(idx + 1).map(|s| s.as_str()) {
+            Some("decline") => ourochronos::vm::EffectsPolicy::Decline,
+            Some("unrestricted") => ourochronos::vm::EffectsPolicy::Unrestricted,
+            other => {
+                eprintln!(
+                    "Error: --effects requires 'decline' or 'unrestricted', got '{}'",
+                    other.unwrap_or("")
+                );
+                return EXIT_ERROR;
+            }
+        },
+    };
 
     let audit_json = args.contains(&"--audit-json".to_string());
     if let Some(idx) = args.iter().position(|a| a == "--audit") {
@@ -343,6 +362,7 @@ fn run() -> i32 {
         max_instructions,
         error_config: error_config.clone(),
         provenance_limit,
+        effects: effects_policy,
         ..Config::default()
     };
 

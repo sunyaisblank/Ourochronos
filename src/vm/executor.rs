@@ -88,6 +88,25 @@ pub struct ExecutorConfig {
     pub input: Vec<u64>,
     /// Error handling policy for bounds checking, division, etc.
     pub error_config: ErrorConfig,
+    /// Whether this executor is running epochs inside a fixed-point search.
+    /// Single-epoch (trivially consistent) runs are exempt from the effect
+    /// gate because their one epoch IS the consistent timeline.
+    pub in_fixed_point_search: bool,
+    /// Policy for external effects and non-determinism during a search.
+    pub effects_policy: EffectsPolicy,
+}
+
+/// Policy for opcodes with an EffectClass other than Pure during a
+/// fixed-point search.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EffectsPolicy {
+    /// Decline over fabricate: executing the opcode is an epoch error that
+    /// names the opcode. The default.
+    #[default]
+    Decline,
+    /// Permit everything, accepting that external effects repeat per search
+    /// epoch and non-determinism may prevent convergence.
+    Unrestricted,
 }
 
 impl Default for ExecutorConfig {
@@ -97,6 +116,8 @@ impl Default for ExecutorConfig {
             immediate_output: true,
             input: Vec::new(),
             error_config: ErrorConfig::default(),
+            in_fixed_point_search: false,
+            effects_policy: EffectsPolicy::default(),
         }
     }
 }
@@ -304,6 +325,33 @@ impl Executor {
     
     /// Execute a single opcode.
     fn execute_op(&mut self, op: OpCode, state: &mut VmState, quotes: &[Vec<Stmt>]) -> Result<(), String> {
+        // Effect gate: inside a fixed-point search the epoch function must be
+        // a fixed function of the memory state, and external effects would
+        // fire once per search epoch rather than once per timeline. Checked
+        // at dispatch, before operands are popped, so the decline is clean.
+        if self.config.in_fixed_point_search
+            && self.config.effects_policy == crate::vm::EffectsPolicy::Decline
+        {
+            match op.effect_class() {
+                crate::ast::EffectClass::External => {
+                    return Err(format!(
+                        "{} is an external effect inside a fixed-point search; \
+each epoch of the search would perform it again. \
+Run with --effects unrestricted to permit this.",
+                        op.name()
+                    ));
+                }
+                crate::ast::EffectClass::NonDeterministic => {
+                    return Err(format!(
+                        "{} is non-deterministic inside a fixed-point search; \
+the epoch function must return the same state for the same anamnesis. \
+Run with --effects unrestricted to permit this.",
+                        op.name()
+                    ));
+                }
+                crate::ast::EffectClass::Pure => {}
+            }
+        }
         match op {
             // ═══════════════════════════════════════════════════════════
             // Stack Manipulation

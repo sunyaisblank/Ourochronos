@@ -523,3 +523,58 @@ mod trivial_consistency_boundary {
         assert_consistent_in_epochs(&result, 1);
     }
 }
+
+// =============================================================================
+// Effect Gate (external effects and non-determinism inside the search)
+// =============================================================================
+//
+// The fixed-point search iterates F until S = F(S); that model requires F to
+// be a fixed function of the memory state, and an external effect inside the
+// search fires once per epoch rather than once per consistent timeline. Both
+// classes decline by default and are permitted under EffectsPolicy::Unrestricted.
+
+mod effect_gate {
+    use super::*;
+
+    #[test]
+    fn external_effect_declines_inside_search() {
+        let result = run("0 ORACLE POP 0 0 FILE_WRITE");
+        match result {
+            ConvergenceStatus::Error { message, .. } => {
+                assert!(message.contains("FILE_WRITE"), "message was: {}", message);
+                assert!(message.contains("external effect"), "message was: {}", message);
+            }
+            other => panic!("expected decline error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn non_determinism_declines_inside_search() {
+        let result = run("0 ORACLE POP RANDOM POP 0 0 PROPHECY");
+        match result {
+            ConvergenceStatus::Error { message, .. } => {
+                assert!(message.contains("RANDOM"), "message was: {}", message);
+                assert!(message.contains("non-deterministic"), "message was: {}", message);
+            }
+            other => panic!("expected decline error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn unrestricted_policy_permits_the_search_to_run() {
+        let config = Config {
+            effects: ourochronos::vm::EffectsPolicy::Unrestricted,
+            ..default_config()
+        };
+        let result = run_with_config("0 ORACLE POP RANDOM POP 0 0 PROPHECY", config);
+        assert_consistent(&result);
+    }
+
+    #[test]
+    fn pure_single_epoch_run_is_exempt_from_the_gate() {
+        // A trivially consistent programme's one epoch is the timeline
+        // itself, so RANDOM is not being re-rolled by any search.
+        let result = run("RANDOM POP 1 OUTPUT");
+        assert_consistent(&result);
+    }
+}

@@ -17,7 +17,7 @@ pub mod executor;
 pub mod fast_vm;
 
 // Re-export from executor
-pub use executor::{Executor, EpochStatus, VmState, EpochResult, ExecutorConfig};
+pub use executor::{Executor, EpochStatus, VmState, EpochResult, ExecutorConfig, EffectsPolicy};
 
 // Re-export from fast_vm
 pub use fast_vm::{FastExecutor, FastStack, is_program_pure, execute_with_fast_path};
