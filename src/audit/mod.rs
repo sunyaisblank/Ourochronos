@@ -20,9 +20,6 @@
 //! - `entry`: Core audit entry types (AuditEntry, Severity, Outcome, ActionCategory)
 //! - `logger`: Thread-safe logging with batch support
 //! - `global`: Global singleton logger for application-wide use
-//! - `temporal_events`: Domain-specific events for temporal operations
-//! - `metrics`: Statistical metrics with numerical stability guarantees
-//! - `integration`: Bridges to provenance, error handling, and timeloop
 //!
 //! # Example
 //!
@@ -50,9 +47,6 @@
 mod entry;
 mod logger;
 mod global;
-mod temporal_events;
-mod metrics;
-mod integration;
 
 // Core entry types
 pub use entry::{
@@ -71,31 +65,6 @@ pub use logger::{
 pub use global::{
     init_global_logger, init_stdout_logger, global_logger,
     audit, audit_info, audit_warn, audit_error,
-};
-
-// Temporal event types
-pub use temporal_events::{
-    TemporalOperation, TemporalEvent,
-    EpochOutcome, EpochEvent,
-    ConvergenceEvent,
-    ActionPrincipleEvent, ActionBreakdown,
-    ProvenanceEvent,
-};
-
-// Metrics types
-pub use metrics::{
-    OnlineStatistics, DistributionalMeasures,
-    ConvergenceMetrics, ProvenanceMetrics,
-    ErrorAccumulator,
-};
-
-// Integration functions
-pub use integration::{
-    provenance_to_summary, aggregate_provenance, provenance_to_metadata,
-    error_to_entry,
-    convergence_status_to_outcome, epoch_outcome_to_convergence,
-    epoch_event_to_entry, convergence_event_to_entry,
-    AuditSession,
 };
 
 /// Escape a string for JSON.
