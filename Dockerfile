@@ -46,9 +46,6 @@ WORKDIR /app
 # Copy binary from builder
 COPY --from=builder /build/target/release/ourochronos /usr/local/bin/ourochronos
 
-# Copy example config
-COPY ourochronos.toml.example /app/ourochronos.toml.example
-
 # Create directories for runtime
 RUN mkdir -p /app/programs /app/audit && \
     chown -R ouro:ouro /app

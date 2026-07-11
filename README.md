@@ -183,11 +183,8 @@ The documentation is structured as a journey from philosophy to practice:
 
 | Document | Purpose |
 |----------|---------|
-| [Philosophy](docs/philosophy.md) | Why time travel? Metaphysical foundations. |
-| [Foundations](docs/foundations.md) | Mathematical and computational theory. |
 | [Specification](docs/specification.md) | Formal definition of the abstract machine. |
-| [Guide](docs/guide.md) | Practical programming patterns. |
-| [Standard](docs/standard.md) | Coding conventions for causal integrity. |
+| [Foundations](docs/foundations.md) | Mathematical and computational theory. |
 
 ---
 
