@@ -653,8 +653,11 @@ pub struct TypeCheckResult {
     pub errors: Vec<TypeError>,
     /// Warnings (non-fatal issues).
     pub warnings: Vec<String>,
-    /// Inferred types for memory cells.
+    /// Inferred types for memory cells (only for statically known addresses).
     pub cell_types: HashMap<Address, TemporalType>,
+    /// PROPHECY writes whose address is computed at runtime and therefore
+    /// not represented in cell_types.
+    pub unknown_prophecy_writes: usize,
     /// Stack type at end of program.
     pub final_stack_types: Vec<StackType>,
     /// Inferred effects for the program.
@@ -685,6 +688,7 @@ impl TypeCheckResult {
             errors: Vec::new(),
             warnings: Vec::new(),
             cell_types: HashMap::new(),
+            unknown_prophecy_writes: 0,
             final_stack_types: Vec::new(),
             effects: EffectSet::pure(),
             effect_violations: Vec::new(),
@@ -698,6 +702,7 @@ impl TypeCheckResult {
             errors: vec![error],
             warnings: Vec::new(),
             cell_types: HashMap::new(),
+            unknown_prophecy_writes: 0,
             final_stack_types: Vec::new(),
             effects: EffectSet::pure(),
             effect_violations: Vec::new(),
@@ -730,6 +735,12 @@ pub struct TypeChecker {
     stmt_index: usize,
     /// Whether we're in a temporal-controlled branch.
     in_temporal_branch: bool,
+    /// Literal pushed by the immediately preceding statement, if any. This
+    /// is the peephole that recovers statically known addresses for the
+    /// dominant `addr ORACLE` / `value addr PROPHECY` idiom.
+    last_pushed_literal: Option<u64>,
+    /// PROPHECY writes whose address could not be determined statically.
+    unknown_prophecy_writes: usize,
     /// Accumulated effects for the current scope.
     current_effects: EffectSet,
     /// Effect violations found.
@@ -788,6 +799,8 @@ impl TypeChecker {
             warnings: Vec::new(),
             stmt_index: 0,
             in_temporal_branch: false,
+            last_pushed_literal: None,
+            unknown_prophecy_writes: 0,
             current_effects: EffectSet::pure(),
             effect_violations: Vec::new(),
             linear_violations: Vec::new(),
@@ -812,6 +825,7 @@ impl TypeChecker {
             errors: self.errors.clone(),
             warnings: self.warnings.clone(),
             cell_types: self.cell_types.clone(),
+            unknown_prophecy_writes: self.unknown_prophecy_writes,
             final_stack_types: self.stack.clone(),
             effects: self.current_effects.clone(),
             effect_violations: self.effect_violations.clone(),
@@ -860,6 +874,10 @@ impl TypeChecker {
     
     /// Check a single statement.
     fn check_stmt(&mut self, stmt: &Stmt) {
+        // Sound only for one statement of lookback: any statement other than
+        // Push leaves the top of stack unpredictable, so the literal is
+        // cleared before dispatch and re-established only by Push.
+        let addr_literal = self.last_pushed_literal.take();
         match stmt {
             Stmt::Push(value) => {
                 // Constants are always pure and unrestricted
@@ -869,10 +887,11 @@ impl TypeChecker {
                     StackType::TEMPORAL
                 };
                 self.stack.push(ty);
+                self.last_pushed_literal = Some(value.val);
             }
 
             Stmt::Op(op) => {
-                self.check_op(*op);
+                self.check_op(*op, addr_literal);
             }
 
             Stmt::If { then_branch, else_branch } => {
@@ -943,7 +962,7 @@ impl TypeChecker {
     }
     
     /// Check an opcode.
-    fn check_op(&mut self, op: OpCode) {
+    fn check_op(&mut self, op: OpCode, addr_literal: Option<u64>) {
         match op {
             // ===== Temporal Operations =====
             OpCode::Oracle => {
@@ -972,9 +991,17 @@ impl TypeChecker {
                     ));
                 }
 
-                // Record the type written to this cell (if address is constant)
-                // In practice, we don't know the address statically, so we approximate
-                self.cell_types.insert(0, value_type.temporal); // Simplified: assume address 0
+                // Record the cell type only when the address is statically
+                // known; fabricating an entry at address 0 would make every
+                // multi-address programme's cell map wrong.
+                match addr_literal {
+                    Some(addr) if addr < crate::core::MEMORY_SIZE as u64 => {
+                        self.cell_types.insert(addr as Address, value_type.temporal);
+                    }
+                    _ => {
+                        self.unknown_prophecy_writes += 1;
+                    }
+                }
 
                 // Track effect: PROPHECY is a temporal write
                 self.current_effects.prophecy = true;
@@ -1583,6 +1610,13 @@ pub fn display_types(result: &TypeCheckResult) -> String {
             output.push_str(&format!("  [{}]: {}\n", addr, ty.name()));
         }
     }
+
+    if result.unknown_prophecy_writes > 0 {
+        output.push_str(&format!(
+            "\n{} PROPHECY write(s) to runtime-computed addresses (not typed)\n",
+            result.unknown_prophecy_writes
+        ));
+    }
     
     if !result.final_stack_types.is_empty() {
         output.push_str("\nFinal Stack Types:\n");
@@ -1610,6 +1644,25 @@ mod tests {
     fn check(source: &str) -> TypeCheckResult {
         let program = parse(source).expect("Parse failed");
         type_check(&program)
+    }
+
+    #[test]
+    fn prophecy_cell_type_uses_the_literal_address() {
+        // `value addr PROPHECY` with a literal address types that cell, not
+        // the formerly hardcoded address 0.
+        let result = check("42 5 PROPHECY");
+        assert!(result.cell_types.contains_key(&5));
+        assert!(!result.cell_types.contains_key(&0));
+        assert_eq!(result.unknown_prophecy_writes, 0);
+    }
+
+    #[test]
+    fn prophecy_with_computed_address_is_recorded_as_unknown() {
+        // The address 3+4 is computed at runtime; no cell entry may be
+        // fabricated for it.
+        let result = check("42 3 4 ADD PROPHECY");
+        assert!(result.cell_types.is_empty());
+        assert_eq!(result.unknown_prophecy_writes, 1);
     }
     
     #[test]
