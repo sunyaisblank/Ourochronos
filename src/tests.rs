@@ -1,5 +1,5 @@
 #[cfg(test)]
-mod tests {
+mod suite {
     use crate::*;
 
     fn parse(code: &str) -> Program {
@@ -255,7 +255,7 @@ mod opcode_registration {
             Stmt::Op(op) => *op == expect,
             Stmt::If { then_branch, else_branch } => {
                 contains_op(then_branch, expect)
-                    || else_branch.as_deref().map_or(false, |e| contains_op(e, expect))
+                    || else_branch.as_deref().is_some_and(|e| contains_op(e, expect))
             }
             Stmt::While { cond, body } => contains_op(cond, expect) || contains_op(body, expect),
             Stmt::Block(inner) => contains_op(inner, expect),

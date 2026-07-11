@@ -929,7 +929,7 @@ impl Program {
             Stmt::Call { .. } => false,
             Stmt::If { then_branch, else_branch } => {
                 self.contains_oracle(then_branch)
-                    || else_branch.as_deref().map_or(false, |e| self.contains_oracle(e))
+                    || else_branch.as_deref().is_some_and(|e| self.contains_oracle(e))
             }
             Stmt::While { cond, body } => {
                 self.contains_oracle(cond) || self.contains_oracle(body)

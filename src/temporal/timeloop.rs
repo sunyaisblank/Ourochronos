@@ -28,8 +28,12 @@ use std::collections::HashMap;
 /// the stored sparse state (the non-zero cells, which determine the state
 /// completely because absent cells are zero) compares equal.
 struct StateJournal {
-    visits: HashMap<u64, Vec<(usize, Vec<(u16, u64)>)>>,
+    visits: HashMap<u64, Vec<JournalEntry>>,
 }
+
+/// One verified visit: the epoch it occurred at and the sparse (address,
+/// value) form of the memory state.
+type JournalEntry = (usize, Vec<(u16, u64)>);
 
 impl StateJournal {
     fn new() -> Self {

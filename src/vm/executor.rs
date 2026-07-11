@@ -1676,7 +1676,7 @@ mod tests {
         let result = executor.run_epoch(&program, &Memory::new());
         assert_eq!(result.status, EpochStatus::Finished);
         // First output: 42 exists => 1
-        if let Some(crate::core::OutputItem::Val(v)) = result.output.get(0) {
+        if let Some(crate::core::OutputItem::Val(v)) = result.output.first() {
             assert_eq!(v.val, 1);
         }
         // Second output: 100 doesn't exist => 0
@@ -1694,7 +1694,7 @@ mod tests {
         let result = executor.run_epoch(&program, &Memory::new());
         assert_eq!(result.status, EpochStatus::Finished);
         // 42 exists => 1
-        if let Some(crate::core::OutputItem::Val(v)) = result.output.get(0) {
+        if let Some(crate::core::OutputItem::Val(v)) = result.output.first() {
             assert_eq!(v.val, 1);
         }
         // 100 doesn't exist => 0

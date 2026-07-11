@@ -1035,7 +1035,6 @@ pub struct IOStats {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
 
     #[test]
     fn test_file_mode_flags() {

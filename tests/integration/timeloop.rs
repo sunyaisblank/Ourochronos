@@ -23,7 +23,7 @@
 use crate::common::*;
 
 use ourochronos::*;
-use ourochronos::temporal::timeloop::{ConvergenceStatus, ParadoxDiagnosis, Direction};
+use ourochronos::temporal::timeloop::{ConvergenceStatus, ParadoxDiagnosis};
 
 // =============================================================================
 // Consistent Execution Tests

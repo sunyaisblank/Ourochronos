@@ -14,7 +14,7 @@
 //! - Assert: Verify the expected outcome
 
 use ourochronos::*;
-use ourochronos::temporal::timeloop::{ConvergenceStatus, ParadoxDiagnosis};
+use ourochronos::temporal::timeloop::ConvergenceStatus;
 
 // =============================================================================
 // Program Parsing Utilities
@@ -71,21 +71,6 @@ pub fn action_config() -> Config {
     }
 }
 
-/// Create a configuration with custom number of seeds for action-guided mode.
-pub fn action_config_with_seeds(num_seeds: usize) -> Config {
-    Config {
-        max_epochs: 100,
-        mode: ExecutionMode::ActionGuided {
-            config: ActionConfig::anti_trivial(),
-            num_seeds,
-        },
-        seed: 0,
-        verbose: false,
-        frozen_inputs: Vec::new(),
-        max_instructions: 10_000_000,
-        ..Default::default()
-    }
-}
 
 /// Create a configuration for diagnostic mode.
 pub fn diagnostic_config() -> Config {
@@ -203,17 +188,7 @@ pub fn assert_output_contains(result: &ConvergenceStatus, expected: u64) {
     );
 }
 
-/// Assert that output is non-empty.
-pub fn assert_has_output(result: &ConvergenceStatus) {
-    let output = extract_output(result);
-    assert!(!output.is_empty(), "Expected non-empty output");
-}
 
-/// Assert that output is empty.
-pub fn assert_no_output(result: &ConvergenceStatus) {
-    let output = extract_output(result);
-    assert!(output.is_empty(), "Expected empty output, got {:?}", output);
-}
 
 // =============================================================================
 // Program Execution Helpers

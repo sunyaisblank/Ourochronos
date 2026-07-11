@@ -592,12 +592,12 @@ impl LanguageAnalyzer {
                     });
                 }
             }
-            Stmt::Call { name } => {
+            Stmt::Call { name }
                 // Check if calling undefined procedure
                 if !program_procs.contains(name)
                     && !self.procedure_locations.contains_key(name)
                     && !crate::StdLib::procedures().iter().any(|p| p.name == *name)
-                {
+                => {
                     diagnostics.push(Diagnostic {
                         line: ctx.line,
                         column: 0,
@@ -609,7 +609,6 @@ impl LanguageAnalyzer {
                         related: Vec::new(),
                     });
                 }
-            }
             _ => {}
         }
     }

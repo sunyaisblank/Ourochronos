@@ -2166,7 +2166,7 @@ mod tests {
     fn test_expression_arithmetic() {
         // (10 + 20) should compile to Push(10), Push(20), Add
         let program = parse("(10 + 20) OUTPUT").unwrap();
-        assert!(program.body.len() >= 1);
+        assert!(!program.body.is_empty());
     }
     
     #[test]
@@ -2180,7 +2180,7 @@ mod tests {
     fn test_expression_if_syntax() {
         // IF (1 > 0) { ... } new expression syntax
         let program = parse("IF (1 > 0) { 42 OUTPUT }").unwrap();
-        assert!(program.body.len() >= 1);
+        assert!(!program.body.is_empty());
         // Should wrap expression eval and IF in a block
         match &program.body[0] {
             Stmt::Block(stmts) => {
@@ -2202,7 +2202,7 @@ mod tests {
     fn test_expression_oracle_function() {
         // ORACLE(0) function syntax
         let program = parse("(ORACLE(0) > 1) OUTPUT").unwrap();
-        assert!(program.body.len() >= 1);
+        assert!(!program.body.is_empty());
     }
     
     #[test]

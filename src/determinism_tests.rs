@@ -12,10 +12,10 @@ mod tests {
 
     /// Extract numeric values from output items.
     fn extract_output_values(output: &[OutputItem]) -> Vec<u64> {
-        output.iter().filter_map(|item| {
+        output.iter().map(|item| {
             match item {
-                OutputItem::Val(v) => Some(v.val),
-                OutputItem::Char(c) => Some(*c as u64),
+                OutputItem::Val(v) => v.val,
+                OutputItem::Char(c) => *c as u64,
             }
         }).collect()
     }

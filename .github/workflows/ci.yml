@@ -34,7 +34,7 @@ jobs:
         run: cargo check --all-features
 
       - name: Run clippy
-        run: cargo clippy --all-features -- -D warnings
+        run: cargo clippy --all-targets --all-features -- -D warnings
 
       - name: Run unit tests
         run: cargo test --lib --all-features

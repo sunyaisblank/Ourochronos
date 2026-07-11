@@ -123,11 +123,10 @@ fn benchmark_vm(name: &str, program: &Program, max_instructions: u64) -> Benchma
 
         match result.status {
             EpochStatus::Finished => {}
-            EpochStatus::Error(ref e) => {
-                if !e.contains("requires standard") {
+            EpochStatus::Error(ref e)
+                if !e.contains("requires standard") => {
                     success = false;
                 }
-            }
             _ => {}
         }
 
