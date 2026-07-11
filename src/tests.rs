@@ -244,3 +244,73 @@ mod temporal_op_count {
         assert_eq!(program.temporal_op_count(), 0);
     }
 }
+
+#[cfg(test)]
+mod opcode_registration {
+    use crate::ast::{OpCode, Stmt};
+    use crate::parser::{tokenize, Parser};
+
+    fn contains_op(stmts: &[Stmt], expect: OpCode) -> bool {
+        stmts.iter().any(|stmt| match stmt {
+            Stmt::Op(op) => *op == expect,
+            Stmt::If { then_branch, else_branch } => {
+                contains_op(then_branch, expect)
+                    || else_branch.as_deref().map_or(false, |e| contains_op(e, expect))
+            }
+            Stmt::While { cond, body } => contains_op(cond, expect) || contains_op(body, expect),
+            Stmt::Block(inner) => contains_op(inner, expect),
+            Stmt::TemporalScope { body, .. } => contains_op(body, expect),
+            Stmt::Push(_) | Stmt::Call { .. } => false,
+        })
+    }
+
+    /// Every opcode's keyword must tokenise and parse back to that opcode.
+    ///
+    /// This is the registration-closure gate: INDEX/STORE/PACK/UNPACK once
+    /// existed in the enum and the VM for two releases while no keyword
+    /// reached them. The exhaustive OpCode::name() match forces a display
+    /// arm for a new variant; this test forces the parser registration.
+    #[test]
+    fn every_opcode_keyword_parses_back_to_its_opcode() {
+        let mut failures: Vec<String> = Vec::new();
+
+        for &op in OpCode::ALL.iter() {
+            // Enough literal operands to satisfy any static arity check;
+            // opcodes with special surface syntax get their own template.
+            let source = match op {
+                OpCode::Assert => "1 ASSERT \"invariant\"".to_string(),
+                _ => format!("0 0 0 0 0 0 0 0 {}", op.name()),
+            };
+            let tokens = tokenize(&source);
+            let mut parser = Parser::new(&tokens);
+            match parser.parse_program() {
+                Ok(program) => {
+                    if !contains_op(&program.body, op) {
+                        failures.push(format!(
+                            "{} parsed but produced no Op({:?})",
+                            op.name(),
+                            op
+                        ));
+                    }
+                }
+                Err(e) => failures.push(format!("{} failed to parse: {}", op.name(), e)),
+            }
+        }
+
+        assert!(
+            failures.is_empty(),
+            "opcodes without a working keyword path:\n{}",
+            failures.join("\n")
+        );
+    }
+
+    /// OpCode::ALL must enumerate every variant exactly once. Duplicate
+    /// entries would mask a missing one behind a correct length.
+    #[test]
+    fn opcode_list_has_no_duplicates() {
+        let mut seen = std::collections::HashSet::new();
+        for &op in OpCode::ALL.iter() {
+            assert!(seen.insert(op), "duplicate in OpCode::ALL: {:?}", op);
+        }
+    }
+}

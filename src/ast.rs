@@ -527,6 +527,37 @@ impl OpCode {
     }
 
 
+    /// Every opcode, in declaration order.
+    ///
+    /// INVARIANT: a new enum variant must be added here in the same change.
+    /// The exhaustive `name()` match below already forces a compile error at
+    /// this impl when a variant is added; this list is what lets the
+    /// registration round-trip test walk every opcode and prove the parser
+    /// can produce it, closing the historical gap where opcodes existed in
+    /// the enum and the VM but no keyword reached them.
+    pub const ALL: [OpCode; 99] = [
+        OpCode::Nop, OpCode::Halt, OpCode::Pop, OpCode::Dup, OpCode::Swap,
+        OpCode::Over, OpCode::Rot, OpCode::Depth, OpCode::Pick, OpCode::Roll,
+        OpCode::Reverse, OpCode::Exec, OpCode::Dip, OpCode::Keep, OpCode::Bi,
+        OpCode::Rec, OpCode::StrRev, OpCode::StrCat, OpCode::StrSplit, OpCode::Add,
+        OpCode::Sub, OpCode::Mul, OpCode::Div, OpCode::Mod, OpCode::Neg,
+        OpCode::Abs, OpCode::Min, OpCode::Max, OpCode::Sign, OpCode::Assert,
+        OpCode::Not, OpCode::And, OpCode::Or, OpCode::Xor, OpCode::Shl,
+        OpCode::Shr, OpCode::Eq, OpCode::Neq, OpCode::Lt, OpCode::Gt,
+        OpCode::Lte, OpCode::Gte, OpCode::Slt, OpCode::Sgt, OpCode::Slte,
+        OpCode::Sgte, OpCode::Oracle, OpCode::Prophecy, OpCode::PresentRead, OpCode::Paradox,
+        OpCode::Pack, OpCode::Unpack, OpCode::Index, OpCode::Store, OpCode::Input,
+        OpCode::Output, OpCode::Emit, OpCode::VecNew, OpCode::VecPush, OpCode::VecPop,
+        OpCode::VecGet, OpCode::VecSet, OpCode::VecLen, OpCode::HashNew, OpCode::HashPut,
+        OpCode::HashGet, OpCode::HashDel, OpCode::HashHas, OpCode::HashLen, OpCode::SetNew,
+        OpCode::SetAdd, OpCode::SetHas, OpCode::SetDel, OpCode::SetLen, OpCode::FFICall,
+        OpCode::FFICallNamed, OpCode::FileOpen, OpCode::FileRead, OpCode::FileWrite, OpCode::FileSeek,
+        OpCode::FileFlush, OpCode::FileClose, OpCode::FileExists, OpCode::FileSize, OpCode::BufferNew,
+        OpCode::BufferFromStack, OpCode::BufferToStack, OpCode::BufferLen, OpCode::BufferReadByte, OpCode::BufferWriteByte,
+        OpCode::BufferFree, OpCode::TcpConnect, OpCode::SocketSend, OpCode::SocketRecv, OpCode::SocketClose,
+        OpCode::ProcExec, OpCode::Clock, OpCode::Sleep, OpCode::Random,
+    ];
+
     /// Get the name of this opcode as it appears in source code.
     pub fn name(&self) -> &'static str {
         match self {
