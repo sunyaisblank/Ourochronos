@@ -68,9 +68,8 @@ jobs:
       matrix:
         features:
           - ""
-          - "jit"
-          - "parallel"
-          - "smt"
+          - "lsp"
+          - "dynamic-ffi"
 
     steps:
       - uses: actions/checkout@v4
