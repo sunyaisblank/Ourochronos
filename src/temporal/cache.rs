@@ -71,16 +71,29 @@ impl MemoizedResult {
 
 /// Cache of epoch results keyed by anamnesis state hash.
 ///
-/// Bounded: when full, an arbitrary entry is evicted on insert. The time loop
-/// keys entries on `Memory::state_hash`; eviction only forces re-execution of
-/// an epoch, so eviction order affects performance, not results.
+/// `Memory::state_hash` is a 64-bit XOR fold, so distinct states can collide.
+/// Each entry therefore stores the sparse form of the anamnesis that produced
+/// it, and a lookup only hits when that stored state compares equal; serving
+/// a colliding entry would hand the search a wrong next state. Bounded: when
+/// full, an arbitrary entry is evicted on insert, which only forces
+/// re-execution of an epoch.
 #[derive(Debug)]
 pub struct EpochCache {
-    entries: HashMap<u64, MemoizedResult>,
+    entries: HashMap<u64, (Vec<(u16, u64)>, MemoizedResult)>,
     max_size: usize,
     hits: usize,
     misses: usize,
     evictions: usize,
+}
+
+/// Sparse form of a memory state: its non-zero cells. Absent cells are zero,
+/// so this determines the full state.
+fn sparse_state(memory: &Memory) -> Vec<(u16, u64)> {
+    memory
+        .non_zero_cells()
+        .into_iter()
+        .map(|(addr, value)| (addr, value.val))
+        .collect()
 }
 
 impl Default for EpochCache {
@@ -106,29 +119,33 @@ impl EpochCache {
         }
     }
 
-    /// Look up a cached result by state hash.
-    pub fn get(&mut self, state_hash: u64) -> Option<&MemoizedResult> {
-        if let Some(result) = self.entries.get(&state_hash) {
-            self.hits += 1;
-            Some(result)
-        } else {
-            self.misses += 1;
-            None
+    /// Look up the cached result for this anamnesis. A hash match alone is
+    /// not a hit; the stored state must compare equal.
+    pub fn get(&mut self, state_hash: u64, anamnesis: &Memory) -> Option<&MemoizedResult> {
+        match self.entries.get(&state_hash) {
+            Some((stored, _)) if *stored == sparse_state(anamnesis) => {
+                self.hits += 1;
+                self.entries.get(&state_hash).map(|(_, result)| result)
+            }
+            _ => {
+                self.misses += 1;
+                None
+            }
         }
     }
 
-    /// Store a result in the cache, evicting an arbitrary entry when full.
-    pub fn insert(&mut self, state_hash: u64, result: MemoizedResult) {
+    /// Store a result for this anamnesis, evicting an arbitrary entry when full.
+    pub fn insert(&mut self, state_hash: u64, anamnesis: &Memory, result: MemoizedResult) {
         if self.entries.len() >= self.max_size {
             if let Some(&key) = self.entries.keys().next() {
                 self.entries.remove(&key);
                 self.evictions += 1;
             }
         }
-        self.entries.insert(state_hash, result);
+        self.entries.insert(state_hash, (sparse_state(anamnesis), result));
     }
 
-    /// Check if a state is cached.
+    /// Check if a state hash has an entry (unverified; testing hook).
     pub fn contains(&self, state_hash: u64) -> bool {
         self.entries.contains_key(&state_hash)
     }
@@ -202,9 +219,10 @@ mod tests {
     #[test]
     fn cached_result_is_returned_on_hit_and_counted() {
         let mut cache = EpochCache::new();
-        assert!(cache.get(42).is_none());
-        cache.insert(42, dummy_result());
-        assert!(cache.get(42).is_some());
+        let anamnesis = Memory::new();
+        assert!(cache.get(42, &anamnesis).is_none());
+        cache.insert(42, &anamnesis, dummy_result());
+        assert!(cache.get(42, &anamnesis).is_some());
         assert!(cache.contains(42));
         let stats = cache.stats();
         assert_eq!(stats.hits, 1);
@@ -213,10 +231,25 @@ mod tests {
     }
 
     #[test]
+    fn hash_collision_is_not_served_as_a_hit() {
+        // Same hash key, different anamnesis contents: the entry must not be
+        // returned, because its result belongs to a different state.
+        let mut cache = EpochCache::new();
+        let stored = Memory::new();
+        cache.insert(42, &stored, dummy_result());
+
+        let mut colliding = Memory::new();
+        colliding.write(7, crate::core::Value::new(99));
+        assert!(cache.get(42, &colliding).is_none());
+        assert_eq!(cache.stats().misses, 1);
+    }
+
+    #[test]
     fn insert_beyond_capacity_evicts_and_stays_bounded() {
         let mut cache = EpochCache::with_capacity(4);
+        let anamnesis = Memory::new();
         for hash in 0..10u64 {
-            cache.insert(hash, dummy_result());
+            cache.insert(hash, &anamnesis, dummy_result());
         }
         assert!(cache.len() <= 4);
         assert_eq!(cache.stats().evictions, 6);
@@ -225,8 +258,9 @@ mod tests {
     #[test]
     fn clear_resets_entries_and_statistics() {
         let mut cache = EpochCache::new();
-        cache.insert(1, dummy_result());
-        let _ = cache.get(1);
+        let anamnesis = Memory::new();
+        cache.insert(1, &anamnesis, dummy_result());
+        let _ = cache.get(1, &anamnesis);
         cache.clear();
         assert!(cache.is_empty());
         assert_eq!(cache.stats().hits, 0);

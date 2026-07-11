@@ -20,6 +20,39 @@ use crate::temporal::action::{ActionConfig, ActionPrinciple, FixedPointSelector}
 use crate::temporal::cache::{EpochCache, MemoizedResult};
 use std::collections::HashMap;
 
+/// Journal of anamnesis states visited during a fixed-point search.
+///
+/// States are keyed by `Memory::state_hash`, a 64-bit XOR fold, so distinct
+/// states can collide; declaring an oscillation on a bare hash match would
+/// fabricate a paradox. A hash hit therefore only counts as a revisit after
+/// the stored sparse state (the non-zero cells, which determine the state
+/// completely because absent cells are zero) compares equal.
+struct StateJournal {
+    visits: HashMap<u64, Vec<(usize, Vec<(u16, u64)>)>>,
+}
+
+impl StateJournal {
+    fn new() -> Self {
+        Self { visits: HashMap::new() }
+    }
+
+    /// Record the state as visited at `epoch`, or return the epoch of the
+    /// earlier verified-identical visit.
+    fn check_and_insert(&mut self, hash: u64, memory: &Memory, epoch: usize) -> Option<usize> {
+        let sparse: Vec<(u16, u64)> = memory
+            .non_zero_cells()
+            .into_iter()
+            .map(|(addr, value)| (addr, value.val))
+            .collect();
+        let entry = self.visits.entry(hash).or_default();
+        if let Some((previous, _)) = entry.iter().find(|(_, state)| *state == sparse) {
+            return Some(*previous);
+        }
+        entry.push((epoch, sparse));
+        None
+    }
+}
+
 /// Result of fixed-point search.
 #[derive(Debug)]
 pub enum ConvergenceStatus {
@@ -299,21 +332,19 @@ impl TimeLoop {
     /// Uses epoch caching to memoize results and skip redundant executions.
     fn run_standard(&mut self, program: &Program) -> ConvergenceStatus {
         let mut anamnesis = self.create_initial_anamnesis();
-        let mut seen_states: HashMap<u64, usize> = HashMap::new();
-        
+        let mut seen_states = StateJournal::new();
+
         for epoch in 0..self.config.max_epochs {
             let state_hash = anamnesis.state_hash();
-            
-            // Check for cycle
-            if let Some(&previous_epoch) = seen_states.get(&state_hash) {
+
+            // Check for a verified cycle
+            if let Some(previous_epoch) = seen_states.check_and_insert(state_hash, &anamnesis, epoch) {
                 let period = epoch - previous_epoch;
                 return self.diagnose_oscillation(program, &anamnesis, period);
             }
-            
-            seen_states.insert(state_hash, epoch);
-            
+
             // Check cache first
-            if let Some(cached) = self.cache.get(state_hash) {
+            if let Some(cached) = self.cache.get(state_hash, &anamnesis) {
                 // Use cached result
                 match &cached.status {
                     EpochStatus::Finished => {
@@ -342,7 +373,7 @@ impl TimeLoop {
             self.freeze_inputs(&result);
 
             // Store in cache
-            self.cache.insert(state_hash, MemoizedResult::simple(
+            self.cache.insert(state_hash, &anamnesis, MemoizedResult::simple(
                 result.present.clone(),
                 result.output.clone(),
                 result.status.clone(),
@@ -393,25 +424,24 @@ impl TimeLoop {
     fn run_diagnostic(&mut self, program: &Program) -> ConvergenceStatus {
         let mut anamnesis = self.create_initial_anamnesis();
         let mut trajectory: Vec<Memory> = Vec::new();
-        let mut seen_states: HashMap<u64, usize> = HashMap::new();
-        
+        let mut seen_states = StateJournal::new();
+
         for epoch in 0..self.config.max_epochs {
             let state_hash = anamnesis.state_hash();
-            
-            // Check for cycle
-            if let Some(&previous_epoch) = seen_states.get(&state_hash) {
+
+            // Check for a verified cycle
+            if let Some(previous_epoch) = seen_states.check_and_insert(state_hash, &anamnesis, epoch) {
                 let period = epoch - previous_epoch;
                 let oscillating = self.find_oscillating_cells(&trajectory[previous_epoch..]);
                 let diagnosis = self.create_oscillation_diagnosis(&trajectory[previous_epoch..]);
-                
+
                 return ConvergenceStatus::Oscillation {
                     period,
                     oscillating_cells: oscillating,
                     diagnosis,
                 };
             }
-            
-            seen_states.insert(state_hash, epoch);
+
             trajectory.push(anamnesis.clone());
             
             // Check for divergence (monotonic growth)
@@ -560,18 +590,15 @@ impl TimeLoop {
     /// Run with a specific seed memory state.
     fn run_with_seed(&mut self, program: &Program, seed: &Memory) -> ConvergenceStatus {
         let mut anamnesis = seed.clone();
-        let mut seen_states: HashMap<u64, usize> = HashMap::new();
-        
+        let mut seen_states = StateJournal::new();
+
         for epoch in 0..self.config.max_epochs {
             let state_hash = anamnesis.state_hash();
-            
-            // Check for cycle
-            if seen_states.contains_key(&state_hash) {
-                // Cycle detected - this seed doesn't lead to a fixed point
+
+            // A verified cycle means this seed does not lead to a fixed point
+            if seen_states.check_and_insert(state_hash, &anamnesis, epoch).is_some() {
                 return ConvergenceStatus::Timeout { max_epochs: epoch };
             }
-            
-            seen_states.insert(state_hash, epoch);
 
             // Run epoch
             let result = self.executor.run_epoch(program, &anamnesis);
@@ -930,5 +957,23 @@ mod tests {
         let tl = TimeLoop::new(config);
         let cells = tl.find_oscillating_cells(&[m1, m2]);
         assert!(cells.contains(&1000), "Should detect oscillation at address 1000");
+    }
+
+    #[test]
+    fn journal_reports_revisit_only_for_identical_state() {
+        let mut journal = StateJournal::new();
+        let mut a = Memory::new();
+        a.write(3, Value::new(5));
+        let mut b = Memory::new();
+        b.write(3, Value::new(6));
+
+        // Same hash key, different contents: not a revisit.
+        assert_eq!(journal.check_and_insert(42, &a, 0), None);
+        assert_eq!(journal.check_and_insert(42, &b, 1), None);
+
+        // Identical contents under the same hash: verified revisit at its
+        // original epoch.
+        assert_eq!(journal.check_and_insert(42, &a, 2), Some(0));
+        assert_eq!(journal.check_and_insert(42, &b, 3), Some(1));
     }
 }
