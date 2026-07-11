@@ -7,3 +7,4 @@ pub mod vm;
 pub mod temporal_semantics;
 pub mod bounds_checking;
 pub mod memory_ops;
+pub mod cli;
