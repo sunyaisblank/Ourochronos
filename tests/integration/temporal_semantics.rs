@@ -492,3 +492,34 @@ mod temporal_invariants {
         assert_memory_value(&result, 2, 30);
     }
 }
+
+// =============================================================================
+// Trivial-Consistency Boundary (regression: quote-hosted oracles)
+// =============================================================================
+//
+// A programme whose only ORACLE sits inside a quotation executed via EXEC
+// must still enter the fixed-point search. The former predicate scanned only
+// the main body, so such programmes ran for exactly one epoch and paradoxes
+// were reported as consistent timelines.
+
+mod trivial_consistency_boundary {
+    use super::*;
+
+    #[test]
+    fn quote_hosted_grandfather_paradox_is_detected() {
+        let result = run("[ 0 ORACLE NOT 0 PROPHECY ] EXEC");
+        assert_oscillation_with_period(&result, 2);
+    }
+
+    #[test]
+    fn quote_hosted_identity_loop_converges() {
+        let result = run("[ 0 ORACLE 0 PROPHECY ] EXEC");
+        assert_consistent(&result);
+    }
+
+    #[test]
+    fn oracle_free_quote_remains_trivial() {
+        let result = run("[ 1 2 ADD OUTPUT ] EXEC");
+        assert_consistent_in_epochs(&result, 1);
+    }
+}

@@ -592,14 +592,6 @@ impl LanguageAnalyzer {
                     });
                 }
             }
-            Stmt::Match { cases, default } => {
-                for (_, body) in cases {
-                    self.check_stmts_temporal(body, ctx, diagnostics, program_procs);
-                }
-                if let Some(def) = default {
-                    self.check_stmts_temporal(def, ctx, diagnostics, program_procs);
-                }
-            }
             Stmt::Call { name } => {
                 // Check if calling undefined procedure
                 if !program_procs.contains(name)
@@ -652,16 +644,6 @@ impl LanguageAnalyzer {
                 self.compute_effects(cond).join(&self.compute_effects(body))
             }
             Stmt::TemporalScope { body, .. } => self.compute_effects(body),
-            Stmt::Match { cases, default } => {
-                let mut info = EffectInfo::default();
-                for (_, body) in cases {
-                    info = info.join(&self.compute_effects(body));
-                }
-                if let Some(def) = default {
-                    info = info.join(&self.compute_effects(def));
-                }
-                info
-            }
             _ => EffectInfo::default(),
         }
     }

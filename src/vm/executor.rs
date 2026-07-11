@@ -263,33 +263,6 @@ impl Executor {
                 Err(format!("Procedure call '{}' not inlined - ensure program is preprocessed", name))
             }
             
-            Stmt::Match { cases, default } => {
-                // Pop the value to match against
-                let val = self.pop(state)?.val;
-                
-                // Find matching case
-                let mut matched = false;
-                for (pattern, body) in cases {
-                    if val == *pattern {
-                        for stmt in body {
-                            self.execute_stmt(stmt, state, quotes)?;
-                        }
-                        matched = true;
-                        break;
-                    }
-                }
-                
-                // Execute default if no match
-                if !matched {
-                    if let Some(default_body) = default {
-                        for stmt in default_body {
-                            self.execute_stmt(stmt, state, quotes)?;
-                        }
-                    }
-                }
-                Ok(())
-            }
-            
             Stmt::TemporalScope { base, size, body } => {
                 // Temporal scoping: create an isolated memory region
                 // 

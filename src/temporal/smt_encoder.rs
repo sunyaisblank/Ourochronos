@@ -130,11 +130,6 @@ impl SmtEncoder {
                 panic!("SMT encoding does not support procedure calls - inline procedures first: {}", name);
             }
             
-            Stmt::Match { cases: _, default: _ } => {
-                // Pattern matching requires complex ITE chains
-                // For now, skip - would need full stack simulation
-            }
-            
             Stmt::TemporalScope { body, .. } => {
                 // Temporal scoping: encode body, but note isolation semantics
                 // are not fully expressible in SMT without memory regions

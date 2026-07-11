@@ -934,23 +934,6 @@ impl TypeChecker {
                 self.stack.push(StackType::UNKNOWN);
             }
 
-            Stmt::Match { cases, default } => {
-                // Pop the matched value
-                self.pop_type();
-
-                // Analyze all branches (conservative: union of all possible types)
-                for (_, body) in cases {
-                    for stmt in body {
-                        self.check_stmt(stmt);
-                    }
-                }
-                if let Some(default_body) = default {
-                    for stmt in default_body {
-                        self.check_stmt(stmt);
-                    }
-                }
-            }
-
             Stmt::TemporalScope { body, .. } => {
                 // Temporal scope: check the body
                 // Memory isolation doesn't affect type checking at this level

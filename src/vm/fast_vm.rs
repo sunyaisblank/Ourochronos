@@ -413,26 +413,6 @@ impl FastExecutor {
                 Err(format!("Procedure call '{}' not inlined - ensure program is preprocessed", name))
             }
 
-            Stmt::Match { cases, default } => {
-                let val = self.stack.pop().ok_or("Stack underflow: MATCH")?;
-
-                let mut matched = false;
-                for (pattern, body) in cases {
-                    if val == *pattern {
-                        self.execute_block(body, quotes)?;
-                        matched = true;
-                        break;
-                    }
-                }
-
-                if !matched {
-                    if let Some(default_body) = default {
-                        self.execute_block(default_body, quotes)?;
-                    }
-                }
-                Ok(())
-            }
-
             // Temporal operations cannot be executed in fast mode
             Stmt::TemporalScope { .. } => {
                 Err("TemporalScope requires standard VM execution".to_string())
@@ -909,10 +889,6 @@ fn is_stmt_pure(stmt: &Stmt) -> bool {
             is_stmts_pure(cond) && is_stmts_pure(body)
         }
         Stmt::Call { .. } => true, // After inlining, calls become pure if their body is
-        Stmt::Match { cases, default } => {
-            cases.iter().all(|(_, body)| is_stmts_pure(body)) &&
-            default.as_ref().map(|d| is_stmts_pure(d)).unwrap_or(true)
-        }
         Stmt::TemporalScope { .. } => false, // Temporal scopes are never pure
     }
 }

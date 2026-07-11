@@ -730,15 +730,6 @@ pub enum Stmt {
         name: String,
     },
     
-    /// Pattern match on top-of-stack value.
-    /// Pops value and selects matching case branch or default.
-    Match {
-        /// List of (pattern, body) pairs.
-        cases: Vec<(u64, Vec<Stmt>)>,
-        /// Default case if no pattern matches.
-        default: Option<Vec<Stmt>>,
-    },
-    
     /// Temporal scope block.
     /// TEMPORAL <base> <size> { body }
     /// 
@@ -824,44 +815,40 @@ impl Program {
         }
     }
     
-    /// Check if the program is trivially consistent (no oracle operations).
+    /// Check if the program is trivially consistent: no ORACLE read anywhere
+    /// in the body, quotations, or procedure bodies.
+    ///
+    /// Without ORACLE the epoch function never reads the anamnesis, so F is
+    /// constant in S and its unique fixed point is exactly the result of one
+    /// epoch. The scan must therefore cover every statement the executor can
+    /// reach, including quotations run via EXEC; a missed ORACLE here skips
+    /// the fixed-point search entirely.
     pub fn is_trivially_consistent(&self) -> bool {
         !self.contains_oracle(&self.body)
+            && !self.quotes.iter().any(|q| self.contains_oracle(q))
+            && !self.procedures.iter().any(|p| self.contains_oracle(&p.body))
     }
-    
+
+    // Exhaustive over Stmt (no wildcard) so a new statement kind cannot be
+    // silently classified as oracle-free.
     fn contains_oracle(&self, stmts: &[Stmt]) -> bool {
-        for stmt in stmts {
-            match stmt {
-                Stmt::Op(OpCode::Oracle) => return true,
-                Stmt::If { then_branch, else_branch } => {
-                    if self.contains_oracle(then_branch) {
-                        return true;
-                    }
-                    if let Some(else_stmts) = else_branch {
-                        if self.contains_oracle(else_stmts) {
-                            return true;
-                        }
-                    }
-                }
-                Stmt::While { cond, body } => {
-                    if self.contains_oracle(cond) || self.contains_oracle(body) {
-                        return true;
-                    }
-                }
-                Stmt::Block(inner) => {
-                    if self.contains_oracle(inner) {
-                        return true;
-                    }
-                }
-                Stmt::TemporalScope { body, .. } => {
-                    if self.contains_oracle(body) {
-                        return true;
-                    }
-                }
-                _ => {}
+        stmts.iter().any(|stmt| match stmt {
+            Stmt::Op(op) => *op == OpCode::Oracle,
+            Stmt::Push(_) => false,
+            // A call executes a procedure body; every procedure body is
+            // scanned by is_trivially_consistent, so the call site itself
+            // introduces no oracle.
+            Stmt::Call { .. } => false,
+            Stmt::If { then_branch, else_branch } => {
+                self.contains_oracle(then_branch)
+                    || else_branch.as_deref().map_or(false, |e| self.contains_oracle(e))
             }
-        }
-        false
+            Stmt::While { cond, body } => {
+                self.contains_oracle(cond) || self.contains_oracle(body)
+            }
+            Stmt::Block(inner) => self.contains_oracle(inner),
+            Stmt::TemporalScope { body, .. } => self.contains_oracle(body),
+        })
     }
     
     /// Inline all procedure calls, replacing Stmt::Call with procedure bodies.
@@ -907,7 +894,7 @@ impl Program {
                 size: *size,
                 body: self.inline_stmts(body, procs),
             },
-            other => other.clone(),
+            Stmt::Op(_) | Stmt::Push(_) => stmt.clone(),
         }
     }
 }
