@@ -53,6 +53,14 @@ impl StateJournal {
     }
 }
 
+/// Outcome of one epoch step, as seen by the enclosing search loop.
+enum Step {
+    /// The search is finished with this status.
+    Done(ConvergenceStatus),
+    /// Not yet consistent; the loop continues with the advanced anamnesis.
+    Continue,
+}
+
 /// Result of fixed-point search.
 #[derive(Debug)]
 pub enum ConvergenceStatus {
@@ -268,6 +276,11 @@ impl TimeLoop {
     
     /// Run the fixed-point search.
     pub fn run(&mut self, program: &Program) -> ConvergenceStatus {
+        // Cache entries are keyed on the anamnesis alone, not the programme;
+        // a retained entry from a previous run() of a different programme
+        // would be served as that programme's result. One run, one cache.
+        self.cache.clear();
+
         // A trivially consistent programme's single epoch IS the consistent
         // timeline, so the effect gate does not apply to it.
         if program.is_trivially_consistent() {
@@ -306,6 +319,93 @@ impl TimeLoop {
         }
     }
 
+    /// Execute one epoch against the cache: serve a verified cached result
+    /// when one exists (this is how action-guided seeds share work once
+    /// their orbits meet), otherwise run the epoch, freeze first inputs,
+    /// and memoize.
+    ///
+    /// This sequence is the drift-prone core every search loop previously
+    /// carried its own copy of; the missing-freeze bug fixed earlier in
+    /// this programme existed precisely because the copies diverged.
+    fn step_epoch(
+        &mut self,
+        program: &Program,
+        anamnesis: &mut Memory,
+        state_hash: u64,
+        sparse: &[(u16, u64)],
+        epoch: usize,
+    ) -> Step {
+        let cached = self
+            .cache
+            .get(state_hash, sparse)
+            .filter(|c| c.status != EpochStatus::Running)
+            .map(|c| (c.present.clone(), c.output.clone(), c.status.clone()));
+        if let Some((present, output, status)) = cached {
+            return Self::resolve(present, output, status, anamnesis, epoch);
+        }
+
+        let result = self.executor.run_epoch(program, anamnesis);
+        self.freeze_inputs(&result);
+        self.cache.insert(
+            state_hash,
+            sparse,
+            MemoizedResult::simple(
+                result.present.clone(),
+                result.output.clone(),
+                result.status.clone(),
+            ),
+        );
+        Self::resolve(result.present, result.output, result.status, anamnesis, epoch)
+    }
+
+    /// Execute one epoch without touching the cache (pure mode, which has
+    /// no revisit detection and therefore nothing to memoize against).
+    fn step_epoch_uncached(
+        &mut self,
+        program: &Program,
+        anamnesis: &mut Memory,
+        epoch: usize,
+    ) -> Step {
+        let result = self.executor.run_epoch(program, anamnesis);
+        self.freeze_inputs(&result);
+        Self::resolve(result.present, result.output, result.status, anamnesis, epoch)
+    }
+
+    /// Classify an epoch's result for the enclosing search loop: a fixed
+    /// point or terminal status finishes the search; otherwise the present
+    /// becomes the next anamnesis.
+    fn resolve(
+        present: Memory,
+        output: Vec<OutputItem>,
+        status: EpochStatus,
+        anamnesis: &mut Memory,
+        epoch: usize,
+    ) -> Step {
+        match status {
+            EpochStatus::Finished => {
+                if present.values_equal(anamnesis) {
+                    Step::Done(ConvergenceStatus::Consistent {
+                        memory: present,
+                        output,
+                        epochs: epoch + 1,
+                    })
+                } else {
+                    *anamnesis = present;
+                    Step::Continue
+                }
+            }
+            EpochStatus::Paradox => Step::Done(ConvergenceStatus::Paradox {
+                message: "Explicit PARADOX instruction".to_string(),
+                epoch: epoch + 1,
+            }),
+            EpochStatus::Error(e) => Step::Done(ConvergenceStatus::Error {
+                message: e,
+                epoch: epoch + 1,
+            }),
+            EpochStatus::Running => Step::Continue,
+        }
+    }
+
     /// Run a trivially consistent program (no oracle operations).
     fn run_trivial(&mut self, program: &Program) -> ConvergenceStatus {
         let result = self.executor.run_epoch(program, &Memory::new());
@@ -331,13 +431,8 @@ impl TimeLoop {
         }
     }
     
-    /// Standard execution with cycle detection.
-    /// 
-    /// Implements the Temporal Input Invariant: inputs are captured during epoch 0
-    /// and frozen for replay in all subsequent epochs. This ensures that external
-    /// inputs cannot be influenced by the temporal loop (External → Loop only).
-    /// 
-    /// Uses epoch caching to memoize results and skip redundant executions.
+    /// Standard execution: verified cycle detection, epoch caching, first
+    /// fixed point wins.
     fn run_standard(&mut self, program: &Program) -> ConvergenceStatus {
         let mut anamnesis = self.create_initial_anamnesis();
         let mut seen_states = StateJournal::new();
@@ -351,75 +446,16 @@ impl TimeLoop {
                 return self.diagnose_oscillation(program, &anamnesis, period);
             }
 
-            // Check cache first
-            if let Some(cached) = self.cache.get(state_hash, &sparse) {
-                // Use cached result
-                match &cached.status {
-                    EpochStatus::Finished => {
-                        if cached.present.values_equal(&anamnesis) {
-                            return ConvergenceStatus::Consistent {
-                                memory: cached.present.clone(),
-                                output: cached.output.clone(),
-                                epochs: epoch + 1,
-                            };
-                        }
-                        anamnesis = cached.present.clone();
-                        continue;
-                    }
-                    EpochStatus::Paradox => {
-                        return ConvergenceStatus::Paradox {
-                            message: "Explicit PARADOX instruction (cached)".to_string(),
-                            epoch: epoch + 1,
-                        };
-                    }
-                    _ => {} // Run epoch for other statuses
-                }
-            }
-            
-            // Run epoch (cache miss)
-            let result = self.executor.run_epoch(program, &anamnesis);
-            self.freeze_inputs(&result);
-
-            // Store in cache
-            self.cache.insert(state_hash, &sparse, MemoizedResult::simple(
-                result.present.clone(),
-                result.output.clone(),
-                result.status.clone(),
-            ));
-
-            match result.status {
-                EpochStatus::Finished => {
-                    // Check for fixed point
-                    if result.present.values_equal(&anamnesis) {
-                        if self.config.verbose {
+            match self.step_epoch(program, &mut anamnesis, state_hash, &sparse, epoch) {
+                Step::Done(status) => {
+                    if self.config.verbose {
+                        if let ConvergenceStatus::Consistent { .. } = status {
                             println!("{}", self.cache.stats());
                         }
-                        return ConvergenceStatus::Consistent {
-                            memory: result.present,
-                            output: result.output,
-                            epochs: epoch + 1,
-                        };
                     }
-
-                    // Continue iteration
-                    anamnesis = result.present;
+                    return status;
                 }
-
-                EpochStatus::Paradox => {
-                    return ConvergenceStatus::Paradox {
-                        message: "Explicit PARADOX instruction".to_string(),
-                        epoch: epoch + 1,
-                    };
-                }
-
-                EpochStatus::Error(e) => {
-                    return ConvergenceStatus::Error {
-                        message: e,
-                        epoch: epoch + 1,
-                    };
-                }
-
-                EpochStatus::Running => {}
+                Step::Continue => {}
             }
         }
 
@@ -428,7 +464,8 @@ impl TimeLoop {
         }
     }
 
-    /// Diagnostic execution with full trajectory recording.
+    /// Diagnostic execution: the standard search plus trajectory recording,
+    /// divergence detection, and oscillation diagnosis.
     fn run_diagnostic(&mut self, program: &Program) -> ConvergenceStatus {
         let mut anamnesis = self.create_initial_anamnesis();
         let mut trajectory: Vec<Memory> = Vec::new();
@@ -451,7 +488,7 @@ impl TimeLoop {
             }
 
             trajectory.push(anamnesis.clone());
-            
+
             // Check for divergence (monotonic growth)
             if epoch > 10 {
                 if let Some((cells, direction)) = self.detect_divergence(&trajectory) {
@@ -461,38 +498,10 @@ impl TimeLoop {
                     };
                 }
             }
-            
-            // Run epoch
-            let result = self.executor.run_epoch(program, &anamnesis);
-            self.freeze_inputs(&result);
 
-            match result.status {
-                EpochStatus::Finished => {
-                    if result.present.values_equal(&anamnesis) {
-                        return ConvergenceStatus::Consistent {
-                            memory: result.present,
-                            output: result.output,
-                            epochs: epoch + 1,
-                        };
-                    }
-                    anamnesis = result.present;
-                }
-
-                EpochStatus::Paradox => {
-                    return ConvergenceStatus::Paradox {
-                        message: "Explicit PARADOX instruction".to_string(),
-                        epoch: epoch + 1,
-                    };
-                }
-
-                EpochStatus::Error(e) => {
-                    return ConvergenceStatus::Error {
-                        message: e,
-                        epoch: epoch + 1,
-                    };
-                }
-
-                EpochStatus::Running => {}
+            match self.step_epoch(program, &mut anamnesis, state_hash, &sparse, epoch) {
+                Step::Done(status) => return status,
+                Step::Continue => {}
             }
         }
 
@@ -501,52 +510,25 @@ impl TimeLoop {
         }
     }
 
-    /// Pure execution (unbounded, for theoretical exploration).
+    /// Pure execution (unbounded, for theoretical exploration). No revisit
+    /// detection, so no journal and no cache; only the shared epoch step.
     fn run_pure(&mut self, program: &Program) -> ConvergenceStatus {
         let mut anamnesis = self.create_initial_anamnesis();
-        let mut epoch = 0;
 
-        loop {
-            let result = self.executor.run_epoch(program, &anamnesis);
-            self.freeze_inputs(&result);
-            epoch += 1;
-            
-            match result.status {
-                EpochStatus::Finished => {
-                    if result.present.values_equal(&anamnesis) {
-                        return ConvergenceStatus::Consistent {
-                            memory: result.present,
-                            output: result.output,
-                            epochs: epoch,
-                        };
-                    }
-                    anamnesis = result.present;
-                }
-                
-                EpochStatus::Paradox => {
-                    return ConvergenceStatus::Paradox {
-                        message: "Explicit PARADOX instruction".to_string(),
-                        epoch,
-                    };
-                }
-                
-                EpochStatus::Error(e) => {
-                    return ConvergenceStatus::Error {
-                        message: e,
-                        epoch,
-                    };
-                }
-
-                EpochStatus::Running => {}
+        for epoch in 0.. {
+            match self.step_epoch_uncached(program, &mut anamnesis, epoch) {
+                Step::Done(status) => return status,
+                Step::Continue => {}
             }
 
             // Safety check for interactive use
-            if epoch > 1_000_000 {
-                return ConvergenceStatus::Timeout { max_epochs: epoch };
+            if epoch >= 1_000_000 {
+                return ConvergenceStatus::Timeout { max_epochs: epoch + 1 };
             }
         }
+        unreachable!("the epoch loop above only exits by returning")
     }
-    
+
     /// Action-guided execution: explore multiple seeds and select the best fixed point.
     /// 
     /// This implements the Action Principle to solve the "Genie Effect". Instead of
@@ -595,7 +577,9 @@ impl TimeLoop {
         }
     }
     
-    /// Run with a specific seed memory state.
+    /// Run with a specific seed memory state. Uses the shared cache, so
+    /// seeds whose orbits meet reuse each other's epochs instead of
+    /// re-executing them.
     fn run_with_seed(&mut self, program: &Program, seed: &Memory) -> ConvergenceStatus {
         let mut anamnesis = seed.clone();
         let mut seen_states = StateJournal::new();
@@ -609,41 +593,15 @@ impl TimeLoop {
                 return ConvergenceStatus::Timeout { max_epochs: epoch };
             }
 
-            // Run epoch
-            let result = self.executor.run_epoch(program, &anamnesis);
-            self.freeze_inputs(&result);
-
-            match result.status {
-                EpochStatus::Finished => {
-                    // Check for fixed point
-                    if result.present.values_equal(&anamnesis) {
-                        return ConvergenceStatus::Consistent {
-                            memory: result.present,
-                            output: result.output,
-                            epochs: epoch + 1,
-                        };
-                    }
-                    anamnesis = result.present;
-                }
-                EpochStatus::Paradox => {
-                    return ConvergenceStatus::Paradox {
-                        message: "Explicit PARADOX instruction".to_string(),
-                        epoch: epoch + 1,
-                    };
-                }
-                EpochStatus::Error(e) => {
-                    return ConvergenceStatus::Error {
-                        message: e,
-                        epoch: epoch + 1,
-                    };
-                }
-                EpochStatus::Running => {}
+            match self.step_epoch(program, &mut anamnesis, state_hash, &sparse, epoch) {
+                Step::Done(status) => return status,
+                Step::Continue => {}
             }
         }
 
         ConvergenceStatus::Timeout { max_epochs: self.config.max_epochs }
     }
-    
+
     /// Generate diverse seed memory states for action-guided search.
     fn generate_diverse_seeds(&self, num_seeds: usize) -> Vec<Memory> {
         let mut seeds = Vec::with_capacity(num_seeds);

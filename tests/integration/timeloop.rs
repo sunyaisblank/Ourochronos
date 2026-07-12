@@ -595,3 +595,45 @@ mod edge_cases {
         assert_timeout_or_divergence(&result);
     }
 }
+
+// =============================================================================
+// Epoch cache scope (regression: shared per-run, cleared between runs)
+// =============================================================================
+
+mod epoch_cache_scope {
+    use super::*;
+
+    #[test]
+    fn action_seeds_reuse_epochs_once_orbits_meet() {
+        // Every seed of this programme funnels to the state {0: 7} after one
+        // epoch, so later seeds must hit the cache instead of re-executing.
+        let program = parse("0 ORACLE POP 7 0 PROPHECY");
+        let mut timeloop =
+            ourochronos::TimeLoop::new(action_config()).expect("valid configuration");
+        let result = timeloop.run(&program);
+        assert!(matches!(result, ConvergenceStatus::Consistent { .. }));
+        assert!(
+            timeloop.cache_stats().hits >= 1,
+            "expected cross-seed cache reuse, stats: {}",
+            timeloop.cache_stats()
+        );
+    }
+
+    #[test]
+    fn reused_timeloop_does_not_serve_a_previous_programmes_results() {
+        // The cache is keyed on the anamnesis alone. Without clearing at
+        // run() entry, this grandfather paradox would hit the identity
+        // programme's cached all-zero result and be reported consistent.
+        let mut timeloop = ourochronos::TimeLoop::new(default_config())
+            .expect("valid configuration");
+
+        let identity = parse("0 ORACLE 0 PROPHECY");
+        assert!(matches!(
+            timeloop.run(&identity),
+            ConvergenceStatus::Consistent { .. }
+        ));
+
+        let paradox = parse("0 ORACLE NOT 0 PROPHECY");
+        assert_oscillation_with_period(&timeloop.run(&paradox), 2);
+    }
+}
