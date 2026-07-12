@@ -24,6 +24,15 @@ use ourochronos::temporal::timeloop::ConvergenceStatus;
 ///
 /// # Panics
 /// Panics if parsing fails, which is appropriate for test code.
+/// Render an output item to a tagged string so buffers containing both
+/// values and characters can be compared exactly (differential VM tests).
+pub fn render_output_item(item: &ourochronos::OutputItem) -> String {
+    match item {
+        ourochronos::OutputItem::Val(v) => format!("v{}", v.val),
+        ourochronos::OutputItem::Char(c) => format!("c{}", c),
+    }
+}
+
 pub fn parse(code: &str) -> Program {
     let tokens = tokenize(code);
     let mut parser = Parser::new(&tokens);

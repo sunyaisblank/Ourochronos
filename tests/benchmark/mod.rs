@@ -498,18 +498,12 @@ fn invariant_fastvm_matches_vm() {
             .execute_pure(&program, &program.quotes)
             .unwrap_or_else(|e| panic!("FastVM failed for {}: {}", code, e));
 
-        let vm_out: Vec<String> = vm_result.output.iter().map(render_output_item).collect();
-        let fast_out: Vec<String> = fast_exec.output.iter().map(render_output_item).collect();
+        let vm_out: Vec<String> = vm_result.output.iter().map(crate::common::render_output_item).collect();
+        let fast_out: Vec<String> = fast_exec.output.iter().map(crate::common::render_output_item).collect();
         assert_eq!(vm_out, fast_out, "output diverged for: {}", code);
     }
 }
 
-fn render_output_item(item: &ourochronos::OutputItem) -> String {
-    match item {
-        ourochronos::OutputItem::Val(v) => format!("v{}", v.val),
-        ourochronos::OutputItem::Char(c) => format!("c{}", c),
-    }
-}
 
 /// Verify that purity analysis is sound (pure programs don't use temporal ops).
 #[test]

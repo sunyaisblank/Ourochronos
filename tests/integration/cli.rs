@@ -10,6 +10,17 @@ fn ouro() -> Command {
     Command::new(env!("CARGO_BIN_EXE_ourochronos"))
 }
 
+/// Write a programme fixture under a shared temp directory and return its
+/// path. Filenames must be unique per test: the directory is shared, so a
+/// reused name would let parallel tests clobber each other's fixture.
+fn write_temp_program(name: &str, source: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join("ouro-cli-tests");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join(name);
+    std::fs::write(&path, source).expect("write programme");
+    path
+}
+
 #[test]
 fn help_exits_zero_and_prints_usage() {
     let out = ouro().arg("--help").output().expect("binary runs");
@@ -80,10 +91,7 @@ fn oscillating_paradox_exits_two() {
 fn non_converging_program_exits_three() {
     // A strictly increasing counter never revisits a state and never
     // converges, so the search exhausts max_epochs.
-    let dir = std::env::temp_dir().join("ouro-cli-tests");
-    std::fs::create_dir_all(&dir).expect("temp dir");
-    let path = dir.join("diverge.ouro");
-    std::fs::write(&path, "0 ORACLE 1 ADD 0 PROPHECY\n").expect("write programme");
+    let path = write_temp_program("diverge.ouro", "0 ORACLE 1 ADD 0 PROPHECY\n");
 
     let out = ouro().arg(path.to_str().unwrap()).output().expect("binary runs");
     let text = String::from_utf8_lossy(&out.stdout);
@@ -101,10 +109,7 @@ fn diagnostic_mode_freezes_interactive_input() {
     use std::io::Write;
     use std::process::Stdio;
 
-    let dir = std::env::temp_dir().join("ouro-cli-tests");
-    std::fs::create_dir_all(&dir).expect("temp dir");
-    let path = dir.join("frozen_input.ouro");
-    std::fs::write(&path, "INPUT DUP 0 PROPHECY OUTPUT 0 ORACLE POP\n").expect("write programme");
+    let path = write_temp_program("frozen_input.ouro", "INPUT DUP 0 PROPHECY OUTPUT 0 ORACLE POP\n");
 
     let mut child = ouro()
         .args([path.to_str().unwrap(), "--diagnostic"])
@@ -128,10 +133,7 @@ fn diagnostic_mode_freezes_interactive_input() {
 
 #[test]
 fn effects_flag_gates_nondeterminism_in_search() {
-    let dir = std::env::temp_dir().join("ouro-cli-tests");
-    std::fs::create_dir_all(&dir).expect("temp dir");
-    let path = dir.join("clock_in_loop.ouro");
-    std::fs::write(&path, "0 ORACLE POP CLOCK POP 0 0 PROPHECY\n").expect("write programme");
+    let path = write_temp_program("clock_in_loop.ouro", "0 ORACLE POP CLOCK POP 0 0 PROPHECY\n");
 
     // Default policy declines with a message naming the opcode.
     let out = ouro().arg(path.to_str().unwrap()).output().expect("binary runs");
