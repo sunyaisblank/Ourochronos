@@ -49,7 +49,7 @@ First, data structures (vectors, hash tables, sets), buffers, file handles, and 
 
 Second, the epoch function must be a fixed function of the memory state, so operations that break that property are declined inside a fixed-point search by default (§7): external effects would fire once per search epoch rather than once per consistent timeline, and non-deterministic sources would make F vary between the iterations comparing its output.
 
-Third, external input is frozen. The first epoch that consumes INPUT values fixes them, and every later epoch replays the same values. Information flows from the external world into the loop, never backwards; the search cannot re-prompt the user into a different timeline.
+Third, external input is frozen. The first epoch that consumes INPUT values fixes them, and every later epoch replays the same values; an epoch that tries to read past the frozen stream is an error, not a fresh prompt. Information flows from the external world into the loop, never backwards; the search cannot re-prompt the user into a different timeline.
 
 A program with no ORACLE anywhere (body, quotations, or procedure bodies) never reads the anamnesis, so F is constant and its unique fixed point is the result of a single epoch. Such *trivially consistent* programs run once, and the state-boundary rules for searches do not apply to them.
 
@@ -157,7 +157,7 @@ Let F: M → M be the program's memory transformation. The runtime classifies a 
 | Timeout | epoch budget exhausted | 3 | Unknown; the search gave up |
 | Error | runtime error inside an epoch | 1 | The epoch itself failed |
 
-Diagnostic mode additionally reports the oscillating cells, the cycle states, and recognises the negation pattern (a cell mapped to its own logical NOT) as a grandfather paradox.
+Diagnostic mode additionally reports the oscillating cells, the cycle states, and recognises the negation pattern (a cell mapped to its own logical NOT) as a grandfather paradox. Divergence detection runs only in diagnostic mode, so a monotonically growing program exits 3 (timeout) under the default mode and 2 (divergence) under `--diagnostic`; the codes differ because the evidence differs, not the program.
 
 ---
 
@@ -168,12 +168,12 @@ Every opcode carries an effect class, defined in one place (`OpCode::effect_clas
 | Class | Opcodes | Inside a search |
 |-------|---------|-----------------|
 | Pure | everything else | Permitted |
-| External | `FILE_WRITE SOCKET_SEND TCP_CONNECT PROC_EXEC SLEEP` | Declined |
+| External | `FILE_WRITE SOCKET_SEND SOCKET_RECV TCP_CONNECT PROC_EXEC FFI_CALL FFI_CALL_NAMED SLEEP` | Declined |
 | Non-deterministic | `RANDOM CLOCK` | Declined |
 
-Declining is an epoch error naming the opcode, raised at dispatch before operands are consumed. `--effects unrestricted` restores permissive behaviour for experimentation, accepting that an external effect fires on every epoch of the search and that non-determinism may prevent convergence. Trivially consistent programs (§3) are exempt: their single epoch is the timeline itself.
+Declining is an epoch error naming the opcode, raised at dispatch before operands are consumed. `FILE_OPEN` is mode-dependent and gated where its mode operand is known: write, append, create, and truncate opens decline inside a search (they would rewrite the file on every epoch), read opens are permitted. `SOCKET_RECV` and the FFI calls are External because a receive consumes stream state and a foreign call may do anything. `--effects unrestricted` restores permissive behaviour for experimentation, accepting that an external effect fires on every epoch of the search and that non-determinism may prevent convergence. Trivially consistent programs (§3) are exempt: their single epoch is the timeline itself.
 
-`OUTPUT` and `EMIT` need no gate because they are buffered per epoch; only the converged epoch's buffer is printed. File and socket *reads* are permitted in searches and assumed stable across epochs; a file that changes mid-search violates the model the same way an unfrozen input would.
+`OUTPUT` and `EMIT` need no gate because they are buffered per epoch; only the converged epoch's buffer is printed. File *reads* are permitted in searches and assumed stable across epochs; a file that changes mid-search violates the model the same way an unfrozen input would. `INPUT` composes with the freeze of §3: once the stream is frozen, reading past its end inside a search is an error rather than a fresh interactive read.
 
 ---
 
@@ -371,9 +371,9 @@ Stack effects: `( before -- after )`, top of stack rightmost. Effect classes per
 | `SET_HAS` | `( set value -- set found )` | Membership. |
 | `SET_DEL` | `( set value -- set )` | Remove an element. |
 | `SET_LEN` | `( set -- set count )` | Element count. |
-| `FFI_CALL` | `( args... ffi_id -- results... )` | Call an FFI function by id. |
-| `FFI_CALL_NAMED` | `( args... name -- results... )` | Call an FFI function by name. |
-| `FILE_OPEN` | `( path mode -- file )` | Open a file. |
+| `FFI_CALL` | `( args... ffi_id -- results... )` | Call an FFI function by id. E |
+| `FFI_CALL_NAMED` | `( args... name -- results... )` | Call an FFI function by name. E |
+| `FILE_OPEN` | `( path mode -- file )` | Open a file. E for write/append/create/truncate modes |
 | `FILE_READ` | `( file max -- file buffer read )` | Read into a buffer. |
 | `FILE_WRITE` | `( file buffer -- file written )` | Write a buffer. E |
 | `FILE_SEEK` | `( file offset origin -- file pos )` | Seek. |
@@ -390,7 +390,7 @@ Stack effects: `( before -- after )`, top of stack rightmost. Effect classes per
 | `BUFFER_FREE` | `( buffer -- )` | Free a buffer. |
 | `TCP_CONNECT` | `( host port -- socket )` | Connect to a TCP server. E |
 | `SOCKET_SEND` | `( socket buffer -- socket sent )` | Send. E |
-| `SOCKET_RECV` | `( socket max -- socket buffer received )` | Receive. |
+| `SOCKET_RECV` | `( socket max -- socket buffer received )` | Receive. E |
 | `SOCKET_CLOSE` | `( socket -- )` | Close a socket. |
 | `PROC_EXEC` | `( command -- output exit_code )` | Run a shell command. E |
 | `CLOCK` | `( -- timestamp )` | Milliseconds since the Unix epoch. N |
