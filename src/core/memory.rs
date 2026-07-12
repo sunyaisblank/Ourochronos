@@ -224,6 +224,14 @@ impl Memory {
             .map(|(i, v)| (i as Address, v))
     }
 
+    /// The sparse form of this state: its non-zero (address, value) pairs
+    /// in address order. Absent cells are zero, so two states are equal
+    /// exactly when their sparse forms are. This is the single projection
+    /// used to verify hash matches in the search journal and epoch cache.
+    pub fn sparse_state(&self) -> Vec<(Address, u64)> {
+        self.iter_nonzero().map(|(addr, value)| (addr, value.val)).collect()
+    }
+
     /// Get the total number of memory cells.
     pub fn len(&self) -> usize {
         self.cells.len()

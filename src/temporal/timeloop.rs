@@ -40,19 +40,15 @@ impl StateJournal {
         Self { visits: HashMap::new() }
     }
 
-    /// Record the state as visited at `epoch`, or return the epoch of the
+    /// Record the state (given as its sparse form, computed once per epoch
+    /// by the caller) as visited at `epoch`, or return the epoch of the
     /// earlier verified-identical visit.
-    fn check_and_insert(&mut self, hash: u64, memory: &Memory, epoch: usize) -> Option<usize> {
-        let sparse: Vec<(u16, u64)> = memory
-            .non_zero_cells()
-            .into_iter()
-            .map(|(addr, value)| (addr, value.val))
-            .collect();
+    fn check_and_insert(&mut self, hash: u64, sparse: &[(u16, u64)], epoch: usize) -> Option<usize> {
         let entry = self.visits.entry(hash).or_default();
-        if let Some((previous, _)) = entry.iter().find(|(_, state)| *state == sparse) {
+        if let Some((previous, _)) = entry.iter().find(|(_, state)| state.as_slice() == sparse) {
             return Some(*previous);
         }
-        entry.push((epoch, sparse));
+        entry.push((epoch, sparse.to_vec()));
         None
     }
 }
@@ -348,15 +344,15 @@ impl TimeLoop {
 
         for epoch in 0..self.config.max_epochs {
             let state_hash = anamnesis.state_hash();
+            let sparse = anamnesis.sparse_state();
 
-            // Check for a verified cycle
-            if let Some(previous_epoch) = seen_states.check_and_insert(state_hash, &anamnesis, epoch) {
+            if let Some(previous_epoch) = seen_states.check_and_insert(state_hash, &sparse, epoch) {
                 let period = epoch - previous_epoch;
                 return self.diagnose_oscillation(program, &anamnesis, period);
             }
 
             // Check cache first
-            if let Some(cached) = self.cache.get(state_hash, &anamnesis) {
+            if let Some(cached) = self.cache.get(state_hash, &sparse) {
                 // Use cached result
                 match &cached.status {
                     EpochStatus::Finished => {
@@ -385,7 +381,7 @@ impl TimeLoop {
             self.freeze_inputs(&result);
 
             // Store in cache
-            self.cache.insert(state_hash, &anamnesis, MemoizedResult::simple(
+            self.cache.insert(state_hash, &sparse, MemoizedResult::simple(
                 result.present.clone(),
                 result.output.clone(),
                 result.status.clone(),
@@ -440,9 +436,9 @@ impl TimeLoop {
 
         for epoch in 0..self.config.max_epochs {
             let state_hash = anamnesis.state_hash();
+            let sparse = anamnesis.sparse_state();
 
-            // Check for a verified cycle
-            if let Some(previous_epoch) = seen_states.check_and_insert(state_hash, &anamnesis, epoch) {
+            if let Some(previous_epoch) = seen_states.check_and_insert(state_hash, &sparse, epoch) {
                 let period = epoch - previous_epoch;
                 let oscillating = self.find_oscillating_cells(&trajectory[previous_epoch..]);
                 let diagnosis = self.create_oscillation_diagnosis(&trajectory[previous_epoch..]);
@@ -606,9 +602,10 @@ impl TimeLoop {
 
         for epoch in 0..self.config.max_epochs {
             let state_hash = anamnesis.state_hash();
+            let sparse = anamnesis.sparse_state();
 
             // A verified cycle means this seed does not lead to a fixed point
-            if seen_states.check_and_insert(state_hash, &anamnesis, epoch).is_some() {
+            if seen_states.check_and_insert(state_hash, &sparse, epoch).is_some() {
                 return ConvergenceStatus::Timeout { max_epochs: epoch };
             }
 
@@ -978,6 +975,7 @@ mod tests {
         a.write(3, Value::new(5));
         let mut b = Memory::new();
         b.write(3, Value::new(6));
+        let (a, b) = (a.sparse_state(), b.sparse_state());
 
         // Same hash key, different contents: not a revisit.
         assert_eq!(journal.check_and_insert(42, &a, 0), None);
