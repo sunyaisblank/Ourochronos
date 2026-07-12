@@ -15,46 +15,112 @@ const EXIT_ERROR: i32 = 1;
 const EXIT_PARADOX: i32 = 2;
 const EXIT_TIMEOUT: i32 = 3;
 
-/// Flags that consume the following argument as a value.
-const VALUE_FLAGS: [&str; 5] = ["--seed", "--seeds", "--max-inst", "--provenance-limit", "--effects"];
+/// How a flag consumes the argument that follows it.
+#[derive(Clone, Copy, PartialEq)]
+enum Arity {
+    /// Stands alone.
+    None,
+    /// Requires a value.
+    Value,
+    /// Takes a value when the next argument is not a flag.
+    OptionalValue,
+}
 
-/// Flags that stand alone.
-const UNARY_FLAGS: [&str; 9] = [
-    "--diagnostic", "--action", "--typecheck", "--smt", "--fast",
-    "--lsp", "--strict", "--permissive", "--audit-json",
+/// One command-line flag: name, alias, arity, and usage text.
+///
+/// This table is the single authority for the flag surface: validation,
+/// duplicate rejection, and the usage screen all derive from it, so a flag
+/// cannot be recognised in one place and unknown in another.
+struct FlagSpec {
+    name: &'static str,
+    alias: Option<&'static str>,
+    arity: Arity,
+    metavar: &'static str,
+    help: &'static [&'static str],
+}
+
+const FLAGS: &[FlagSpec] = &[
+    FlagSpec { name: "--diagnostic", alias: None, arity: Arity::None, metavar: "",
+        help: &["Enable diagnostic mode (full trajectory recording)"] },
+    FlagSpec { name: "--action", alias: None, arity: Arity::None, metavar: "",
+        help: &["Enable action-guided mode (solves the Genie Effect)"] },
+    FlagSpec { name: "--typecheck", alias: None, arity: Arity::None, metavar: "",
+        help: &["Run static type analysis (temporal tainting)"] },
+    FlagSpec { name: "--smt", alias: None, arity: Arity::None, metavar: "",
+        help: &["Generate SMT-LIB2 output instead of running"] },
+    FlagSpec { name: "--seed", alias: None, arity: Arity::Value, metavar: "<n>",
+        help: &["Set initial seed value"] },
+    FlagSpec { name: "--seeds", alias: None, arity: Arity::Value, metavar: "<n>",
+        help: &["Number of seeds to try in action mode (default: 4)"] },
+    FlagSpec { name: "--max-inst", alias: None, arity: Arity::Value, metavar: "<n>",
+        help: &["Maximum instructions per epoch (default: 10000000)"] },
+    FlagSpec { name: "--fast", alias: None, arity: Arity::None, metavar: "",
+        help: &["Use fast VM for pure (non-temporal) programmes"] },
+    FlagSpec { name: "--lsp", alias: None, arity: Arity::None, metavar: "",
+        help: &["Start Language Server Protocol server"] },
+    FlagSpec { name: "--strict", alias: None, arity: Arity::None, metavar: "",
+        help: &["Strict error handling (bounds violations produce errors)"] },
+    FlagSpec { name: "--permissive", alias: None, arity: Arity::None, metavar: "",
+        help: &["Permissive error handling (wrap addresses, zero on underflow)"] },
+    FlagSpec { name: "--audit", alias: None, arity: Arity::OptionalValue, metavar: "[file]",
+        help: &["Enable audit logging (default: ourochronos-audit.log)"] },
+    FlagSpec { name: "--audit-json", alias: None, arity: Arity::None, metavar: "",
+        help: &["Use JSON Lines format for audit output"] },
+    FlagSpec { name: "--provenance-limit", alias: None, arity: Arity::Value, metavar: "<n>",
+        help: &["Provenance saturation limit (default: 256)"] },
+    FlagSpec { name: "--effects", alias: None, arity: Arity::Value, metavar: "<policy>",
+        help: &[
+            "Effects inside the fixed-point search:",
+            "'decline' (default) errors on external effects and",
+            "non-determinism; 'unrestricted' permits them on",
+            "every search epoch",
+        ] },
+    FlagSpec { name: "--help", alias: Some("-h"), arity: Arity::None, metavar: "",
+        help: &["Show this help"] },
+    FlagSpec { name: "--version", alias: Some("-V"), arity: Arity::None, metavar: "",
+        help: &["Show version"] },
 ];
+
+fn find_flag(arg: &str) -> Option<&'static FlagSpec> {
+    FLAGS.iter().find(|f| f.name == arg || f.alias == Some(arg))
+}
 
 fn print_usage() {
     println!("Usage: ourochronos <file.ouro> [options]");
     println!("       ourochronos repl");
     println!();
     println!("Options:");
-    println!("  --diagnostic    Enable diagnostic mode (full trajectory recording)");
-    println!("  --action        Enable action-guided mode (solves the Genie Effect)");
-    println!("  --typecheck     Run static type analysis (temporal tainting)");
-    println!("  --smt           Generate SMT-LIB2 output instead of running");
-    println!("  --seed <n>      Set initial seed value");
-    println!("  --seeds <n>     Number of seeds to try in action mode (default: 4)");
-    println!("  --max-inst <n>  Maximum instructions per epoch (default: 10000000)");
-    println!("  --fast          Use fast VM for pure (non-temporal) programmes");
-    println!("  --lsp           Start Language Server Protocol server");
-    println!("  --strict        Strict error handling (bounds violations produce errors)");
-    println!("  --permissive    Permissive error handling (wrap addresses, zero on underflow)");
-    println!("  --audit [file]  Enable audit logging (default: ourochronos-audit.log)");
-    println!("  --audit-json    Use JSON Lines format for audit output");
-    println!("  --provenance-limit <n>  Provenance saturation limit (default: 256)");
-    println!("  --effects <policy>      Effects inside the fixed-point search:");
-    println!("                          'decline' (default) errors on FILE_WRITE, SOCKET_SEND,");
-    println!("                          TCP_CONNECT, PROC_EXEC, SLEEP, RANDOM, CLOCK;");
-    println!("                          'unrestricted' permits them on every search epoch");
-    println!("  --help, -h      Show this help");
-    println!("  --version, -V   Show version");
+    for flag in FLAGS {
+        let mut left = flag.name.to_string();
+        if let Some(alias) = flag.alias {
+            left.push_str(", ");
+            left.push_str(alias);
+        }
+        if !flag.metavar.is_empty() {
+            left.push(' ');
+            left.push_str(flag.metavar);
+        }
+        let mut lines = flag.help.iter();
+        if let Some(first) = lines.next() {
+            println!("  {:<24}{}", left, first);
+        }
+        for line in lines {
+            println!("  {:<24}{}", "", line);
+        }
+    }
     println!();
     println!("Exit codes: 0 consistent, 1 error, 2 paradox, 3 epoch exhaustion");
 }
 
-/// Parse the value following a flag, exiting with a clear message on garbage.
-/// A silently substituted default would mask a typo in a resource limit.
+/// Print a usage error with the help pointer and return the error exit code.
+fn fail_usage(msg: &str) -> i32 {
+    eprintln!("Error: {}", msg);
+    eprintln!("Run 'ourochronos --help' for usage.");
+    EXIT_ERROR
+}
+
+/// Parse the value following a flag, failing loudly on garbage. A silently
+/// substituted default would mask a typo in a resource limit.
 fn parse_flag_value<T: std::str::FromStr>(args: &[String], flag: &str, default: T) -> Result<T, String> {
     match args.iter().position(|a| a == flag) {
         None => Ok(default),
@@ -67,23 +133,52 @@ fn parse_flag_value<T: std::str::FromStr>(args: &[String], flag: &str, default: 
     }
 }
 
-/// Reject unknown flags and stray positional arguments after the filename.
+/// The four numeric limits, each defaulted when absent.
+fn parse_numeric_flags(args: &[String]) -> Result<(u64, usize, u64, usize), String> {
+    Ok((
+        parse_flag_value(args, "--seed", 0)?,
+        parse_flag_value(args, "--seeds", 4)?,
+        parse_flag_value(args, "--max-inst", 10_000_000)?,
+        parse_flag_value(
+            args,
+            "--provenance-limit",
+            ourochronos::DEFAULT_PROVENANCE_SATURATION_LIMIT,
+        )?,
+    ))
+}
+
+/// Walk the arguments after the filename against the flag table: unknown
+/// options, stray positionals, missing values, and repeated flags are all
+/// errors. parse_flag_value's first-occurrence lookup is sound because a
+/// second occurrence never gets this far.
 fn validate_args(args: &[String]) -> Result<(), String> {
+    let mut seen: Vec<&'static str> = Vec::new();
     let mut i = 2; // args[0] = binary, args[1] = filename
     while i < args.len() {
         let arg = &args[i];
-        if VALUE_FLAGS.contains(&arg.as_str()) {
-            i += 2;
-        } else if UNARY_FLAGS.contains(&arg.as_str()) {
-            i += 1;
-        } else if arg == "--audit" {
-            // Optional value: consume the next argument unless it is a flag.
-            i += if args.get(i + 1).is_some_and(|a| !a.starts_with('-')) { 2 } else { 1 };
-        } else if arg.starts_with('-') {
-            return Err(format!("unknown option '{}'", arg));
-        } else {
-            return Err(format!("unexpected argument '{}'", arg));
+        let Some(flag) = find_flag(arg) else {
+            return Err(if arg.starts_with('-') {
+                format!("unknown option '{}'", arg)
+            } else {
+                format!("unexpected argument '{}'", arg)
+            });
+        };
+        if seen.contains(&flag.name) {
+            return Err(format!("{} specified more than once", flag.name));
         }
+        seen.push(flag.name);
+        i += match flag.arity {
+            Arity::None => 1,
+            Arity::Value => {
+                if args.get(i + 1).is_none() {
+                    return Err(format!("{} requires a value", flag.name));
+                }
+                2
+            }
+            Arity::OptionalValue => {
+                if args.get(i + 1).is_some_and(|a| !a.starts_with('-')) { 2 } else { 1 }
+            }
+        };
     }
     Ok(())
 }
@@ -139,14 +234,10 @@ fn run() -> i32 {
 
     let filename = &args[1];
     if filename.starts_with('-') {
-        eprintln!("Error: expected a programme file, got option '{}'", filename);
-        eprintln!("Run 'ourochronos --help' for usage.");
-        return EXIT_ERROR;
+        return fail_usage(&format!("expected a programme file, got option '{}'", filename));
     }
     if let Err(msg) = validate_args(&args) {
-        eprintln!("Error: {}", msg);
-        eprintln!("Run 'ourochronos --help' for usage.");
-        return EXIT_ERROR;
+        return fail_usage(&msg);
     }
 
     let diagnostic = args.contains(&"--diagnostic".to_string());
@@ -165,35 +256,20 @@ fn run() -> i32 {
         ErrorConfig::default()
     };
 
-    let (seed, num_seeds, max_instructions, provenance_limit) = match (|| -> Result<_, String> {
-        let seed: u64 = parse_flag_value(&args, "--seed", 0)?;
-        let num_seeds: usize = parse_flag_value(&args, "--seeds", 4)?;
-        let max_instructions: u64 = parse_flag_value(&args, "--max-inst", 10_000_000)?;
-        let provenance_limit: usize = parse_flag_value(
-            &args,
-            "--provenance-limit",
-            ourochronos::DEFAULT_PROVENANCE_SATURATION_LIMIT,
-        )?;
-        Ok((seed, num_seeds, max_instructions, provenance_limit))
-    })() {
-        Ok(values) => values,
-        Err(msg) => {
-            eprintln!("Error: {}", msg);
-            return EXIT_ERROR;
-        }
-    };
+    let (seed, num_seeds, max_instructions, provenance_limit) =
+        match parse_numeric_flags(&args) {
+            Ok(values) => values,
+            Err(msg) => return fail_usage(&msg),
+        };
 
     if max_instructions == 0 {
-        eprintln!("Error: --max-inst must be greater than 0");
-        return EXIT_ERROR;
+        return fail_usage("--max-inst must be greater than 0");
     }
     if provenance_limit == 0 {
-        eprintln!("Error: --provenance-limit must be greater than 0");
-        return EXIT_ERROR;
+        return fail_usage("--provenance-limit must be greater than 0");
     }
     if action_mode && num_seeds == 0 {
-        eprintln!("Error: --seeds must be greater than 0 in action mode");
-        return EXIT_ERROR;
+        return fail_usage("--seeds must be greater than 0 in action mode");
     }
 
     let effects_policy = match args.iter().position(|a| a == "--effects") {
@@ -202,11 +278,10 @@ fn run() -> i32 {
             Some("decline") => ourochronos::vm::EffectsPolicy::Decline,
             Some("unrestricted") => ourochronos::vm::EffectsPolicy::Unrestricted,
             other => {
-                eprintln!(
-                    "Error: --effects requires 'decline' or 'unrestricted', got '{}'",
+                return fail_usage(&format!(
+                    "--effects requires 'decline' or 'unrestricted', got '{}'",
                     other.unwrap_or("")
-                );
-                return EXIT_ERROR;
+                ));
             }
         },
     };

@@ -153,3 +153,13 @@ fn effects_flag_gates_nondeterminism_in_search() {
     assert_eq!(out.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&out.stderr).contains("--effects"));
 }
+
+#[test]
+fn repeated_flag_exits_one() {
+    let out = ouro()
+        .args(["examples/hello.ouro", "--seed", "5", "--seed", "9"])
+        .output()
+        .expect("binary runs");
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("more than once"));
+}
