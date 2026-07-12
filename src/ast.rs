@@ -511,27 +511,40 @@ pub enum EffectClass {
 impl OpCode {
     /// Classify this opcode's interaction with the outside world.
     ///
-    /// New opcodes that touch anything beyond the machine state MUST be
-    /// listed here; the wildcard means an unclassified opcode is treated as
-    /// pure and will silently escape the fixed-point search's effect gate.
+    /// Exhaustive (no wildcard): adding an opcode forces a classification
+    /// decision here, so nothing can silently escape the fixed-point
+    /// search's effect gate the way an unclassified default would allow.
+    /// FILE_OPEN is Pure here because its destructiveness depends on the
+    /// mode operand; its executor arm gates write/append/create/truncate
+    /// modes where the operand is known.
     pub fn effect_class(&self) -> EffectClass {
         match self {
-            // FFI calls run arbitrary foreign code; SOCKET_RECV consumes
-            // stream state, so re-reading per epoch yields different bytes.
-            // FILE_OPEN is mode-dependent (write/create/truncate modes are
-            // external) and is gated at its executor arm where the mode
-            // operand is known. File reads stay permitted: handles are
-            // epoch-local and the file is assumed stable across the search.
-            OpCode::FileWrite
-            | OpCode::SocketSend
-            | OpCode::SocketRecv
-            | OpCode::TcpConnect
-            | OpCode::ProcExec
-            | OpCode::FFICall
-            | OpCode::FFICallNamed
-            | OpCode::Sleep => EffectClass::External,
+            OpCode::FileWrite | OpCode::SocketSend | OpCode::SocketRecv | OpCode::TcpConnect
+            | OpCode::ProcExec | OpCode::FFICall | OpCode::FFICallNamed | OpCode::Sleep => EffectClass::External,
             OpCode::Clock | OpCode::Random => EffectClass::NonDeterministic,
-            _ => EffectClass::Pure,
+            OpCode::Nop | OpCode::Halt | OpCode::Pop | OpCode::Dup
+            | OpCode::Swap | OpCode::Over | OpCode::Rot | OpCode::Depth
+            | OpCode::Pick | OpCode::Roll | OpCode::Reverse | OpCode::Exec
+            | OpCode::Dip | OpCode::Keep | OpCode::Bi | OpCode::Rec
+            | OpCode::StrRev | OpCode::StrCat | OpCode::StrSplit | OpCode::Add
+            | OpCode::Sub | OpCode::Mul | OpCode::Div | OpCode::Mod
+            | OpCode::Neg | OpCode::Abs | OpCode::Min | OpCode::Max
+            | OpCode::Sign | OpCode::Assert | OpCode::Not | OpCode::And
+            | OpCode::Or | OpCode::Xor | OpCode::Shl | OpCode::Shr
+            | OpCode::Eq | OpCode::Neq | OpCode::Lt | OpCode::Gt
+            | OpCode::Lte | OpCode::Gte | OpCode::Slt | OpCode::Sgt
+            | OpCode::Slte | OpCode::Sgte | OpCode::Oracle | OpCode::Prophecy
+            | OpCode::PresentRead | OpCode::Paradox | OpCode::Pack | OpCode::Unpack
+            | OpCode::Index | OpCode::Store | OpCode::Input | OpCode::Output
+            | OpCode::Emit | OpCode::VecNew | OpCode::VecPush | OpCode::VecPop
+            | OpCode::VecGet | OpCode::VecSet | OpCode::VecLen | OpCode::HashNew
+            | OpCode::HashPut | OpCode::HashGet | OpCode::HashDel | OpCode::HashHas
+            | OpCode::HashLen | OpCode::SetNew | OpCode::SetAdd | OpCode::SetHas
+            | OpCode::SetDel | OpCode::SetLen | OpCode::FileOpen | OpCode::FileRead
+            | OpCode::FileSeek | OpCode::FileFlush | OpCode::FileClose | OpCode::FileExists
+            | OpCode::FileSize | OpCode::BufferNew | OpCode::BufferFromStack | OpCode::BufferToStack
+            | OpCode::BufferLen | OpCode::BufferReadByte | OpCode::BufferWriteByte | OpCode::BufferFree
+            | OpCode::SocketClose => EffectClass::Pure,
         }
     }
 
