@@ -893,21 +893,18 @@ fn is_stmts_pure(stmts: &[Stmt]) -> bool {
     stmts.iter().all(is_stmt_pure)
 }
 
-/// Check if a single statement is pure.
+/// Check if a single statement is pure. Per-variant verdicts stay here;
+/// the recursion into nested blocks comes from Stmt::child_blocks, so a
+/// future statement kind cannot be walked incorrectly by this analysis.
 fn is_stmt_pure(stmt: &Stmt) -> bool {
     match stmt {
         Stmt::Op(op) => is_op_pure(*op),
         Stmt::Push(_) => true,
-        Stmt::Block(stmts) => is_stmts_pure(stmts),
-        Stmt::If { then_branch, else_branch } => {
-            is_stmts_pure(then_branch) &&
-            else_branch.as_ref().map(|e| is_stmts_pure(e)).unwrap_or(true)
-        }
-        Stmt::While { cond, body } => {
-            is_stmts_pure(cond) && is_stmts_pure(body)
-        }
         Stmt::Call { .. } => true, // After inlining, calls become pure if their body is
         Stmt::TemporalScope { .. } => false, // Temporal scopes are never pure
+        Stmt::If { .. } | Stmt::While { .. } | Stmt::Block(_) => {
+            stmt.child_blocks().into_iter().all(is_stmts_pure)
+        }
     }
 }
 

@@ -822,6 +822,31 @@ pub enum Stmt {
     },
 }
 
+impl Stmt {
+    /// The child statement lists this statement nests, in source order.
+    ///
+    /// This is the single authority for the tree shape: every recursive
+    /// analysis (oracle scan, temporal-op count, purity check) walks the
+    /// children it yields, so a new statement kind declares its nesting
+    /// exactly once and no traversal can silently skip it. Exhaustive by
+    /// construction: no wildcard arm.
+    pub fn child_blocks(&self) -> Vec<&[Stmt]> {
+        match self {
+            Stmt::Op(_) | Stmt::Push(_) | Stmt::Call { .. } => Vec::new(),
+            Stmt::If { then_branch, else_branch } => {
+                let mut blocks = vec![then_branch.as_slice()];
+                if let Some(else_stmts) = else_branch {
+                    blocks.push(else_stmts.as_slice());
+                }
+                blocks
+            }
+            Stmt::While { cond, body } => vec![cond.as_slice(), body.as_slice()],
+            Stmt::Block(inner) => vec![inner.as_slice()],
+            Stmt::TemporalScope { body, .. } => vec![body.as_slice()],
+        }
+    }
+}
+
 /// Side effect behavior of a procedure.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Effect {
@@ -890,62 +915,36 @@ impl Program {
         }
     }
     
+    /// Every statement list the executor can reach: the main body, all
+    /// quotations (run via EXEC), and all procedure bodies. Analyses that
+    /// claim to cover "the whole programme" iterate this, so the executor's
+    /// reach is stated once. A call site itself introduces nothing beyond
+    /// its procedure's body, which this yields directly.
+    pub fn all_code(&self) -> impl Iterator<Item = &[Stmt]> {
+        std::iter::once(self.body.as_slice())
+            .chain(self.quotes.iter().map(|q| q.as_slice()))
+            .chain(self.procedures.iter().map(|p| p.body.as_slice()))
+    }
+
     /// Check if the program is trivially consistent: no ORACLE read anywhere
-    /// in the body, quotations, or procedure bodies.
+    /// the executor can reach.
     ///
     /// Without ORACLE the epoch function never reads the anamnesis, so F is
     /// constant in S and its unique fixed point is exactly the result of one
-    /// epoch. The scan must therefore cover every statement the executor can
-    /// reach, including quotations run via EXEC; a missed ORACLE here skips
-    /// the fixed-point search entirely.
+    /// epoch. A missed ORACLE here skips the fixed-point search entirely.
     pub fn is_trivially_consistent(&self) -> bool {
-        !self.contains_oracle(&self.body)
-            && !self.quotes.iter().any(|q| self.contains_oracle(q))
-            && !self.procedures.iter().any(|p| self.contains_oracle(&p.body))
+        !self.all_code().any(|block| contains_op(block, &|op| op == OpCode::Oracle))
     }
 
-    /// Count the ORACLE and PROPHECY operations reachable by the executor
-    /// (body, quotations, and procedure bodies). Used as the temporal-core
-    /// size estimate when deriving Action Principle weights.
+    /// Count the ORACLE and PROPHECY operations reachable by the executor.
+    /// Used as the temporal-core size estimate when deriving Action
+    /// Principle weights.
     pub fn temporal_op_count(&self) -> usize {
-        fn count(stmts: &[Stmt]) -> usize {
-            stmts.iter().map(|stmt| match stmt {
-                Stmt::Op(OpCode::Oracle) | Stmt::Op(OpCode::Prophecy) => 1,
-                Stmt::Op(_) | Stmt::Push(_) | Stmt::Call { .. } => 0,
-                Stmt::If { then_branch, else_branch } => {
-                    count(then_branch)
-                        + else_branch.as_deref().map_or(0, count)
-                }
-                Stmt::While { cond, body } => count(cond) + count(body),
-                Stmt::Block(inner) => count(inner),
-                Stmt::TemporalScope { body, .. } => count(body),
-            }).sum()
-        }
-        count(&self.body)
-            + self.quotes.iter().map(|q| count(q)).sum::<usize>()
-            + self.procedures.iter().map(|p| count(&p.body)).sum::<usize>()
-    }
-
-    // Exhaustive over Stmt (no wildcard) so a new statement kind cannot be
-    // silently classified as oracle-free.
-    fn contains_oracle(&self, stmts: &[Stmt]) -> bool {
-        stmts.iter().any(|stmt| match stmt {
-            Stmt::Op(op) => *op == OpCode::Oracle,
-            Stmt::Push(_) => false,
-            // A call executes a procedure body; every procedure body is
-            // scanned by is_trivially_consistent, so the call site itself
-            // introduces no oracle.
-            Stmt::Call { .. } => false,
-            Stmt::If { then_branch, else_branch } => {
-                self.contains_oracle(then_branch)
-                    || else_branch.as_deref().is_some_and(|e| self.contains_oracle(e))
-            }
-            Stmt::While { cond, body } => {
-                self.contains_oracle(cond) || self.contains_oracle(body)
-            }
-            Stmt::Block(inner) => self.contains_oracle(inner),
-            Stmt::TemporalScope { body, .. } => self.contains_oracle(body),
-        })
+        self.all_code()
+            .map(|block| {
+                count_ops(block, &|op| op == OpCode::Oracle || op == OpCode::Prophecy)
+            })
+            .sum()
     }
     
     /// Inline all procedure calls, replacing Stmt::Call with procedure bodies.
@@ -994,6 +993,38 @@ impl Program {
             Stmt::Op(_) | Stmt::Push(_) => stmt.clone(),
         }
     }
+}
+
+/// True when any opcode satisfying the predicate appears in the statement
+/// list or anything it nests (per Stmt::child_blocks).
+fn contains_op(stmts: &[Stmt], pred: &impl Fn(OpCode) -> bool) -> bool {
+    stmts.iter().any(|stmt| {
+        if let Stmt::Op(op) = stmt {
+            if pred(*op) {
+                return true;
+            }
+        }
+        stmt.child_blocks()
+            .into_iter()
+            .any(|block| contains_op(block, pred))
+    })
+}
+
+/// Count the opcodes satisfying the predicate in the statement list and
+/// everything it nests (per Stmt::child_blocks).
+fn count_ops(stmts: &[Stmt], pred: &impl Fn(OpCode) -> bool) -> usize {
+    stmts
+        .iter()
+        .map(|stmt| {
+            let own = matches!(stmt, Stmt::Op(op) if pred(*op)) as usize;
+            let nested: usize = stmt
+                .child_blocks()
+                .into_iter()
+                .map(|block| count_ops(block, pred))
+                .sum();
+            own + nested
+        })
+        .sum()
 }
 
 impl Default for Program {
