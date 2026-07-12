@@ -668,7 +668,6 @@ impl LanguageAnalyzer {
             ("IMPORT", "IMPORT $1;", "Import a module"),
             ("EXPORT", "EXPORT $1;", "Export a symbol"),
             ("TEMPORAL", "TEMPORAL $1 $2 {\n    $3\n}", "Temporal isolation scope"),
-            ("MATCH", "MATCH {\n    $1 => { $2 }\n    _ => { $3 }\n}", "Pattern matching"),
         ];
 
         for (kw, snippet, doc) in keywords {
@@ -778,7 +777,6 @@ impl LanguageAnalyzer {
             ("IMPORT", "**IMPORT** `module;`\n\nImports symbols from a module."),
             ("EXPORT", "**EXPORT** `symbol;`\n\nExports a symbol from the current module."),
             ("TEMPORAL", "**TEMPORAL** `base size` `{ body }`\n\nCreates an isolated temporal memory region.\n\nOps within are relative to base address. Paradoxes discard changes."),
-            ("MATCH", "**MATCH** `{ cases }`\n\nPattern match on top-of-stack value."),
             ("PURE", "**PURE** effect annotation\n\nDeclares that a procedure has no side effects."),
         ];
 
@@ -1013,7 +1011,7 @@ impl EffectInfo {
 
 const KEYWORDS: &[&str] = &[
     "IF", "ELSE", "WHILE", "PROCEDURE", "LET", "MODULE",
-    "IMPORT", "EXPORT", "TEMPORAL", "MATCH", "PURE", "ALLOC", "IO"
+    "IMPORT", "EXPORT", "TEMPORAL", "PURE", "ALLOC", "IO"
 ];
 
 /// Opcode documentation: (name, stack_effect, description, effect)

@@ -1543,14 +1543,27 @@ pub(crate) fn read_input_interactive() -> u64 {
     }
 }
 
-/// Time-derived pseudo-random value. Shared by both VMs so RANDOM has a
+/// Time-seeded pseudo-random value. Shared by both VMs so RANDOM has a
 /// single (deliberately non-deterministic) semantics.
+///
+/// SplitMix64 over nanosecond time plus a process-wide draw counter: the
+/// counter guarantees consecutive draws differ even within one timer tick,
+/// and the finaliser spreads results across the full u64 range (the previous
+/// subsec_nanos value never exceeded a billion).
 pub(crate) fn random_u64() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
+    static DRAWS: AtomicU64 = AtomicU64::new(0);
+
+    let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
-        .subsec_nanos() as u64
+        .as_nanos() as u64;
+    let draw = DRAWS.fetch_add(1, Ordering::Relaxed);
+    let mut z = nanos.wrapping_add(draw.wrapping_mul(0x9E37_79B9_7F4A_7C15));
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
 }
 
 impl Default for Executor {
@@ -1561,6 +1574,15 @@ impl Default for Executor {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn random_draws_are_distinct_within_one_tick() {
+        // The draw counter must separate values even when the clock does
+        // not advance between calls.
+        let a = super::random_u64();
+        let b = super::random_u64();
+        assert_ne!(a, b);
+    }
+
     use super::*;
     use crate::parser::parse;
     
