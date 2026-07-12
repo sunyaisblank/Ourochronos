@@ -516,10 +516,19 @@ impl OpCode {
     /// pure and will silently escape the fixed-point search's effect gate.
     pub fn effect_class(&self) -> EffectClass {
         match self {
+            // FFI calls run arbitrary foreign code; SOCKET_RECV consumes
+            // stream state, so re-reading per epoch yields different bytes.
+            // FILE_OPEN is mode-dependent (write/create/truncate modes are
+            // external) and is gated at its executor arm where the mode
+            // operand is known. File reads stay permitted: handles are
+            // epoch-local and the file is assumed stable across the search.
             OpCode::FileWrite
             | OpCode::SocketSend
+            | OpCode::SocketRecv
             | OpCode::TcpConnect
             | OpCode::ProcExec
+            | OpCode::FFICall
+            | OpCode::FFICallNamed
             | OpCode::Sleep => EffectClass::External,
             OpCode::Clock | OpCode::Random => EffectClass::NonDeterministic,
             _ => EffectClass::Pure,

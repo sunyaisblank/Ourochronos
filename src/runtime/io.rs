@@ -73,6 +73,12 @@ impl FileMode {
         self.0 & Self::CREATE.0 != 0
     }
 
+    /// True when opening with this mode can change the file system:
+    /// write, append, create, or truncate.
+    pub fn is_destructive(&self) -> bool {
+        self.can_write() || self.can_create() || self.0 & Self::TRUNCATE.0 != 0
+    }
+
     /// Parse mode from u64 value.
     pub fn from_u64(val: u64) -> Self {
         FileMode(val as u8)

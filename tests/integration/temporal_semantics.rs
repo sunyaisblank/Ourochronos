@@ -571,6 +571,51 @@ mod effect_gate {
     }
 
     #[test]
+    fn ffi_and_socket_reads_decline_inside_search() {
+        for (source, needle) in [
+            ("0 ORACLE POP 0 0 FFI_CALL", "FFI_CALL"),
+            ("0 ORACLE POP 0 0 SOCKET_RECV", "SOCKET_RECV"),
+        ] {
+            match run(source) {
+                ConvergenceStatus::Error { message, .. } => {
+                    assert!(message.contains(needle), "{}: {}", source, message);
+                }
+                other => panic!("{}: expected decline, got {:?}", source, other),
+            }
+        }
+    }
+
+    #[test]
+    fn destructive_file_open_declines_inside_search() {
+        // Mode 2 = WRITE. A create/truncate/write open would rewrite the
+        // file on every epoch of the search.
+        let result = run("0 ORACLE POP \"x.tmp\" 2 FILE_OPEN");
+        match result {
+            ConvergenceStatus::Error { message, .. } => {
+                assert!(message.contains("FILE_OPEN"), "{}", message);
+            }
+            other => panic!("expected decline, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn input_beyond_the_frozen_stream_declines_inside_search() {
+        // One frozen value, two INPUT reads: the second would re-open live
+        // stdin, which the Temporal Input Invariant forbids.
+        let config = Config {
+            frozen_inputs: vec![5],
+            ..default_config()
+        };
+        let result = run_with_config("INPUT POP INPUT 0 PROPHECY 0 ORACLE POP", config);
+        match result {
+            ConvergenceStatus::Error { message, .. } => {
+                assert!(message.contains("frozen input"), "{}", message);
+            }
+            other => panic!("expected decline, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn pure_single_epoch_run_is_exempt_from_the_gate() {
         // A trivially consistent programme's one epoch is the timeline
         // itself, so RANDOM is not being re-rolled by any search.

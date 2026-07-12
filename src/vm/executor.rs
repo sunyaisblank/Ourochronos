@@ -88,12 +88,33 @@ pub struct ExecutorConfig {
     pub input: Vec<u64>,
     /// Error handling policy for bounds checking, division, etc.
     pub error_config: ErrorConfig,
-    /// Whether this executor is running epochs inside a fixed-point search.
-    /// Single-epoch (trivially consistent) runs are exempt from the effect
-    /// gate because their one epoch IS the consistent timeline.
-    pub in_fixed_point_search: bool,
-    /// Policy for external effects and non-determinism during a search.
-    pub effects_policy: EffectsPolicy,
+    /// Where these epochs are being executed. The context carries the
+    /// effects policy with it, so "not in a search but with a policy set"
+    /// is unrepresentable.
+    pub context: EpochContext,
+}
+
+/// Where an epoch runs, which determines whether the effect gate applies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EpochContext {
+    /// A single evaluation whose result is the timeline itself (trivially
+    /// consistent programmes and direct executor use). No gate.
+    #[default]
+    SingleEpoch,
+    /// One iteration of a fixed-point search, with its effects policy.
+    FixedPointSearch(EffectsPolicy),
+}
+
+impl EpochContext {
+    /// True when the search context declines non-pure opcodes.
+    fn declines_effects(&self) -> bool {
+        matches!(self, EpochContext::FixedPointSearch(EffectsPolicy::Decline))
+    }
+
+    /// True inside a fixed-point search under any policy.
+    fn in_search(&self) -> bool {
+        matches!(self, EpochContext::FixedPointSearch(_))
+    }
 }
 
 /// Policy for opcodes with an EffectClass other than Pure during a
@@ -116,8 +137,7 @@ impl Default for ExecutorConfig {
             immediate_output: true,
             input: Vec::new(),
             error_config: ErrorConfig::default(),
-            in_fixed_point_search: false,
-            effects_policy: EffectsPolicy::default(),
+            context: EpochContext::default(),
         }
     }
 }
@@ -329,9 +349,7 @@ impl Executor {
         // a fixed function of the memory state, and external effects would
         // fire once per search epoch rather than once per timeline. Checked
         // at dispatch, before operands are popped, so the decline is clean.
-        if self.config.in_fixed_point_search
-            && self.config.effects_policy == crate::vm::EffectsPolicy::Decline
-        {
+        if self.config.context.declines_effects() {
             match op.effect_class() {
                 crate::ast::EffectClass::External => {
                     return Err(format!(
@@ -910,8 +928,18 @@ Run with --effects unrestricted to permit this.",
                     self.input_cursor += 1;
                     self.inputs_consumed.push(v);
                     v
+                } else if self.config.context.in_search() && !self.config.input.is_empty() {
+                    // The input stream is frozen (Temporal Input Invariant);
+                    // reading past its end would re-open the live stdin the
+                    // freeze exists to shut, making F non-deterministic.
+                    return Err(format!(
+                        "INPUT beyond the {} frozen input value(s) inside a \
+fixed-point search; the input stream must be fixed for the search to converge",
+                        self.config.input.len()
+                    ));
                 } else {
-                    // Read from stdin as fallback
+                    // First consuming epoch of a search (nothing frozen yet)
+                    // or a single-epoch run: read interactively.
                     let v = self.read_input_interactive();
                     self.inputs_consumed.push(v);
                     v
@@ -1183,6 +1211,19 @@ Run with --effects unrestricted to permit this.",
                 // ( path_len path_chars... mode -- file_handle )
                 let mode_val = self.pop(state)?.val;
                 let mode = FileMode::from_u64(mode_val);
+
+                // The effect gate cannot classify FILE_OPEN statically
+                // because destructiveness depends on this operand: a
+                // create/truncate open would rewrite the file on every
+                // epoch of the search.
+                if self.config.context.declines_effects() && mode.is_destructive() {
+                    return Err(
+                        "FILE_OPEN with a write, append, create, or truncate mode is an \
+external effect inside a fixed-point search; each epoch of the search would \
+reapply it. Run with --effects unrestricted to permit this."
+                            .to_string(),
+                    );
+                }
 
                 let path_len = self.pop(state)?.val as usize;
                 let mut path_chars = Vec::with_capacity(path_len);

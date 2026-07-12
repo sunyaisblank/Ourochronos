@@ -228,9 +228,6 @@ impl TimeLoopConfig {
 pub struct TimeLoop {
     config: TimeLoopConfig,
     executor: Executor,
-    /// Inputs captured during epoch 0, frozen for replay in subsequent epochs.
-    /// This ensures the Temporal Input Invariant: External → Loop causality only.
-    captured_inputs: Option<Vec<u64>>,
     /// Epoch result cache for memoization during fixed-point search.
     cache: EpochCache,
 }
@@ -252,7 +249,7 @@ impl TimeLoop {
             immediate_output: config.verbose,
             max_instructions: config.max_instructions,
             error_config: config.error_config.clone(),
-            effects_policy: config.effects,
+            context: crate::vm::EpochContext::SingleEpoch,
             ..ExecutorConfig::default()
         };
 
@@ -264,7 +261,6 @@ impl TimeLoop {
         Ok(Self {
             config,
             executor: Executor::with_config(exec_config),
-            captured_inputs: None,
             cache: EpochCache::with_capacity(1024),
         })
     }
@@ -279,10 +275,11 @@ impl TimeLoop {
         // A trivially consistent programme's single epoch IS the consistent
         // timeline, so the effect gate does not apply to it.
         if program.is_trivially_consistent() {
-            self.executor.config.in_fixed_point_search = false;
+            self.executor.config.context = crate::vm::EpochContext::SingleEpoch;
             return self.run_trivial(program);
         }
-        self.executor.config.in_fixed_point_search = true;
+        self.executor.config.context =
+            crate::vm::EpochContext::FixedPointSearch(self.config.effects);
         
         match &self.config.mode {
             ExecutionMode::Standard => self.run_standard(program),
@@ -303,11 +300,12 @@ impl TimeLoop {
     /// the epoch function F would vary between iterations and the fixed
     /// point would depend on how often the user was prompted.
     fn freeze_inputs(&mut self, result: &crate::vm::EpochResult) {
-        if self.captured_inputs.is_none() && !result.inputs_consumed.is_empty() {
-            self.captured_inputs = Some(result.inputs_consumed.clone());
+        // A non-empty executor input IS the frozen stream, whether supplied
+        // up front via frozen_inputs or captured here; one home for the data.
+        if self.executor.config.input.is_empty() && !result.inputs_consumed.is_empty() {
             self.executor.config.input = result.inputs_consumed.clone();
             if self.config.verbose {
-                println!("Input frozen: {:?}", self.captured_inputs.as_ref().unwrap());
+                println!("Input frozen: {:?}", self.executor.config.input);
             }
         }
     }
