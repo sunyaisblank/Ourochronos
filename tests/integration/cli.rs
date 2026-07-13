@@ -176,3 +176,63 @@ fn temporal_sort_example_converges_on_the_sorted_witness() {
     assert_eq!(out.status.code(), Some(0), "stdout was: {}", text);
     assert!(text.contains("[1][2][3][4]"), "stdout was: {}", text);
 }
+
+#[test]
+fn examples_meet_their_contracts() {
+    // The examples directory is the thesis evidence: each programme pins its
+    // exit code and, where deterministic, an output fragment. The fibonacci
+    // benchmarks are excluded (they need a raised --max-inst by design, as
+    // their headers document), as are examples/modules (IMPORT resolves
+    // relative to the working directory).
+    let contracts: &[(&str, i32, Option<&str>)] = &[
+        ("hello", 0, Some("Hello World!")),
+        ("simple", 0, None),
+        ("simple_string", 0, None),
+        ("strings", 0, None),
+        ("effects", 0, None),
+        ("expression_syntax", 0, None),
+        ("fibonacci", 0, None),
+        ("let_bindings", 0, None),
+        ("procedures", 0, None),
+        ("program", 0, None),
+        ("recursion", 0, None),
+        ("sqrt", 0, None),
+        ("temporal", 0, Some("[42]")),
+        ("sat", 0, None),
+        ("bootstrap", 0, Some("HELLO")),
+        ("temporal_variables", 0, Some("[3]")),
+        ("primality", 0, Some("[3]")),
+        ("combinators", 0, Some("[10][20][11][10][11][20][11][57]")),
+        ("data_structures", 0, Some("[10][30][100][42][3][2]")),
+        ("paradox", 2, Some("OSCILLATION")),
+        ("quantum_suicide", 2, Some("OSCILLATION")),
+        ("assert_test", 1, Some("Expect Failure")),
+    ];
+
+    let mut failures: Vec<String> = Vec::new();
+    for (name, expected_exit, fragment) in contracts {
+        let path = format!("examples/{}.ouro", name);
+        let out = ouro().arg(&path).output().expect("binary runs");
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        if out.status.code() != Some(*expected_exit) {
+            failures.push(format!(
+                "{}: expected exit {}, got {:?}; output: {}",
+                name, expected_exit, out.status.code(), text.trim()
+            ));
+            continue;
+        }
+        if let Some(needle) = fragment {
+            if !text.contains(needle) {
+                failures.push(format!(
+                    "{}: output missing '{}'; output: {}",
+                    name, needle, text.trim()
+                ));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "example contracts broken:\n{}", failures.join("\n"));
+}

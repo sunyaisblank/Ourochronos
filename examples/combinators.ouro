@@ -1,86 +1,50 @@
-# Combinator Test Suite
+# Combinators
 #
-# Tests the higher-order combinators available in Ourochronos.
-# Combinators are operations that manipulate quotations (code blocks).
+# Combinators are the operations over quotations (code blocks): a quotation
+# `[ ... ]` pushes an identifier, and the combinators decide how it runs.
+# Each demonstration below asserts the exact stack it should leave, so this
+# example doubles as an executable check of the combinator semantics.
 #
-# Demonstrates:
-# - EXEC: Execute a quotation
-# - DIP: Execute quotation, preserving top of stack
-# - KEEP: Execute quotation, but restore original value
-# - BI: Apply two quotations to the same value
-# - ASSERT for verification
+# Stack effects (top of stack rightmost):
+#   EXEC ( quote -- ... )        run the quotation
+#   DIP  ( x quote -- ... x )    run it with the top element hidden
+#   KEEP ( x quote -- ... x )    run it on x, then restore x
+#   BI   ( x p q -- p(x) q(x) )  run two quotations on the same value
 
-# ════ Test Header ════
-"Combinator Test Suite" OUTPUT NEWLINE
-"=====================" OUTPUT NEWLINE
-
-# ════ Test EXEC ════
-# EXEC pops a quotation and executes it
-# Stack: [ code ] -- result
-"Test EXEC" OUTPUT NEWLINE
-"  [ 10 ] EXEC -> " OUTPUT
+# ════ EXEC ════
 [ 10 ] EXEC
-DUP OUTPUT NEWLINE
-DUP 10 EQ ASSERT "EXEC failed"
-DROP
-"  Status: PASSED" OUTPUT NEWLINE
+DUP 10 EQ ASSERT "EXEC pushes the quotation's result"
+OUTPUT
 
-# ════ Test DIP ════
-# DIP executes quotation under the top element
-# Stack: x [ code ] -- (code result) x
-"Test DIP" OUTPUT NEWLINE
-"  20 [ 10 ] DIP -> " OUTPUT
-20 [ 10 ] DIP
-# Stack should be: 10 20
-DUP OUTPUT " " OUTPUT
-SWAP DUP OUTPUT NEWLINE
-SWAP  # Restore for checks
-DUP 20 EQ ASSERT "DIP top check failed"
-SWAP DUP 10 EQ ASSERT "DIP bottom check failed"
-DROP DROP
-"  Status: PASSED" OUTPUT NEWLINE
+# ════ DIP ════
+# 10 is hidden while the quotation increments what lies beneath it.
+10 20 [ 1 ADD ] DIP
+DUP 20 EQ ASSERT "DIP restores the hidden top"
+OUTPUT
+DUP 11 EQ ASSERT "DIP applies the quotation underneath"
+OUTPUT
 
-# ════ Test KEEP ════
-# KEEP executes quotation but restores the original value
-# Stack: x [ code ] -- (code result) x
-"Test KEEP" OUTPUT NEWLINE
-"  10 [ 1 ADD ] KEEP -> " OUTPUT
+# ════ KEEP ════
+# The quotation consumes 10 and leaves 11; KEEP puts 10 back on top.
 10 [ 1 ADD ] KEEP
-# Stack should be: 11 10
-DUP OUTPUT " " OUTPUT
-SWAP DUP OUTPUT NEWLINE
-SWAP  # Restore for checks
-DUP 10 EQ ASSERT "KEEP restore check failed"
-SWAP DUP 11 EQ ASSERT "KEEP action check failed"
-DROP DROP
-"  Status: PASSED" OUTPUT NEWLINE
+DUP 10 EQ ASSERT "KEEP restores the original value"
+OUTPUT
+DUP 11 EQ ASSERT "KEEP keeps the quotation's result beneath"
+OUTPUT
 
-# ════ Test BI ════
-# BI applies two quotations to the same value
-# Stack: x [ q1 ] [ q2 ] -- (q1 x) (q2 x)
-"Test BI" OUTPUT NEWLINE
-"  10 [ 1 ADD ] [ 2 MUL ] BI -> " OUTPUT
+# ════ BI ════
+# Both quotations see the same 10; their results stack in order.
 10 [ 1 ADD ] [ 2 MUL ] BI
-# Stack should be: 11 20
-DUP OUTPUT " " OUTPUT
-SWAP DUP OUTPUT NEWLINE
-SWAP  # Restore for checks
-DUP 20 EQ ASSERT "BI q2 check failed"
-SWAP DUP 11 EQ ASSERT "BI q1 check failed"
-DROP DROP
-"  Status: PASSED" OUTPUT NEWLINE
+DUP 20 EQ ASSERT "BI applies the second quotation"
+OUTPUT
+DUP 11 EQ ASSERT "BI applies the first quotation"
+OUTPUT
 
-# ════ Combined Example ════
-"Test Combined Combinators" OUTPUT NEWLINE
-"  5 [ DUP MUL ] KEEP [ 1 ADD ] BI -> " OUTPUT
-# Compute: 5 squared (25) and 5+1 (6)
-5 [ DUP MUL ] KEEP [ 1 ADD ] BI
-# After KEEP: 25 5
-# After BI: 25 6 (q1=KEEP result, q2=5+1)
-DUP OUTPUT " " OUTPUT
-SWAP DUP OUTPUT NEWLINE
-DROP DROP
-"  Status: PASSED" OUTPUT NEWLINE
+# ════ Combined ════
+# Square and successor of the same value, folded into one number.
+7 [ DUP MUL ] [ 1 ADD ] BI
+ADD
+DUP 57 EQ ASSERT "BI results combine: 49 + 8"
+OUTPUT
 
-"=====================" OUTPUT NEWLINE
-"All combinator tests passed!" OUTPUT NEWLINE
+# Expected output: [10][20][11][10][11][20][11][57]

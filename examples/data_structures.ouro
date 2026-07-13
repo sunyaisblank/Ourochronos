@@ -1,188 +1,80 @@
-# Data Structures Example
+# Data Structures
 #
-# Demonstrates the built-in data structures added in Phase 3:
-# - Vectors: Dynamic arrays with O(1) amortized append
-# - Hash Tables: Key-value stores with O(1) average lookup
-# - Sets: Unordered collections with membership testing
+# Vectors, hash tables, and sets are epoch-local heap structures: handles
+# live on the stack, contents live outside the memory array, and everything
+# is rebuilt each epoch. A value that must survive the fixed-point loop
+# belongs in memory via PROPHECY; these structures are working storage.
 #
-# These structures enable practical programming patterns
-# that were previously difficult with raw memory operations.
+# Every step below asserts its postcondition, so this example doubles as an
+# executable check of the data-structure opcodes. Keys and elements are
+# plain 64-bit values.
 
-# ════ Procedures ════
-
-PROCEDURE section_header PURE {
-    # Stack: title --
-    NEWLINE
-    "════ " OUTPUT OUTPUT " ════" OUTPUT NEWLINE
-}
-
-# ════ Vector Examples ════
-"Vectors" section_header
-
-# Create a new vector
+# ════ Vectors ════
+# ( -- vec ), then each push returns the vector: ( vec value -- vec )
 VEC_NEW
-"Created empty vector" OUTPUT NEWLINE
-
-# Push some values
 10 VEC_PUSH
 20 VEC_PUSH
 30 VEC_PUSH
-"Pushed: 10, 20, 30" OUTPUT NEWLINE
 
-# Get the length
-DUP VEC_LEN
-"Length: " OUTPUT OUTPUT NEWLINE
-DROP  # Drop the vector reference, keep working with original
+VEC_LEN 3 EQ ASSERT "vector length counts three pushes"
 
-# Access by index
-DUP 0 VEC_GET
-"vec[0] = " OUTPUT OUTPUT NEWLINE
-DROP
+0 VEC_GET
+DUP OUTPUT
+10 EQ ASSERT "vec[0] is the first push"
 
-DUP 1 VEC_GET
-"vec[1] = " OUTPUT OUTPUT NEWLINE
-DROP
+VEC_POP
+DUP OUTPUT
+30 EQ ASSERT "pop returns the last push"
 
-DUP 2 VEC_GET
-"vec[2] = " OUTPUT OUTPUT NEWLINE
-DROP
+VEC_LEN 2 EQ ASSERT "pop shrinks the vector"
 
-# Pop a value
-DUP VEC_POP
-"Popped: " OUTPUT OUTPUT NEWLINE
-DROP
+100 0 VEC_SET
+0 VEC_GET
+DUP OUTPUT
+100 EQ ASSERT "set overwrites the index"
+POP
 
-# Check new length
-DUP VEC_LEN
-"Length after pop: " OUTPUT OUTPUT NEWLINE
-DROP
-
-# Set a value at index
-DUP 0 100 VEC_SET
-"Set vec[0] = 100" OUTPUT NEWLINE
-
-DUP 0 VEC_GET
-"vec[0] now = " OUTPUT OUTPUT NEWLINE
-DROP
-
-DROP  # Clean up vector
-
-# ════ Hash Table Examples ════
-"Hash Tables" section_header
-
-# Create a new hash table
+# ════ Hash tables ════
+# ( -- hash ), inserts return the table: ( hash key value -- hash )
 HASH_NEW
-"Created empty hash table" OUTPUT NEWLINE
+1 42 HASH_PUT
+2 100 HASH_PUT
+3 5 HASH_PUT
 
-# Put some key-value pairs
-DUP "name" 42 HASH_PUT
-"Put: \"name\" -> 42" OUTPUT NEWLINE
-DROP
+HASH_LEN 3 EQ ASSERT "three keys inserted"
 
-DUP "score" 100 HASH_PUT
-"Put: \"score\" -> 100" OUTPUT NEWLINE
-DROP
+1 HASH_HAS 1 EQ ASSERT "key 1 present"
+9 HASH_HAS 0 EQ ASSERT "key 9 absent"
 
-DUP "level" 5 HASH_PUT
-"Put: \"level\" -> 5" OUTPUT NEWLINE
-DROP
+1 HASH_GET
+1 EQ ASSERT "lookup of key 1 reports found"
+DUP OUTPUT
+42 EQ ASSERT "key 1 holds 42"
 
-# Get the length
-DUP HASH_LEN
-"Hash table size: " OUTPUT OUTPUT NEWLINE
-DROP
+3 HASH_DEL
+HASH_LEN 2 EQ ASSERT "delete removes the key"
+POP
 
-# Check if keys exist
-DUP "name" HASH_HAS
-"Has \"name\": " OUTPUT OUTPUT NEWLINE
-DROP
-
-DUP "missing" HASH_HAS
-"Has \"missing\": " OUTPUT OUTPUT NEWLINE
-DROP
-
-# Get values
-DUP "name" HASH_GET
-"Get \"name\": " OUTPUT
-IF {
-    OUTPUT NEWLINE
-} ELSE {
-    DROP "not found" OUTPUT NEWLINE
-}
-
-DUP "score" HASH_GET
-"Get \"score\": " OUTPUT
-IF {
-    OUTPUT NEWLINE
-} ELSE {
-    DROP "not found" OUTPUT NEWLINE
-}
-
-# Delete a key
-DUP "level" HASH_DEL
-"Deleted \"level\"" OUTPUT NEWLINE
-DROP
-
-DUP HASH_LEN
-"Size after delete: " OUTPUT OUTPUT NEWLINE
-DROP
-
-DROP  # Clean up hash table
-
-# ════ Set Examples ════
-"Sets" section_header
-
-# Create a new set
+# ════ Sets ════
+# ( -- set ), adds return the set: ( set value -- set )
 SET_NEW
-"Created empty set" OUTPUT NEWLINE
+10 SET_ADD
+20 SET_ADD
+30 SET_ADD
+20 SET_ADD    # duplicate: a set ignores it
 
-# Add some elements
-DUP 10 SET_ADD
-"Added: 10" OUTPUT NEWLINE
-DROP
+SET_LEN
+DUP OUTPUT
+3 EQ ASSERT "duplicates do not grow the set"
 
-DUP 20 SET_ADD
-"Added: 20" OUTPUT NEWLINE
-DROP
+20 SET_HAS 1 EQ ASSERT "20 is a member"
+99 SET_HAS 0 EQ ASSERT "99 is not"
 
-DUP 30 SET_ADD
-"Added: 30" OUTPUT NEWLINE
-DROP
+20 SET_DEL
+20 SET_HAS 0 EQ ASSERT "deleted members are gone"
+SET_LEN
+DUP OUTPUT
+2 EQ ASSERT "delete shrinks the set"
+POP
 
-# Try adding duplicate
-DUP 20 SET_ADD
-"Added: 20 (duplicate)" OUTPUT NEWLINE
-DROP
-
-# Get the length
-DUP SET_LEN
-"Set size: " OUTPUT OUTPUT NEWLINE
-DROP
-
-# Check membership
-DUP 20 SET_HAS
-"Has 20: " OUTPUT OUTPUT NEWLINE
-DROP
-
-DUP 99 SET_HAS
-"Has 99: " OUTPUT OUTPUT NEWLINE
-DROP
-
-# Delete an element
-DUP 20 SET_DEL
-"Deleted: 20" OUTPUT NEWLINE
-DROP
-
-DUP 20 SET_HAS
-"Has 20 after delete: " OUTPUT OUTPUT NEWLINE
-DROP
-
-DUP SET_LEN
-"Size after delete: " OUTPUT OUTPUT NEWLINE
-DROP
-
-DROP  # Clean up set
-
-# ════ Summary ════
-NEWLINE
-"Data structure examples complete!" OUTPUT NEWLINE
+# Expected output: [10][30][100][42][3][2]

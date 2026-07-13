@@ -560,8 +560,6 @@ struct VariableBinding {
 struct TemporalBinding {
     /// Memory address this variable reads from/writes to.
     address: u64,
-    /// Default value if no oracle value set.
-    default: u64,
 }
 
 /// Procedure binding with its definition.
@@ -1151,11 +1149,14 @@ impl<'a> Parser<'a> {
             ).into()),
         }
         
-        // Get default value
-        let default = match self.tokens.next() {
-            Some(Token::Number(n)) => *n,
+        // Consume the default value. The clause is declaration syntax only:
+        // the initial anamnesis is all zeros, and nothing downstream ever
+        // consumed the value (its one historical reader was the expression
+        // path's expansion bug, which mistook it for an ORACLE operand).
+        match self.tokens.next() {
+            Some(Token::Number(_)) => {}
             _ => return Err(self.error("Expected default value after DEFAULT").into()),
-        };
+        }
         
         // Consume semicolon if present
         if let Some(Token::Semicolon) = self.tokens.peek() {
@@ -1163,7 +1164,7 @@ impl<'a> Parser<'a> {
         }
         
         // Register the temporal binding
-        self.temporal_vars.insert(name.clone(), TemporalBinding { address, default });
+        self.temporal_vars.insert(name.clone(), TemporalBinding { address });
         
         // No statement emitted - temporal vars are accessed via ORACLE/PROPHECY
         // The DEFAULT value is used if the oracle returns 0 on first access
@@ -1849,13 +1850,16 @@ impl<'a> Parser<'a> {
                     ]);
                 }
 
-                // Check if it's a temporal variable
+                // Check if it's a temporal variable. Expands exactly like the
+                // statement path: <address> ORACLE. The DEFAULT clause is not
+                // an ORACLE operand; a second push here would be popped as
+                // the address (reading anamnesis[default]) and would leave
+                // the real address behind as stack litter.
                 if let Some(binding) = self.temporal_vars.get(&lower).cloned() {
                     self.stack_depth += 1;
                     return Ok(vec![
                         Stmt::Push(Value::new(binding.address)),
-                        Stmt::Push(Value::new(binding.default)),
-                        Stmt::Op(OpCode::Oracle), // Reads current value or default
+                        Stmt::Op(OpCode::Oracle),
                     ]);
                 }
                 

@@ -1,23 +1,29 @@
-# Temporal Variables Example
+# Temporal Variables
 #
-# TEMPORAL variables provide syntactic sugar for oracle-backed data.
-# Instead of manually managing ORACLE/PROPHECY, you declare temporal
-# variables that automatically read from fixed addresses.
+# TEMPORAL variables are syntactic sugar for oracle-backed cells. Declaring
 #
-# Syntax: TEMPORAL name @ address DEFAULT default_value;
+#   TEMPORAL name @ address DEFAULT value;
 #
-# When you reference the variable, it generates ORACLE(address).
-# This makes temporal programs more readable!
+# lets every later reference to `name` expand to `address ORACLE`: a read of
+# that cell from the anamnesis. Writing back is ordinary PROPHECY to the
+# same address. (The DEFAULT clause is part of the declaration syntax; the
+# initial anamnesis is all zeros, so a search starts from 0 regardless.)
+#
+# The demonstration is the factor-of-15 witness: read the candidate, verify
+# it, stabilise when correct, otherwise try the next value. The programme
+# never searches for factors in the conventional sense; the factor is the
+# value at which the timeline closes.
 
-# Declare a temporal variable at address 0 with default 2
-TEMPORAL factor @ 0 DEFAULT 2;
+TEMPORAL factor @ 0 DEFAULT 0;
 
-# Read the temporal variable (generates ORACLE(0))
-factor OUTPUT
+factor 15 SWAP MOD 0 EQ    # does the candidate divide 15?
+factor 1 GT AND            # and is it non-trivial?
 
-# Write back a new value
-factor 1 ADD  # factor + 1
-0 PROPHECY    # write to address 0
+IF {
+    factor 0 PROPHECY      # the future was right: stabilise
+    factor OUTPUT
+} ELSE {
+    factor 1 ADD 0 PROPHECY    # wrong: perturb to the next candidate
+}
 
-# The program will find a fixed point where factor reads back
-# the same value it writes
+# Converges at the first non-trivial divisor: prints [3].

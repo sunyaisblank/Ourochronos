@@ -114,7 +114,9 @@ Programs are sequences of literals, opcodes, and structured statements. Stack ef
 cond IF { then } ELSE { else }      pop cond; nonzero runs then
 WHILE { cond } { body }             run cond, pop; nonzero runs body, repeat
 TEMPORAL base size { body }         isolated temporal region, base-relative
-TEMPORAL name @ addr DEFAULT v;     named temporal variable at a fixed address
+TEMPORAL name @ addr DEFAULT v;     named temporal variable; references read addr
+                                    from the anamnesis (DEFAULT is declaration
+                                    syntax only; the initial anamnesis is zeros)
 MANIFEST name = value;              compile-time constant
 LET name = expr;                    named binding (compiled to PICK)
 PROCEDURE name { body }             procedure, inlined at call sites

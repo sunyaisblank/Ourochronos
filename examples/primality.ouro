@@ -26,11 +26,9 @@ TEMPORAL factor @ 0 DEFAULT 2;
 # Check if value is in valid range (1 < val < limit)
 PROCEDURE in_range PURE {
     # Stack: val limit -- bool
-    SWAP           # limit val
-    DUP 1 GT       # limit val (val > 1)
-    ROT            # val (val > 1) limit
-    ROT            # (val > 1) limit val
-    LT             # (val > 1) (val < limit)
+    OVER SWAP      # val val limit
+    LT             # val (val < limit)
+    SWAP 1 GT      # (val < limit) (val > 1)
     AND            # result
 }
 
@@ -62,8 +60,7 @@ PROCEDURE find_factor {
         # Found a valid factor!
         # Write back to create fixed point
         DUP ADDR_FACTOR PROPHECY
-        "Factor of " OUTPUT TARGET OUTPUT " found: " OUTPUT
-        OUTPUT NEWLINE
+        OUTPUT
     } ELSE {
         # Not valid, try next candidate
         # Increment and wrap around if needed

@@ -623,3 +623,29 @@ mod effect_gate {
         assert_consistent(&result);
     }
 }
+
+// =============================================================================
+// Temporal variables in expression syntax (regression: parser expansion)
+// =============================================================================
+
+mod temporal_variable_expansion {
+    use super::*;
+
+    #[test]
+    fn expression_reference_reads_the_variable_address_not_the_default() {
+        // The expression-syntax path expanded `f` to Push(address),
+        // Push(default), ORACLE, so ORACLE popped the DEFAULT as its
+        // address and the real address stayed behind as stack litter.
+        // The copy at cell 11 must equal the value at the variable's
+        // address (10), not anamnesis[99].
+        let result = run(
+            "TEMPORAL f @ 10 DEFAULT 99;\n\
+             5 10 PROPHECY\n\
+             LET copy = f;\n\
+             copy 11 PROPHECY",
+        );
+        assert_consistent(&result);
+        assert_memory_value(&result, 10, 5);
+        assert_memory_value(&result, 11, 5);
+    }
+}
