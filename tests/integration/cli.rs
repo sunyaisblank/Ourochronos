@@ -165,3 +165,14 @@ fn repeated_flag_exits_one() {
     assert_eq!(out.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&out.stderr).contains("more than once"));
 }
+
+#[test]
+fn temporal_sort_example_converges_on_the_sorted_witness() {
+    // Regression: the shipped example was written against 1-based PICK
+    // indexing and failed on its first verification step for as long as it
+    // existed. It must reach the sorted fixed point and print it.
+    let out = ouro().arg("examples/temporal_sort.ouro").output().expect("binary runs");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(0), "stdout was: {}", text);
+    assert!(text.contains("[1][2][3][4]"), "stdout was: {}", text);
+}
