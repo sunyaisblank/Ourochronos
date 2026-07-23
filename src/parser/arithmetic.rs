@@ -3,8 +3,8 @@
 //! Handles arithmetic (ADD, SUB, MUL, DIV, MOD, etc.), bitwise (NOT, AND, OR, etc.),
 //! and comparison (EQ, LT, GT, etc.) keywords.
 
-use crate::ast::{OpCode, Stmt};
 use super::domain::{DomainParser, ParseContext};
+use crate::ast::{OpCode, Stmt};
 
 /// Parser for arithmetic, bitwise, and comparison operations.
 pub struct ArithmeticParser;
@@ -12,9 +12,8 @@ pub struct ArithmeticParser;
 impl ArithmeticParser {
     pub const KEYWORDS: &'static [&'static str] = &[
         // Arithmetic
-        "ADD", "+", "SUB", "-", "MUL", "*", "DIV", "/", "MOD", "%",
-        "NEG", "ABS", "MIN", "MAX", "SIGN", "SIGNUM",
-        // Bitwise
+        "ADD", "+", "SUB", "-", "MUL", "*", "DIV", "/", "MOD", "%", "NEG", "ABS", "MIN", "MAX",
+        "SIGN", "SIGNUM", // Bitwise
         "NOT", "~", "AND", "&", "OR", "|", "XOR", "^", "SHL", "<<", "SHR", ">>",
         // Comparison (unsigned)
         "EQ", "==", "NEQ", "!=", "LT", "<", "GT", ">", "LTE", "<=", "GTE", ">=",
@@ -28,7 +27,7 @@ impl DomainParser for ArithmeticParser {
         Self::KEYWORDS
     }
 
-    fn parse<'a>(&self, keyword: &str, ctx: &mut ParseContext<'a>) -> Result<Stmt, String> {
+    fn parse(&self, keyword: &str, ctx: &mut ParseContext<'_>) -> Result<Stmt, String> {
         match keyword {
             // Arithmetic
             "ADD" | "+" => ctx.emit_op(OpCode::Add),

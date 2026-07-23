@@ -9,17 +9,17 @@
 # - WHILE loops with conditions
 # - Stack manipulation (SWAP, OVER)
 # - Procedures with effects
-# - Pure computation (no ORACLE/PROPHECY)
+# - Pure arithmetic separated from output (no ORACLE/PROPHECY)
 #
 # Output: 1 1 2 3 5 8 13 21 34 55 89
 
 # ════ Configuration ════
 MANIFEST LIMIT = 100;
 
-# ════ Pure Procedures ════
+# ════ Procedures ════
 
 # Print a number followed by a space
-PROCEDURE print_num PURE {
+PROCEDURE print_num IO {
     # Stack: n --
     OUTPUT SPACE
 }
@@ -40,7 +40,7 @@ PROCEDURE should_continue PURE {
 
 # ════ Main Procedure ════
 
-PROCEDURE generate_fibonacci PURE {
+PROCEDURE generate_fibonacci IO {
     # Initialize: 0 1 (but start output from 1)
     0 1
 

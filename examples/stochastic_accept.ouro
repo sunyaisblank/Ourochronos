@@ -1,0 +1,12 @@
+# Exact finite stochastic Deutsch model.
+# Its unique stationary distribution is (1/3, 2/3), so every fixed point
+# accepts with probability 2/3 and satisfies the bounded-error promise.
+
+MARKOV biased_coin {
+    STATES 2;
+    ROW 0 { 1/2 1/2 };
+    ROW 1 { 1/4 3/4 };
+    ACCEPTING { 1 };
+    ACCEPT_AT_LEAST 2/3;
+    REJECT_AT_MOST 1/3;
+}

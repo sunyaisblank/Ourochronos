@@ -3,8 +3,9 @@
 //! This module defines the fundamental address type and memory size constant.
 //! These are separated out to break circular dependencies between core modules.
 
-/// Memory address (16-bit index).
-pub type Address = u16;
+/// Memory address. The concrete memory length is configured per run; `u64`
+/// matches the language's value width and avoids a hidden 16-bit ceiling.
+pub type Address = u64;
 
 /// The size of the memory space (2^16 = 65536 cells).
 pub const MEMORY_SIZE: usize = 65536;

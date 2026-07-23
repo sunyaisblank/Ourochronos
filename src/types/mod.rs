@@ -13,18 +13,6 @@
 //!         Pure (constant, no oracle dependency)
 //! ```
 //!
-//! # Linear Types
-//!
-//! Values from ORACLE are marked as **linear**, meaning they can only be used once.
-//! This prevents free duplication of temporal information, which is essential for
-//! maintaining causal consistency in CTC semantics.
-//!
-//! - `Linear`: Must be consumed exactly once (cannot DUP/OVER/PICK)
-//! - `Unrestricted`: Can be freely copied and discarded
-//!
-//! Linear types ensure that temporal information flows through explicit channels
-//! and cannot be silently duplicated, which could create paradoxes.
-//!
 //! # Effect System
 //!
 //! The effect system tracks side effects:
@@ -33,21 +21,20 @@
 //! - `Writes`: Writes to memory
 //! - `Temporal`: Uses ORACLE/PROPHECY
 //! - `IO`: Performs input/output
+//! - `Alloc`: Allocates or mutates runtime data structures
+//! - `FFI`: Calls foreign code
+//! - `FileIO`: Accesses files
+//! - `Network`: Accesses sockets
+//! - `System`: Accesses process, clock, sleep, or randomness services
 //!
-//! Effects form a lattice and compose via join:
-//! ```text
-//!           IO (all effects)
-//!          / | \
-//!    Reads  Writes  Temporal
-//!          \ | /
-//!          Pure
-//! ```
+//! Procedure contracts are sets of those capabilities. `Pure` covers only an
+//! empty computed set; it is not an alias for an unchecked procedure.
 //!
 //! # Type Rules
 //!
 //! | Operation | Input Types | Output Type | Effect |
 //! |-----------|-------------|-------------|--------|
-//! | `ORACLE` | `Pure` (address) | `Temporal+Linear` | Temporal |
+//! | `ORACLE` | `Pure` (address) | `Temporal` | Temporal |
 //! | `PROPHECY` | `Any`, `Pure` (address) | - | Temporal |
 //! | `FETCH` | `Pure` (address) | `Unknown` | Reads |
 //! | `STORE` | `Any`, `Pure` (address) | - | Writes |
@@ -61,9 +48,8 @@
 //! 2. **Stability Guarantee**: Pure values cannot spontaneously become temporal
 //! 3. **Effect Soundness**: Declared effects must cover actual effects
 //! 4. **Taint Tracking**: The programmer knows which computations depend on the future
-//! 5. **Linearity**: ORACLE results cannot be freely duplicated
 
-use crate::ast::{Program, Stmt, OpCode, Procedure, Effect as AstEffect};
+use crate::ast::{Effect as AstEffect, OpCode, Procedure, Program, Stmt};
 use crate::core::Address;
 use std::collections::{HashMap, HashSet};
 
@@ -91,7 +77,7 @@ impl TemporalType {
             (TemporalType::Unknown, x) | (x, TemporalType::Unknown) => x,
         }
     }
-    
+
     /// Check if this type is more specific than another.
     pub fn is_subtype_of(self, other: Self) -> bool {
         match (self, other) {
@@ -102,7 +88,7 @@ impl TemporalType {
             _ => false,
         }
     }
-    
+
     /// Human-readable name.
     pub fn name(&self) -> &'static str {
         match self {
@@ -200,7 +186,10 @@ impl StackType {
 
     /// Create a new stack type.
     pub fn new(temporal: TemporalType, linearity: Linearity) -> Self {
-        Self { temporal, linearity }
+        Self {
+            temporal,
+            linearity,
+        }
     }
 
     /// Create from a temporal type with unrestricted linearity.
@@ -289,8 +278,8 @@ impl ComputedEffect {
     pub fn is_subeffect_of(self, other: Self) -> bool {
         use ComputedEffect::*;
         match (self, other) {
-            (Pure, _) => true,           // Pure can go anywhere
-            (_, IO) => true,             // IO subsumes all
+            (Pure, _) => true, // Pure can go anywhere
+            (_, IO) => true,   // IO subsumes all
             (Reads, Reads) => true,
             (Writes, Writes) => true,
             (Temporal, Temporal) => true,
@@ -310,7 +299,6 @@ impl ComputedEffect {
     }
 }
 
-
 /// Set of effects for comprehensive effect tracking.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct EffectSet {
@@ -324,10 +312,24 @@ pub struct EffectSet {
     pub prophecy: bool,
     /// Whether this computation performs I/O.
     pub io: bool,
-    /// Specific memory addresses read (if known statically).
+    /// Whether this computation allocates or manipulates data structures.
+    pub alloc: bool,
+    /// Whether this computation invokes foreign code.
+    pub ffi: bool,
+    /// Whether this computation performs file I/O.
+    pub file_io: bool,
+    /// Whether this computation performs network I/O.
+    pub network: bool,
+    /// Whether this computation invokes process/system services.
+    pub system: bool,
+    /// Specific ORACLE addresses read (if known statically).
     pub read_addresses: HashSet<Address>,
-    /// Specific memory addresses written (if known statically).
+    /// Specific PROPHECY addresses written (if known statically).
     pub write_addresses: HashSet<Address>,
+    /// At least one ORACLE address was runtime-computed.
+    pub unknown_oracle_address: bool,
+    /// At least one PROPHECY address was runtime-computed.
+    pub unknown_prophecy_address: bool,
 }
 
 impl EffectSet {
@@ -344,6 +346,8 @@ impl EffectSet {
         };
         if let Some(a) = addr {
             set.read_addresses.insert(a);
+        } else {
+            set.unknown_oracle_address = true;
         }
         set
     }
@@ -356,6 +360,8 @@ impl EffectSet {
         };
         if let Some(a) = addr {
             set.write_addresses.insert(a);
+        } else {
+            set.unknown_prophecy_address = true;
         }
         set
     }
@@ -392,14 +398,39 @@ impl EffectSet {
             oracle: self.oracle || other.oracle,
             prophecy: self.prophecy || other.prophecy,
             io: self.io || other.io,
-            read_addresses: self.read_addresses.union(&other.read_addresses).cloned().collect(),
-            write_addresses: self.write_addresses.union(&other.write_addresses).cloned().collect(),
+            alloc: self.alloc || other.alloc,
+            ffi: self.ffi || other.ffi,
+            file_io: self.file_io || other.file_io,
+            network: self.network || other.network,
+            system: self.system || other.system,
+            read_addresses: self
+                .read_addresses
+                .union(&other.read_addresses)
+                .cloned()
+                .collect(),
+            write_addresses: self
+                .write_addresses
+                .union(&other.write_addresses)
+                .cloned()
+                .collect(),
+            unknown_oracle_address: self.unknown_oracle_address || other.unknown_oracle_address,
+            unknown_prophecy_address: self.unknown_prophecy_address
+                || other.unknown_prophecy_address,
         }
     }
 
     /// Check if this effect set is pure (no effects).
     pub fn is_pure(&self) -> bool {
-        !self.reads && !self.writes && !self.oracle && !self.prophecy && !self.io
+        !self.reads
+            && !self.writes
+            && !self.oracle
+            && !self.prophecy
+            && !self.io
+            && !self.alloc
+            && !self.ffi
+            && !self.file_io
+            && !self.network
+            && !self.system
     }
 
     /// Check if this effect set has temporal effects.
@@ -409,65 +440,83 @@ impl EffectSet {
 
     /// Check if declared AST effects cover this computed effect set.
     pub fn is_covered_by(&self, declared: &[AstEffect]) -> bool {
-        // Pure declaration means we require no effects
+        // PURE is deliberately exclusive in meaning: even `PURE IO` cannot
+        // launder an effectful body through the contract checker.
         if declared.iter().any(|e| matches!(e, AstEffect::Pure)) {
             return self.is_pure();
         }
 
-        // Check if we have temporal effects without coverage
-        // Currently AST effects don't have a Temporal variant,
-        // so temporal effects are always violations if declared Pure
-        let has_temporal_coverage = !self.is_temporal();
+        let temporal = declared
+            .iter()
+            .any(|effect| matches!(effect, AstEffect::Temporal));
+        let declared_reads: HashSet<Address> = declared
+            .iter()
+            .filter_map(|effect| match effect {
+                AstEffect::Reads(address) => Some(*address),
+                _ => None,
+            })
+            .collect();
+        let declared_writes: HashSet<Address> = declared
+            .iter()
+            .filter_map(|effect| match effect {
+                AstEffect::Writes(address) => Some(*address),
+                _ => None,
+            })
+            .collect();
 
-        // Check each declared effect type (for future extension)
-        for effect in declared {
-            match effect {
-                AstEffect::Pure => {
-                    // Already handled above
-                }
-                AstEffect::Reads(_) => {
-                    // Reads declaration covers read effects
-                    // (we ignore specific addresses for now)
-                }
-                AstEffect::Writes(_) => {
-                    // Writes declaration covers write effects
-                }
-                AstEffect::Temporal => {
-                    // Temporal effect covers ORACLE/PROPHECY usage
-                    // This allows temporal operations when declared
-                }
-                AstEffect::IO => {
-                    // IO effect covers INPUT/OUTPUT/EMIT usage
-                }
-                AstEffect::Alloc => {
-                    // Alloc effect covers data structure allocation
-                }
-                AstEffect::FFI => {
-                    // FFI effect covers foreign function calls
-                }
-                AstEffect::FileIO => {
-                    // FileIO effect covers file operations
-                }
-                AstEffect::Network => {
-                    // Network effect covers socket operations
-                }
-                AstEffect::System => {
-                    // System effect covers process/system operations
-                }
-            }
-        }
+        // A general TEMPORAL capability covers both temporal directions. A
+        // list of address capabilities covers them only when every address is
+        // statically known and explicitly named.
+        let oracle_covered = !self.oracle
+            || temporal
+            || (!self.unknown_oracle_address
+                && !self.read_addresses.is_empty()
+                && self.read_addresses.is_subset(&declared_reads));
+        let prophecy_covered = !self.prophecy
+            || temporal
+            || (!self.unknown_prophecy_address
+                && !self.write_addresses.is_empty()
+                && self.write_addresses.is_subset(&declared_writes));
 
-        // If we have temporal effects but no temporal coverage, fail
-        if self.is_temporal() && !has_temporal_coverage {
-            return false;
-        }
+        // PRESENT/array operations do not yet retain enough address identity
+        // to validate the numeric argument; require the correct capability
+        // category and keep that limitation explicit until located HIR does.
+        let reads_covered = !self.reads || !declared_reads.is_empty();
+        let writes_covered = !self.writes || !declared_writes.is_empty();
 
-        true
+        oracle_covered
+            && prophecy_covered
+            && reads_covered
+            && writes_covered
+            && (!self.io
+                || declared
+                    .iter()
+                    .any(|effect| matches!(effect, AstEffect::IO)))
+            && (!self.alloc
+                || declared
+                    .iter()
+                    .any(|effect| matches!(effect, AstEffect::Alloc)))
+            && (!self.ffi
+                || declared
+                    .iter()
+                    .any(|effect| matches!(effect, AstEffect::FFI)))
+            && (!self.file_io
+                || declared
+                    .iter()
+                    .any(|effect| matches!(effect, AstEffect::FileIO)))
+            && (!self.network
+                || declared
+                    .iter()
+                    .any(|effect| matches!(effect, AstEffect::Network)))
+            && (!self.system
+                || declared
+                    .iter()
+                    .any(|effect| matches!(effect, AstEffect::System)))
     }
 
     /// Convert to a simple computed effect for compatibility.
     pub fn to_computed_effect(&self) -> ComputedEffect {
-        if self.io {
+        if self.io || self.alloc || self.ffi || self.file_io || self.network || self.system {
             ComputedEffect::IO
         } else if self.oracle || self.prophecy {
             ComputedEffect::Temporal
@@ -487,11 +536,36 @@ impl EffectSet {
         }
 
         let mut parts = Vec::new();
-        if self.oracle { parts.push("oracle"); }
-        if self.prophecy { parts.push("prophecy"); }
-        if self.reads { parts.push("reads"); }
-        if self.writes { parts.push("writes"); }
-        if self.io { parts.push("io"); }
+        if self.oracle {
+            parts.push("oracle");
+        }
+        if self.prophecy {
+            parts.push("prophecy");
+        }
+        if self.reads {
+            parts.push("reads");
+        }
+        if self.writes {
+            parts.push("writes");
+        }
+        if self.io {
+            parts.push("io");
+        }
+        if self.alloc {
+            parts.push("alloc");
+        }
+        if self.ffi {
+            parts.push("ffi");
+        }
+        if self.file_io {
+            parts.push("file-io");
+        }
+        if self.network {
+            parts.push("network");
+        }
+        if self.system {
+            parts.push("system");
+        }
         parts.join(", ")
     }
 }
@@ -582,7 +656,10 @@ impl TypeError {
     /// Create a stack underflow error.
     pub fn stack_underflow(operation: &str, required: usize, available: usize) -> Self {
         Self {
-            message: format!("{} requires {} element(s) but stack has {}", operation, required, available),
+            message: format!(
+                "{} requires {} element(s) but stack has {}",
+                operation, required, available
+            ),
             kind: TypeErrorKind::StackUnderflow,
             location: None,
             line: None,
@@ -784,8 +861,11 @@ impl LinearityViolation {
 
 impl std::fmt::Display for LinearityViolation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "linearity violation at stmt {}: {} - {}",
-            self.stmt_index, self.operation, self.message)
+        write!(
+            f,
+            "linearity violation at stmt {}: {} - {}",
+            self.stmt_index, self.operation, self.message
+        )
     }
 }
 
@@ -838,7 +918,11 @@ impl TypeChecker {
         self.strict_linearity = strict;
     }
 
-    /// Check a procedure for effect compliance.
+    /// Check a procedure's direct body for effect compliance.
+    ///
+    /// Calls are intentionally opaque in this migration stage: this does not
+    /// yet compute transitive callee effects or validate stack signatures.
+    /// Resolved HIR will make both analyses mandatory without name guessing.
     fn check_procedure(&mut self, proc: &Procedure) {
         // Save current state
         let saved_effects = std::mem::take(&mut self.current_effects);
@@ -848,9 +932,7 @@ impl TypeChecker {
         self.check_statements(&proc.body);
 
         // Verify declared effects cover actual effects
-        if !proc.effects.is_empty()
-            && !self.current_effects.is_covered_by(&proc.effects)
-        {
+        if !proc.effects.is_empty() && !self.current_effects.is_covered_by(&proc.effects) {
             self.effect_violations.push(EffectViolation {
                 procedure_name: proc.name.clone(),
                 declared: proc.effects.clone(),
@@ -863,7 +945,7 @@ impl TypeChecker {
         self.current_effects = saved_effects.join(&self.current_effects);
         self.stack = saved_stack;
     }
-    
+
     /// Check a block of statements.
     fn check_statements(&mut self, stmts: &[Stmt]) {
         for stmt in stmts {
@@ -871,7 +953,7 @@ impl TypeChecker {
             self.stmt_index += 1;
         }
     }
-    
+
     /// Check a single statement.
     fn check_stmt(&mut self, stmt: &Stmt) {
         // Sound only for one statement of lookback: any statement other than
@@ -890,11 +972,31 @@ impl TypeChecker {
                 self.last_pushed_literal = Some(value.val);
             }
 
+            Stmt::PushConstant { value, .. } => {
+                self.stack.push(StackType::PURE);
+                self.last_pushed_literal = Some(*value);
+            }
+
+            Stmt::ReadTemporal { .. } => {
+                self.stack.push(StackType::TEMPORAL);
+                self.current_effects.oracle = true;
+            }
+
+            Stmt::PushQuote(_) => {
+                // Quotation references are pure, unrestricted stack values at
+                // runtime, but are not word literals and therefore must not be
+                // reused by the literal-address peephole.
+                self.stack.push(StackType::PURE);
+            }
+
             Stmt::Op(op) => {
                 self.check_op(*op, addr_literal);
             }
 
-            Stmt::If { then_branch, else_branch } => {
+            Stmt::If {
+                then_branch,
+                else_branch,
+            } => {
                 // Pop condition
                 let cond_type = self.pop_type();
 
@@ -948,8 +1050,8 @@ impl TypeChecker {
             }
 
             Stmt::Call { name: _ } => {
-                // Procedure call: we don't have the body here, so mark as Unknown
-                // In a full implementation, we'd look up the procedure and analyze its body
+                // Direct-body checking deliberately does not infer transitive
+                // callee effects yet; see check_procedure's contract caveat.
                 self.stack.push(StackType::UNKNOWN);
             }
 
@@ -960,7 +1062,7 @@ impl TypeChecker {
             }
         }
     }
-    
+
     /// Check an opcode.
     fn check_op(&mut self, op: OpCode, addr_literal: Option<u64>) {
         match op {
@@ -973,11 +1075,20 @@ impl TypeChecker {
                         self.stmt_index
                     ));
                 }
-                // Result is TEMPORAL and LINEAR - can only be used once
-                self.stack.push(StackType::TEMPORAL_LINEAR);
+                // Temporal information is duplicable. This matches both
+                // runtimes, the verifier, and the language's flagship
+                // examples; temporal taint is not an affine resource.
+                self.stack.push(StackType::TEMPORAL);
 
                 // Track effect: ORACLE is a temporal read
                 self.current_effects.oracle = true;
+                if let Some(address) = addr_literal {
+                    self.current_effects
+                        .read_addresses
+                        .insert(address as Address);
+                } else {
+                    self.current_effects.unknown_oracle_address = true;
+                }
             }
 
             OpCode::Prophecy => {
@@ -995,7 +1106,7 @@ impl TypeChecker {
                 // known; fabricating an entry at address 0 would make every
                 // multi-address programme's cell map wrong.
                 match addr_literal {
-                    Some(addr) if addr < crate::core::MEMORY_SIZE as u64 => {
+                    Some(addr) => {
                         self.cell_types.insert(addr as Address, value_type.temporal);
                     }
                     _ => {
@@ -1005,6 +1116,13 @@ impl TypeChecker {
 
                 // Track effect: PROPHECY is a temporal write
                 self.current_effects.prophecy = true;
+                if let Some(address) = addr_literal {
+                    self.current_effects
+                        .write_addresses
+                        .insert(address as Address);
+                } else {
+                    self.current_effects.unknown_prophecy_address = true;
+                }
             }
 
             OpCode::PresentRead => {
@@ -1070,15 +1188,15 @@ impl TypeChecker {
 
             OpCode::Pick => {
                 let _ = self.pop_type(); // index
-                // PICK duplicates a value at a computed index.
-                // Since we can't statically determine which element will be picked,
-                // we must conservatively reject if ANY stack element is linear.
-                // This is strict but sound - it prevents potential linear duplication.
+                                         // PICK duplicates a value at a computed index.
+                                         // Since we can't statically determine which element will be picked,
+                                         // we must conservatively reject if ANY stack element is linear.
+                                         // This is strict but sound - it prevents potential linear duplication.
                 self.check_stack_has_no_linear("PICK");
                 // Result type is unknown but unrestricted (we've validated no linear)
                 self.stack.push(StackType::UNKNOWN);
             }
-            
+
             OpCode::Nop => {
                 // No effect
             }
@@ -1091,8 +1209,13 @@ impl TypeChecker {
             }
 
             // ===== Arithmetic (joins types, consumes linearity) =====
-            OpCode::Add | OpCode::Sub | OpCode::Mul | OpCode::Div | OpCode::Mod |
-            OpCode::Min | OpCode::Max => {
+            OpCode::Add
+            | OpCode::Sub
+            | OpCode::Mul
+            | OpCode::Div
+            | OpCode::Mod
+            | OpCode::Min
+            | OpCode::Max => {
                 let b = self.pop_type();
                 let a = self.pop_type();
                 // Arithmetic consumes linear values, result is unrestricted
@@ -1113,8 +1236,16 @@ impl TypeChecker {
             }
 
             // ===== Comparison (joins types, consumes linearity) =====
-            OpCode::Eq | OpCode::Neq | OpCode::Lt | OpCode::Gt | OpCode::Lte | OpCode::Gte |
-            OpCode::Slt | OpCode::Sgt | OpCode::Slte | OpCode::Sgte => {
+            OpCode::Eq
+            | OpCode::Neq
+            | OpCode::Lt
+            | OpCode::Gt
+            | OpCode::Lte
+            | OpCode::Gte
+            | OpCode::Slt
+            | OpCode::Sgt
+            | OpCode::Slte
+            | OpCode::Sgte => {
                 let b = self.pop_type();
                 let a = self.pop_type();
                 self.stack.push(a.join(b).consume());
@@ -1150,7 +1281,7 @@ impl TypeChecker {
                 // Consumes n+2 values, produces none
                 self.pop_type(); // n
                 self.pop_type(); // base
-                // Additional values popped dynamically
+                                 // Additional values popped dynamically
 
                 // Track effect: PACK writes to memory
                 self.current_effects.writes = true;
@@ -1187,52 +1318,52 @@ impl TypeChecker {
             OpCode::VecNew => {
                 // Creates a new vector handle
                 self.stack.push(StackType::PURE);
-                self.current_effects.io = true; // Allocation is a side effect
+                self.current_effects.alloc = true;
             }
             OpCode::VecPush => {
                 self.pop_type(); // value
                 let handle = self.pop_type(); // handle
                 self.stack.push(handle);
-                self.current_effects.io = true;
+                self.current_effects.alloc = true;
             }
             OpCode::VecPop => {
                 let handle = self.pop_type();
                 self.stack.push(handle);
                 self.stack.push(StackType::UNKNOWN); // Value could be temporal if stored
-                self.current_effects.io = true;
+                self.current_effects.alloc = true;
             }
             OpCode::VecGet => {
                 self.pop_type(); // index
                 let handle = self.pop_type();
                 self.stack.push(handle);
                 self.stack.push(StackType::UNKNOWN); // Value type unknown
-                self.current_effects.io = true;
+                self.current_effects.alloc = true;
             }
             OpCode::VecSet => {
                 self.pop_type(); // index
                 self.pop_type(); // value
                 let handle = self.pop_type();
                 self.stack.push(handle);
-                self.current_effects.io = true;
+                self.current_effects.alloc = true;
             }
             OpCode::VecLen => {
                 let handle = self.pop_type();
                 self.stack.push(handle);
                 self.stack.push(StackType::PURE);
-                self.current_effects.io = true;
+                self.current_effects.alloc = true;
             }
 
             // ===== Hash Table Operations =====
             OpCode::HashNew => {
                 self.stack.push(StackType::PURE);
-                self.current_effects.io = true;
+                self.current_effects.alloc = true;
             }
             OpCode::HashPut => {
                 self.pop_type(); // value
                 self.pop_type(); // key
                 let handle = self.pop_type();
                 self.stack.push(handle);
-                self.current_effects.io = true;
+                self.current_effects.alloc = true;
             }
             OpCode::HashGet => {
                 self.pop_type(); // key
@@ -1240,71 +1371,81 @@ impl TypeChecker {
                 self.stack.push(handle);
                 self.stack.push(StackType::UNKNOWN); // value
                 self.stack.push(StackType::PURE); // found flag
-                self.current_effects.io = true;
+                self.current_effects.alloc = true;
             }
             OpCode::HashDel => {
                 self.pop_type(); // key
                 let handle = self.pop_type();
                 self.stack.push(handle);
-                self.current_effects.io = true;
+                self.current_effects.alloc = true;
             }
             OpCode::HashHas => {
                 self.pop_type(); // key
                 let handle = self.pop_type();
                 self.stack.push(handle);
                 self.stack.push(StackType::PURE); // found flag
-                self.current_effects.io = true;
+                self.current_effects.alloc = true;
             }
             OpCode::HashLen => {
                 let handle = self.pop_type();
                 self.stack.push(handle);
                 self.stack.push(StackType::PURE);
-                self.current_effects.io = true;
+                self.current_effects.alloc = true;
             }
 
             // ===== Set Operations =====
             OpCode::SetNew => {
                 self.stack.push(StackType::PURE);
-                self.current_effects.io = true;
+                self.current_effects.alloc = true;
             }
             OpCode::SetAdd => {
                 self.pop_type(); // value
                 let handle = self.pop_type();
                 self.stack.push(handle);
-                self.current_effects.io = true;
+                self.current_effects.alloc = true;
             }
             OpCode::SetHas => {
                 self.pop_type(); // value
                 let handle = self.pop_type();
                 self.stack.push(handle);
                 self.stack.push(StackType::PURE); // found flag
-                self.current_effects.io = true;
+                self.current_effects.alloc = true;
             }
             OpCode::SetDel => {
                 self.pop_type(); // value
                 let handle = self.pop_type();
                 self.stack.push(handle);
-                self.current_effects.io = true;
+                self.current_effects.alloc = true;
             }
             OpCode::SetLen => {
                 let handle = self.pop_type();
                 self.stack.push(handle);
                 self.stack.push(StackType::PURE);
-                self.current_effects.io = true;
+                self.current_effects.alloc = true;
             }
 
             // Dynamic stack structure changes cannot be statically typed easily
-            OpCode::Roll | OpCode::Reverse | OpCode::StrRev | OpCode::StrCat | OpCode::StrSplit | OpCode::Assert | OpCode::Exec | OpCode::Dip | OpCode::Keep | OpCode::Bi | OpCode::Rec => {
+            OpCode::Roll
+            | OpCode::Reverse
+            | OpCode::StrRev
+            | OpCode::StrCat
+            | OpCode::StrSplit
+            | OpCode::Assert
+            | OpCode::Exec
+            | OpCode::Dip
+            | OpCode::Keep
+            | OpCode::Bi
+            | OpCode::Rec => {
                 // Conservative approach: do nothing or invalidate stack?
                 // For this prototype, we ignore their effect on type stack structure
             }
 
             // ===== FFI Operations =====
             OpCode::FFICall | OpCode::FFICallNamed => {
-                // FFI calls have IO effect and potentially modify stack
+                // FFI calls have an opaque foreign effect and may modify stack.
                 // We can't statically determine the stack effect
                 self.pop_type(); // FFI ID or name handle
-                self.current_effects.io = true;
+                self.current_effects.ffi = true;
             }
 
             // ===== File I/O Operations =====
@@ -1312,7 +1453,7 @@ impl TypeChecker {
                 self.pop_type(); // mode
                 self.pop_type(); // path_handle
                 self.stack.push(StackType::PURE); // file_handle
-                self.current_effects.io = true;
+                self.current_effects.file_io = true;
             }
             OpCode::FileRead => {
                 self.pop_type(); // max_bytes
@@ -1320,14 +1461,14 @@ impl TypeChecker {
                 self.stack.push(handle); // file_handle
                 self.stack.push(StackType::PURE); // buffer_handle
                 self.stack.push(StackType::PURE); // bytes_read
-                self.current_effects.io = true;
+                self.current_effects.file_io = true;
             }
             OpCode::FileWrite => {
                 self.pop_type(); // buffer_handle
                 let handle = self.pop_type();
                 self.stack.push(handle); // file_handle
                 self.stack.push(StackType::PURE); // bytes_written
-                self.current_effects.io = true;
+                self.current_effects.file_io = true;
             }
             OpCode::FileSeek => {
                 self.pop_type(); // origin
@@ -1335,68 +1476,68 @@ impl TypeChecker {
                 let handle = self.pop_type();
                 self.stack.push(handle); // file_handle
                 self.stack.push(StackType::PURE); // new_position
-                self.current_effects.io = true;
+                self.current_effects.file_io = true;
             }
             OpCode::FileFlush => {
                 let handle = self.pop_type();
                 self.stack.push(handle);
-                self.current_effects.io = true;
+                self.current_effects.file_io = true;
             }
             OpCode::FileClose => {
                 self.pop_type(); // file_handle
-                self.current_effects.io = true;
+                self.current_effects.file_io = true;
             }
             OpCode::FileExists => {
                 self.pop_type(); // path_handle
                 self.stack.push(StackType::PURE); // exists flag
-                self.current_effects.io = true;
+                self.current_effects.file_io = true;
             }
             OpCode::FileSize => {
                 self.pop_type(); // path_handle
                 self.stack.push(StackType::PURE); // size
-                self.current_effects.io = true;
+                self.current_effects.file_io = true;
             }
 
             // ===== Buffer Operations =====
             OpCode::BufferNew => {
                 self.pop_type(); // capacity
                 self.stack.push(StackType::PURE); // buffer_handle
-                self.current_effects.io = true;
+                self.current_effects.alloc = true;
             }
             OpCode::BufferFromStack => {
                 // Variable number of pops, just pop the count
                 self.pop_type(); // n
-                // Would need to pop n more values, but we can't know n statically
+                                 // Would need to pop n more values, but we can't know n statically
                 self.stack.push(StackType::PURE); // buffer_handle
-                self.current_effects.io = true;
+                self.current_effects.alloc = true;
             }
             OpCode::BufferToStack => {
                 self.pop_type(); // buffer_handle
-                // Would push variable number of values
+                                 // Would push variable number of values
                 self.stack.push(StackType::PURE); // n
-                self.current_effects.io = true;
+                self.current_effects.alloc = true;
             }
             OpCode::BufferLen => {
                 let handle = self.pop_type();
                 self.stack.push(handle); // buffer_handle
                 self.stack.push(StackType::PURE); // length
-                self.current_effects.io = true;
+                self.current_effects.alloc = true;
             }
             OpCode::BufferReadByte => {
                 let handle = self.pop_type();
                 self.stack.push(handle); // buffer_handle
                 self.stack.push(StackType::PURE); // byte
-                self.current_effects.io = true;
+                self.current_effects.alloc = true;
             }
             OpCode::BufferWriteByte => {
                 self.pop_type(); // byte
                 let handle = self.pop_type();
                 self.stack.push(handle); // buffer_handle
-                self.current_effects.io = true;
+                self.current_effects.alloc = true;
             }
             OpCode::BufferFree => {
                 self.pop_type(); // buffer_handle
-                self.current_effects.io = true;
+                self.current_effects.alloc = true;
             }
 
             // ===== Network Operations =====
@@ -1404,14 +1545,14 @@ impl TypeChecker {
                 self.pop_type(); // port
                 self.pop_type(); // host_handle
                 self.stack.push(StackType::PURE); // socket_handle
-                self.current_effects.io = true;
+                self.current_effects.network = true;
             }
             OpCode::SocketSend => {
                 self.pop_type(); // buffer_handle
                 let handle = self.pop_type();
                 self.stack.push(handle); // socket_handle
                 self.stack.push(StackType::PURE); // bytes_sent
-                self.current_effects.io = true;
+                self.current_effects.network = true;
             }
             OpCode::SocketRecv => {
                 self.pop_type(); // max_bytes
@@ -1419,11 +1560,11 @@ impl TypeChecker {
                 self.stack.push(handle); // socket_handle
                 self.stack.push(StackType::PURE); // buffer_handle
                 self.stack.push(StackType::PURE); // bytes_recv
-                self.current_effects.io = true;
+                self.current_effects.network = true;
             }
             OpCode::SocketClose => {
                 self.pop_type(); // socket_handle
-                self.current_effects.io = true;
+                self.current_effects.network = true;
             }
 
             // ===== Process Operations =====
@@ -1431,25 +1572,25 @@ impl TypeChecker {
                 self.pop_type(); // command_handle
                 self.stack.push(StackType::PURE); // output_handle
                 self.stack.push(StackType::PURE); // exit_code
-                self.current_effects.io = true;
+                self.current_effects.system = true;
             }
 
             // ===== System Operations =====
             OpCode::Clock => {
                 self.stack.push(StackType::PURE); // timestamp
-                self.current_effects.io = true;
+                self.current_effects.system = true;
             }
             OpCode::Sleep => {
                 self.pop_type(); // milliseconds
-                self.current_effects.io = true;
+                self.current_effects.system = true;
             }
             OpCode::Random => {
                 self.stack.push(StackType::PURE); // random_value
-                self.current_effects.io = true;
+                self.current_effects.system = true;
             }
         }
     }
-    
+
     /// Pop a type from the abstract stack (consuming it).
     fn pop_type(&mut self) -> StackType {
         self.stack.pop().unwrap_or(StackType::UNKNOWN)
@@ -1536,7 +1677,9 @@ impl TypeChecker {
                     message: format!(
                         "{} may duplicate linear value at position {} (type: {}). \
                          Cannot statically verify safety with dynamic index.",
-                        operation, self.stack.len() - 1 - i, st.describe()
+                        operation,
+                        self.stack.len() - 1 - i,
+                        st.describe()
                     ),
                     stmt_index: self.stmt_index,
                     violating_type: *st,
@@ -1547,7 +1690,9 @@ impl TypeChecker {
                 } else {
                     self.warnings.push(format!(
                         "Warning at stmt {}: {} may duplicate linear value at position {}",
-                        self.stmt_index, operation, self.stack.len() - 1 - i
+                        self.stmt_index,
+                        operation,
+                        self.stack.len() - 1 - i
                     ));
                 }
                 return false;
@@ -1586,24 +1731,24 @@ pub fn type_check(program: &Program) -> TypeCheckResult {
 /// Display type information for a program.
 pub fn display_types(result: &TypeCheckResult) -> String {
     let mut output = String::new();
-    
+
     output.push_str("=== Type Check Result ===\n");
     output.push_str(&format!("Valid: {}\n", result.is_valid));
-    
+
     if !result.errors.is_empty() {
         output.push_str("\nErrors:\n");
         for err in &result.errors {
             output.push_str(&format!("  - {}\n", err));
         }
     }
-    
+
     if !result.warnings.is_empty() {
         output.push_str("\nWarnings:\n");
         for warn in &result.warnings {
             output.push_str(&format!("  - {}\n", warn));
         }
     }
-    
+
     if !result.cell_types.is_empty() {
         output.push_str("\nCell Types:\n");
         for (addr, ty) in &result.cell_types {
@@ -1617,7 +1762,7 @@ pub fn display_types(result: &TypeCheckResult) -> String {
             result.unknown_prophecy_writes
         ));
     }
-    
+
     if !result.final_stack_types.is_empty() {
         output.push_str("\nFinal Stack Types:\n");
         for (i, ty) in result.final_stack_types.iter().enumerate() {
@@ -1628,8 +1773,22 @@ pub fn display_types(result: &TypeCheckResult) -> String {
     if !result.linear_violations.is_empty() {
         output.push_str("\nLinearity Violations:\n");
         for violation in &result.linear_violations {
-            output.push_str(&format!("  - [stmt {}] {}: {}\n",
-                violation.stmt_index, violation.operation, violation.message));
+            output.push_str(&format!(
+                "  - [stmt {}] {}: {}\n",
+                violation.stmt_index, violation.operation, violation.message
+            ));
+        }
+    }
+
+    if !result.effect_violations.is_empty() {
+        output.push_str("\nEffect Violations:\n");
+        for violation in &result.effect_violations {
+            output.push_str(&format!(
+                "  - procedure '{}': declared {:?}, inferred {}\n",
+                violation.procedure_name,
+                violation.declared,
+                violation.actual.summary()
+            ));
         }
     }
 
@@ -1657,6 +1816,14 @@ mod tests {
     }
 
     #[test]
+    fn prophecy_cell_types_support_configurable_wide_addresses() {
+        let program = crate::parser::parse("1 65536 PROPHECY").unwrap();
+        let result = type_check(&program);
+        assert_eq!(result.cell_types.get(&65_536), Some(&TemporalType::Pure));
+        assert_eq!(result.unknown_prophecy_writes, 0);
+    }
+
+    #[test]
     fn prophecy_with_computed_address_is_recorded_as_unknown() {
         // The address 3+4 is computed at runtime; no cell entry may be
         // fabricated for it.
@@ -1664,7 +1831,7 @@ mod tests {
         assert!(result.cell_types.is_empty());
         assert_eq!(result.unknown_prophecy_writes, 1);
     }
-    
+
     #[test]
     fn test_pure_program() {
         let result = check("10 20 ADD OUTPUT");
@@ -1672,36 +1839,48 @@ mod tests {
         assert!(result.errors.is_empty());
         // Final stack should be empty (OUTPUT consumes)
     }
-    
+
     #[test]
     fn test_temporal_from_oracle() {
         let result = check("0 ORACLE 0 PROPHECY");
         assert!(result.is_valid);
         // Should have no errors but might have info about temporal tainting
     }
-    
+
     #[test]
     fn test_temporal_arithmetic() {
         let result = check("0 ORACLE 1 ADD 0 PROPHECY");
         assert!(result.is_valid);
         // The ADD of temporal + pure should be temporal
     }
-    
+
     #[test]
     fn test_temporal_condition() {
         let result = check("0 ORACLE 0 EQ IF { 1 } ELSE { 2 } OUTPUT");
         assert!(result.is_valid);
         // Condition is temporal, so branches are tainted
     }
-    
+
     #[test]
     fn test_type_lattice_join() {
-        assert_eq!(TemporalType::Pure.join(TemporalType::Pure), TemporalType::Pure);
-        assert_eq!(TemporalType::Pure.join(TemporalType::Temporal), TemporalType::Temporal);
-        assert_eq!(TemporalType::Temporal.join(TemporalType::Pure), TemporalType::Temporal);
-        assert_eq!(TemporalType::Unknown.join(TemporalType::Pure), TemporalType::Pure);
+        assert_eq!(
+            TemporalType::Pure.join(TemporalType::Pure),
+            TemporalType::Pure
+        );
+        assert_eq!(
+            TemporalType::Pure.join(TemporalType::Temporal),
+            TemporalType::Temporal
+        );
+        assert_eq!(
+            TemporalType::Temporal.join(TemporalType::Pure),
+            TemporalType::Temporal
+        );
+        assert_eq!(
+            TemporalType::Unknown.join(TemporalType::Pure),
+            TemporalType::Pure
+        );
     }
-    
+
     #[test]
     fn test_subtype_relation() {
         assert!(TemporalType::Pure.is_subtype_of(TemporalType::Pure));
@@ -1753,10 +1932,22 @@ mod tests {
     fn test_computed_effect_join() {
         use super::ComputedEffect;
 
-        assert_eq!(ComputedEffect::Pure.join(ComputedEffect::Pure), ComputedEffect::Pure);
-        assert_eq!(ComputedEffect::Pure.join(ComputedEffect::Reads), ComputedEffect::Reads);
-        assert_eq!(ComputedEffect::Reads.join(ComputedEffect::Writes), ComputedEffect::IO);
-        assert_eq!(ComputedEffect::Temporal.join(ComputedEffect::Pure), ComputedEffect::Temporal);
+        assert_eq!(
+            ComputedEffect::Pure.join(ComputedEffect::Pure),
+            ComputedEffect::Pure
+        );
+        assert_eq!(
+            ComputedEffect::Pure.join(ComputedEffect::Reads),
+            ComputedEffect::Reads
+        );
+        assert_eq!(
+            ComputedEffect::Reads.join(ComputedEffect::Writes),
+            ComputedEffect::IO
+        );
+        assert_eq!(
+            ComputedEffect::Temporal.join(ComputedEffect::Pure),
+            ComputedEffect::Temporal
+        );
     }
 
     #[test]
@@ -1798,6 +1989,59 @@ mod tests {
         assert!(!result.effects.is_pure());
     }
 
+    #[test]
+    fn matching_address_contracts_cover_temporal_accesses() {
+        let result = check("PROCEDURE ok READS(0) WRITES(1) { 0 ORACLE 9 1 PROPHECY } 0");
+        assert!(result.effect_violations.is_empty());
+        assert!(result.is_valid);
+    }
+
+    #[test]
+    fn temporal_address_contracts_reject_wrong_or_runtime_addresses() {
+        let wrong = check("PROCEDURE bad READS(1) { 0 ORACLE } 0");
+        assert_eq!(wrong.effect_violations.len(), 1);
+
+        let runtime = check("PROCEDURE bad READS(0) { 1 2 ADD ORACLE } 0");
+        assert_eq!(runtime.effect_violations.len(), 1);
+
+        let general = check("PROCEDURE ok TEMPORAL { 1 2 ADD ORACLE } 0");
+        assert!(general.effect_violations.is_empty());
+    }
+
+    #[test]
+    fn pure_and_wrong_category_contracts_do_not_cover_effects() {
+        for source in [
+            "PROCEDURE bad PURE { 1 OUTPUT } 0",
+            "PROCEDURE bad PURE IO { 1 OUTPUT } 0",
+            "PROCEDURE bad IO { 0 ORACLE } 0",
+            "PROCEDURE bad FILE_IO { CLOCK } 0",
+        ] {
+            let result = check(source);
+            assert_eq!(result.effect_violations.len(), 1, "{source}");
+            assert!(!result.is_valid, "{source}");
+        }
+    }
+
+    #[test]
+    fn each_declared_effect_category_covers_its_direct_operations() {
+        for (annotation, body) in [
+            ("IO", "1 OUTPUT"),
+            ("ALLOC", "VEC_NEW"),
+            ("FFI", "0 FFI_CALL"),
+            ("FILE_IO", "0 0 FILE_OPEN"),
+            ("NETWORK", "0 0 TCP_CONNECT"),
+            ("SYSTEM", "CLOCK"),
+        ] {
+            let source = format!("PROCEDURE ok {annotation} {{ {body} }} 0");
+            let result = check(&source);
+            assert!(
+                result.effect_violations.is_empty(),
+                "{source}: {:?}",
+                result.effect_violations
+            );
+        }
+    }
+
     // ═══════════════════════════════════════════════════════════════════
     // Linear Type Tests
     // ═══════════════════════════════════════════════════════════════════
@@ -1812,9 +2056,18 @@ mod tests {
         assert!(Linearity::Linear.is_linear());
 
         // Test join: linear values stay linear
-        assert_eq!(Linearity::Linear.join(Linearity::Unrestricted), Linearity::Linear);
-        assert_eq!(Linearity::Unrestricted.join(Linearity::Linear), Linearity::Linear);
-        assert_eq!(Linearity::Unrestricted.join(Linearity::Unrestricted), Linearity::Unrestricted);
+        assert_eq!(
+            Linearity::Linear.join(Linearity::Unrestricted),
+            Linearity::Linear
+        );
+        assert_eq!(
+            Linearity::Unrestricted.join(Linearity::Linear),
+            Linearity::Linear
+        );
+        assert_eq!(
+            Linearity::Unrestricted.join(Linearity::Unrestricted),
+            Linearity::Unrestricted
+        );
     }
 
     #[test]
@@ -1844,29 +2097,23 @@ mod tests {
     }
 
     #[test]
-    fn test_linear_dup_violation() {
-        // DUP of an ORACLE result should produce a linear violation
+    fn test_oracle_duplication_is_allowed() {
         let result = check("0 ORACLE DUP");
-
-        // Should detect the linear violation
-        assert!(result.has_linear_violations());
-        assert_eq!(result.linear_violations.len(), 1);
-        assert_eq!(result.linear_violations[0].operation, "DUP");
+        assert!(!result.has_linear_violations());
+        assert!(result.is_valid);
+        assert_eq!(result.final_stack_types.len(), 2);
+        assert!(result
+            .final_stack_types
+            .iter()
+            .all(|ty| ty.temporal == TemporalType::Temporal && !ty.is_linear()));
     }
 
     #[test]
-    fn test_linear_over_violation() {
-        // OVER when the second-from-top is linear should produce a violation
-        // Stack after "0 ORACLE 1": [linear, pure] (pure at top)
-        // OVER copies the second element (linear) to top
+    fn test_oracle_over_duplication_is_allowed() {
         let result = check("0 ORACLE 1 OVER");
-
-        // OVER copies the linear value - should produce violation
-        assert!(result.has_linear_violations());
-        let over_violations: Vec<_> = result.linear_violations.iter()
-            .filter(|v| v.operation == "OVER")
-            .collect();
-        assert!(!over_violations.is_empty());
+        assert!(!result.has_linear_violations());
+        assert!(result.is_valid);
+        assert_eq!(result.final_stack_types.last(), Some(&StackType::TEMPORAL));
     }
 
     #[test]
@@ -1907,19 +2154,10 @@ mod tests {
     }
 
     #[test]
-    fn test_pick_linear_violation() {
-        // PICK with linear values on stack should produce linearity violation
-        // (stricter than before - now an error, not just a warning)
+    fn test_pick_can_duplicate_oracle_values() {
         let result = check("0 ORACLE 1 2 3 1 PICK");
-
-        // PICK at runtime index may duplicate linear value - now a compile error
-        // Since we can't statically verify which element is picked, we must
-        // conservatively reject if ANY stack element is linear
-        assert!(result.has_linear_violations());
-        let pick_violations: Vec<_> = result.linear_violations.iter()
-            .filter(|v| v.operation == "PICK")
-            .collect();
-        assert!(!pick_violations.is_empty(), "Expected PICK linearity violation");
+        assert!(!result.has_linear_violations());
+        assert!(result.is_valid);
     }
 
     #[test]
@@ -1933,15 +2171,14 @@ mod tests {
     }
 
     #[test]
-    fn test_strict_linearity_mode() {
-        // Test that strict mode produces errors (not just warnings)
+    fn test_strict_linearity_mode_does_not_make_oracle_affine() {
         let program = parse("0 ORACLE DUP").expect("Parse failed");
         let mut checker = TypeChecker::new();
         checker.set_strict_linearity(true);
         let result = checker.check(&program);
 
-        assert!(result.has_linear_violations());
-        assert!(!result.is_valid); // Invalid in strict mode
+        assert!(!result.has_linear_violations());
+        assert!(result.is_valid);
     }
 
     #[test]
@@ -1952,31 +2189,45 @@ mod tests {
         checker.set_strict_linearity(false);
         let result = checker.check(&program);
 
-        // Still records the violation but doesn't fail
-        assert!(!result.warnings.is_empty() || !result.linear_violations.is_empty());
-        // In permissive mode, is_valid is true even with linear issues
+        assert!(!result.has_linear_violations());
         assert!(result.is_valid);
     }
 
     #[test]
-    fn test_linear_violation_message() {
-        let result = check("0 ORACLE DUP");
-
-        assert!(result.has_linear_violations());
-        let violation = &result.linear_violations[0];
-        assert!(violation.message.contains("Linear"));
-        assert!(violation.message.contains("ORACLE"));
+    fn flagship_examples_do_not_violate_linearity() {
+        for (name, source) in [
+            (
+                "mutual exclusion",
+                include_str!("../../examples/case_studies/mutual_exclusion.ouro"),
+            ),
+            (
+                "circular dataflow",
+                include_str!("../../examples/case_studies/circular_dataflow.ouro"),
+            ),
+            (
+                "retrocausal game",
+                include_str!("../../examples/case_studies/retrocausal_game.ouro"),
+            ),
+        ] {
+            let program = parse(source).unwrap_or_else(|error| panic!("{}: {}", name, error));
+            let result = type_check(&program);
+            assert!(
+                !result.has_linear_violations(),
+                "{}: {:?}",
+                name,
+                result.linear_violations
+            );
+        }
     }
 
     #[test]
-    fn test_oracle_returns_temporal_linear() {
-        // Verify that ORACLE pushes a TEMPORAL_LINEAR type
+    fn test_oracle_returns_temporal_unrestricted() {
         let result = check("0 ORACLE");
 
-        // Stack should contain one temporal linear value
         assert_eq!(result.final_stack_types.len(), 1);
         let oracle_type = result.final_stack_types[0];
-        assert!(oracle_type.is_linear());
+        assert!(!oracle_type.is_linear());
+        assert!(oracle_type.can_duplicate());
         assert_eq!(oracle_type.temporal, TemporalType::Temporal);
     }
 
@@ -1998,9 +2249,7 @@ mod tests {
         // No violation - swap just moves values around
         assert!(!result.has_linear_violations());
 
-        // But the linear value is still on the stack
-        let has_linear = result.final_stack_types.iter().any(|t| t.is_linear());
-        assert!(has_linear);
+        assert!(result.final_stack_types.iter().all(|ty| !ty.is_linear()));
     }
 
     #[test]

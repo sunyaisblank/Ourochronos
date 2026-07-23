@@ -1,0 +1,10 @@
+# Two closed recurrent classes disagree: state 0 accepts with certainty and
+# state 1 rejects with certainty. Deutsch consistency exists, but this is not
+# a valid decision computation because Nature may supply either fixed point.
+
+MARKOV split_readout {
+    STATES 2;
+    ROW 0 { 1/1 0/1 };
+    ROW 1 { 0/1 1/1 };
+    ACCEPTING { 0 };
+}

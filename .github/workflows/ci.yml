@@ -21,6 +21,9 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      - name: Install native solver dependencies
+        run: sudo apt-get update && sudo apt-get install -y clang libclang-dev libz3-dev
+
       - name: Cache cargo registry
         uses: actions/cache@v4
         with:
@@ -31,22 +34,22 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Run cargo check
-        run: cargo check --all-features
+        run: cargo check --all-targets --all-features --locked
 
       - name: Run clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --all-targets --all-features --locked -- -D warnings
 
       - name: Run unit tests
-        run: cargo test --lib --all-features
+        run: cargo test --lib --all-features --locked
 
       - name: Run integration tests
-        run: cargo test --test main --all-features
+        run: cargo test --test main --all-features --locked
 
       - name: Run property tests
-        run: cargo test property_tests --all-features
+        run: cargo test property_tests --all-features --locked
 
       - name: Run determinism tests
-        run: cargo test determinism_tests --all-features
+        run: cargo test determinism_tests --all-features --locked
 
   format:
     runs-on: ubuntu-latest
@@ -77,12 +80,15 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-action@stable
 
+      - name: Install native solver dependencies
+        run: sudo apt-get update && sudo apt-get install -y clang libclang-dev libz3-dev
+
       - name: Build with features
         run: |
           if [ -z "${{ matrix.features }}" ]; then
-            cargo build --release
+            cargo build --release --locked
           else
-            cargo build --release --features "${{ matrix.features }}"
+            cargo build --release --locked --features "${{ matrix.features }}"
           fi
 
   coverage:
@@ -93,6 +99,9 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-action@stable
+
+      - name: Install native solver dependencies
+        run: sudo apt-get update && sudo apt-get install -y clang libclang-dev libz3-dev
 
       - name: Install cargo-tarpaulin
         run: cargo install cargo-tarpaulin
@@ -127,8 +136,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust 1.75 (MSRV)
-        uses: dtolnay/rust-action@1.75.0
+      - name: Install Rust 1.85 (MSRV)
+        uses: dtolnay/rust-action@1.85.0
+
+      - name: Install native solver dependencies
+        run: sudo apt-get update && sudo apt-get install -y clang libclang-dev libz3-dev
 
       - name: Check MSRV compatibility
-        run: cargo check --all-features
+        run: cargo check --all-targets --all-features --locked

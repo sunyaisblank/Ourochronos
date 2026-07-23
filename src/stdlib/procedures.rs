@@ -2,7 +2,7 @@
 //!
 //! Provides common operations and utilities for temporal programming.
 
-use crate::ast::{Stmt, OpCode, Procedure, Effect};
+use crate::ast::{Effect, OpCode, Procedure, Stmt};
 use crate::core::Value;
 
 /// Standard library module.
@@ -17,9 +17,12 @@ impl StdLib {
             Self::memory_procedures(),
             Self::io_procedures(),
             Self::string_procedures(),
-        ].into_iter().flatten().collect()
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
     }
-    
+
     /// Mathematical procedures.
     fn math_procedures() -> Vec<Procedure> {
         vec![
@@ -31,14 +34,11 @@ impl StdLib {
                 effects: vec![Effect::Pure],
                 body: vec![
                     // ( a b -- min )
-                    Stmt::Op(OpCode::Over),   // a b a
-                    Stmt::Op(OpCode::Over),   // a b a b
-                    Stmt::Op(OpCode::Gt),     // a b (a>b)
+                    Stmt::Op(OpCode::Over), // a b a
+                    Stmt::Op(OpCode::Over), // a b a b
+                    Stmt::Op(OpCode::Gt),   // a b (a>b)
                     Stmt::If {
-                        then_branch: vec![
-                            Stmt::Op(OpCode::Swap),
-                            Stmt::Op(OpCode::Pop),
-                        ],
+                        then_branch: vec![Stmt::Op(OpCode::Swap), Stmt::Op(OpCode::Pop)],
                         else_branch: Some(vec![Stmt::Op(OpCode::Pop)]),
                     },
                 ],
@@ -54,10 +54,7 @@ impl StdLib {
                     Stmt::Op(OpCode::Over),
                     Stmt::Op(OpCode::Lt),
                     Stmt::If {
-                        then_branch: vec![
-                            Stmt::Op(OpCode::Swap),
-                            Stmt::Op(OpCode::Pop),
-                        ],
+                        then_branch: vec![Stmt::Op(OpCode::Swap), Stmt::Op(OpCode::Pop)],
                         else_branch: Some(vec![Stmt::Op(OpCode::Pop)]),
                     },
                 ],
@@ -68,10 +65,7 @@ impl StdLib {
                 params: vec!["n".to_string()],
                 returns: 1,
                 effects: vec![Effect::Pure],
-                body: vec![
-                    Stmt::Op(OpCode::Dup),
-                    Stmt::Op(OpCode::Mul),
-                ],
+                body: vec![Stmt::Op(OpCode::Dup), Stmt::Op(OpCode::Mul)],
             },
             // CUBE(n -- n^3)
             Procedure {
@@ -92,10 +86,7 @@ impl StdLib {
                 params: vec!["n".to_string()],
                 returns: 1,
                 effects: vec![Effect::Pure],
-                body: vec![
-                    Stmt::Op(OpCode::Dup),
-                    Stmt::Op(OpCode::Add),
-                ],
+                body: vec![Stmt::Op(OpCode::Dup), Stmt::Op(OpCode::Add)],
             },
             // HALVE(n -- n/2)
             Procedure {
@@ -103,10 +94,7 @@ impl StdLib {
                 params: vec!["n".to_string()],
                 returns: 1,
                 effects: vec![Effect::Pure],
-                body: vec![
-                    Stmt::Push(Value::new(2)),
-                    Stmt::Op(OpCode::Div),
-                ],
+                body: vec![Stmt::Push(Value::new(2)), Stmt::Op(OpCode::Div)],
             },
             // INC(n -- n+1)
             Procedure {
@@ -114,10 +102,7 @@ impl StdLib {
                 params: vec!["n".to_string()],
                 returns: 1,
                 effects: vec![Effect::Pure],
-                body: vec![
-                    Stmt::Push(Value::new(1)),
-                    Stmt::Op(OpCode::Add),
-                ],
+                body: vec![Stmt::Push(Value::new(1)), Stmt::Op(OpCode::Add)],
             },
             // DEC(n -- n-1)
             Procedure {
@@ -125,10 +110,7 @@ impl StdLib {
                 params: vec!["n".to_string()],
                 returns: 1,
                 effects: vec![Effect::Pure],
-                body: vec![
-                    Stmt::Push(Value::new(1)),
-                    Stmt::Op(OpCode::Sub),
-                ],
+                body: vec![Stmt::Push(Value::new(1)), Stmt::Op(OpCode::Sub)],
             },
             // EVEN?(n -- bool) Returns 1 if even, 0 if odd
             Procedure {
@@ -149,10 +131,7 @@ impl StdLib {
                 params: vec!["n".to_string()],
                 returns: 1,
                 effects: vec![Effect::Pure],
-                body: vec![
-                    Stmt::Push(Value::new(2)),
-                    Stmt::Op(OpCode::Mod),
-                ],
+                body: vec![Stmt::Push(Value::new(2)), Stmt::Op(OpCode::Mod)],
             },
             // CLAMP(val lo hi -- clamped)
             Procedure {
@@ -162,11 +141,11 @@ impl StdLib {
                 effects: vec![Effect::Pure],
                 body: vec![
                     // Stack: val lo hi
-                    Stmt::Op(OpCode::Rot),    // lo hi val
-                    Stmt::Op(OpCode::Rot),    // hi val lo
-                    Stmt::Op(OpCode::Over),   // hi val lo val
-                    Stmt::Op(OpCode::Over),   // hi val lo val lo
-                    Stmt::Op(OpCode::Lt),     // hi val lo (val<lo)
+                    Stmt::Op(OpCode::Rot),  // lo hi val
+                    Stmt::Op(OpCode::Rot),  // hi val lo
+                    Stmt::Op(OpCode::Over), // hi val lo val
+                    Stmt::Op(OpCode::Over), // hi val lo val lo
+                    Stmt::Op(OpCode::Lt),   // hi val lo (val<lo)
                     Stmt::If {
                         // val < lo: return lo
                         then_branch: vec![
@@ -177,15 +156,13 @@ impl StdLib {
                         ],
                         // val >= lo: check hi
                         else_branch: Some(vec![
-                            Stmt::Op(OpCode::Pop),   // hi val
-                            Stmt::Op(OpCode::Over),  // hi val hi
-                            Stmt::Op(OpCode::Over),  // hi val hi val
-                            Stmt::Op(OpCode::Lt),    // hi val (hi<val)
+                            Stmt::Op(OpCode::Pop),  // hi val
+                            Stmt::Op(OpCode::Over), // hi val hi
+                            Stmt::Op(OpCode::Over), // hi val hi val
+                            Stmt::Op(OpCode::Lt),   // hi val (hi<val)
                             Stmt::If {
                                 // hi < val: return hi
-                                then_branch: vec![
-                                    Stmt::Op(OpCode::Pop),
-                                ],
+                                then_branch: vec![Stmt::Op(OpCode::Pop)],
                                 // val <= hi: return val
                                 else_branch: Some(vec![
                                     Stmt::Op(OpCode::Swap),
@@ -198,7 +175,7 @@ impl StdLib {
             },
         ]
     }
-    
+
     /// Stack manipulation procedures.
     fn stack_procedures() -> Vec<Procedure> {
         vec![
@@ -208,10 +185,7 @@ impl StdLib {
                 params: vec!["a".to_string(), "b".to_string()],
                 returns: 1,
                 effects: vec![Effect::Pure],
-                body: vec![
-                    Stmt::Op(OpCode::Swap),
-                    Stmt::Op(OpCode::Pop),
-                ],
+                body: vec![Stmt::Op(OpCode::Swap), Stmt::Op(OpCode::Pop)],
             },
             // TUCK(a b -- b a b)
             Procedure {
@@ -219,10 +193,7 @@ impl StdLib {
                 params: vec!["a".to_string(), "b".to_string()],
                 returns: 3,
                 effects: vec![Effect::Pure],
-                body: vec![
-                    Stmt::Op(OpCode::Swap),
-                    Stmt::Op(OpCode::Over),
-                ],
+                body: vec![Stmt::Op(OpCode::Swap), Stmt::Op(OpCode::Over)],
             },
             // 2DUP(a b -- a b a b)
             Procedure {
@@ -230,10 +201,7 @@ impl StdLib {
                 params: vec!["a".to_string(), "b".to_string()],
                 returns: 4,
                 effects: vec![Effect::Pure],
-                body: vec![
-                    Stmt::Op(OpCode::Over),
-                    Stmt::Op(OpCode::Over),
-                ],
+                body: vec![Stmt::Op(OpCode::Over), Stmt::Op(OpCode::Over)],
             },
             // 2DROP(a b -- )
             Procedure {
@@ -241,14 +209,11 @@ impl StdLib {
                 params: vec!["a".to_string(), "b".to_string()],
                 returns: 0,
                 effects: vec![Effect::Pure],
-                body: vec![
-                    Stmt::Op(OpCode::Pop),
-                    Stmt::Op(OpCode::Pop),
-                ],
+                body: vec![Stmt::Op(OpCode::Pop), Stmt::Op(OpCode::Pop)],
             },
         ]
     }
-    
+
     /// Memory utility procedures.
     fn memory_procedures() -> Vec<Procedure> {
         vec![
@@ -258,10 +223,7 @@ impl StdLib {
                 params: vec!["addr".to_string()],
                 returns: 0,
                 effects: vec![],
-                body: vec![
-                    Stmt::Push(Value::new(0)),
-                    Stmt::Op(OpCode::Prophecy),
-                ],
+                body: vec![Stmt::Push(Value::new(0)), Stmt::Op(OpCode::Prophecy)],
             },
             // INC_MEM(addr -- ) Increment memory cell
             Procedure {
@@ -279,7 +241,7 @@ impl StdLib {
             },
         ]
     }
-    
+
     /// I/O utility procedures.
     fn io_procedures() -> Vec<Procedure> {
         vec![
@@ -307,7 +269,7 @@ impl StdLib {
             },
         ]
     }
-    
+
     /// String manipulation procedures.
     fn string_procedures() -> Vec<Procedure> {
         vec![
@@ -317,9 +279,7 @@ impl StdLib {
                 params: vec!["str".to_string()],
                 returns: 2,
                 effects: vec![Effect::Pure],
-                body: vec![
-                    Stmt::Op(OpCode::Dup),
-                ],
+                body: vec![Stmt::Op(OpCode::Dup)],
             },
             // REV(str -- str) - Alias for REVERSE/STR_REV
             Procedure {
@@ -327,9 +287,7 @@ impl StdLib {
                 params: vec!["str".to_string()],
                 returns: 1,
                 effects: vec![Effect::Pure],
-                body: vec![
-                    Stmt::Op(OpCode::StrRev),
-                ],
+                body: vec![Stmt::Op(OpCode::StrRev)],
             },
             // CAT(str1 str2 -- str3) - Alias for STR_CAT
             Procedure {
@@ -337,9 +295,7 @@ impl StdLib {
                 params: vec!["a".to_string(), "b".to_string()],
                 returns: 1,
                 effects: vec![Effect::Pure],
-                body: vec![
-                    Stmt::Op(OpCode::StrCat),
-                ],
+                body: vec![Stmt::Op(OpCode::StrCat)],
             },
             // SPLIT(str delim -- ... count) - Alias for STR_SPLIT
             Procedure {
@@ -347,13 +303,11 @@ impl StdLib {
                 params: vec!["s".to_string(), "d".to_string()],
                 returns: 1, // Variable returns, technically
                 effects: vec![Effect::Pure],
-                body: vec![
-                    Stmt::Op(OpCode::StrSplit),
-                ],
+                body: vec![Stmt::Op(OpCode::StrSplit)],
             },
         ]
     }
-    
+
     /// Get documentation for all procedures.
     pub fn documentation() -> Vec<(&'static str, &'static str)> {
         vec![
@@ -392,14 +346,14 @@ impl StdLib {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_stdlib_procedures() {
         let procs = StdLib::procedures();
         assert!(!procs.is_empty());
         assert!(procs.iter().any(|p| p.name == "MIN"));
     }
-    
+
     #[test]
     fn test_stdlib_documentation() {
         let docs = StdLib::documentation();

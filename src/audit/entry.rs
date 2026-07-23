@@ -1,9 +1,9 @@
 //! Audit entry types and structures.
 
+use super::escape_json;
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
-use super::escape_json;
 
 // =============================================================================
 // Core Types
@@ -106,7 +106,6 @@ pub enum ActionCategory {
     // ═══════════════════════════════════════════════════════════════════
     // Compilation Phase
     // ═══════════════════════════════════════════════════════════════════
-
     /// Parsing operations.
     Parse,
     /// Compilation/analysis.
@@ -119,7 +118,6 @@ pub enum ActionCategory {
     // ═══════════════════════════════════════════════════════════════════
     // Execution Phase
     // ═══════════════════════════════════════════════════════════════════
-
     /// General program execution.
     Execute,
     /// Stack operations.
@@ -130,7 +128,6 @@ pub enum ActionCategory {
     // ═══════════════════════════════════════════════════════════════════
     // Temporal Operations (First-Principle Primitives)
     // ═══════════════════════════════════════════════════════════════════
-
     /// ORACLE: Read from Anamnesis (future state from previous epoch).
     OracleRead,
     /// PROPHECY: Write to Present (establishing future state).
@@ -146,7 +143,6 @@ pub enum ActionCategory {
     // ═══════════════════════════════════════════════════════════════════
     // Convergence/Fixed-Point
     // ═══════════════════════════════════════════════════════════════════
-
     /// Epoch iteration event.
     EpochIteration,
     /// Fixed-point check (comparing Present to Anamnesis).
@@ -163,7 +159,6 @@ pub enum ActionCategory {
     // ═══════════════════════════════════════════════════════════════════
     // Optimization
     // ═══════════════════════════════════════════════════════════════════
-
     /// JIT compilation.
     Jit,
     /// Epoch caching/memoization.
@@ -174,7 +169,6 @@ pub enum ActionCategory {
     // ═══════════════════════════════════════════════════════════════════
     // System
     // ═══════════════════════════════════════════════════════════════════
-
     /// Configuration changes.
     Config,
     /// System-level events.
@@ -309,7 +303,7 @@ pub enum ConvergenceOutcome {
     Iterating = 1,
     /// Oscillation detected (periodic non-convergence).
     Oscillating = 2,
-    /// Divergence detected (unbounded growth).
+    /// Diagnostic monotone-growth trend detected on a finite prefix.
     Diverging = 3,
     /// Explicit PARADOX instruction triggered.
     Paradox = 4,
@@ -405,10 +399,7 @@ impl ProvenanceSummary {
     pub fn format_compact(&self) -> String {
         format!(
             "P{}T{}D{}O{}",
-            self.pure_count,
-            self.temporal_count,
-            self.max_depth,
-            self.oracle_sources
+            self.pure_count, self.temporal_count, self.max_depth, self.oracle_sources
         )
     }
 }
@@ -457,7 +448,6 @@ pub struct AuditEntry {
     // ═══════════════════════════════════════════════════════════════════
     // Temporal Extensions
     // ═══════════════════════════════════════════════════════════════════
-
     /// Current epoch number (0-indexed, None for non-temporal events).
     pub epoch: Option<usize>,
     /// Convergence-specific outcome (more detailed than generic outcome).
@@ -465,7 +455,7 @@ pub struct AuditEntry {
     /// Provenance summary for causal analysis.
     pub provenance: Option<ProvenanceSummary>,
     /// Memory address involved (for temporal memory operations).
-    pub address: Option<u16>,
+    pub address: Option<crate::core::Address>,
     /// Value involved (for temporal memory operations).
     pub value: Option<u64>,
     /// State hash (for convergence tracking).
@@ -512,7 +502,7 @@ impl AuditEntry {
 
     /// Create an entry for an ORACLE read operation.
     pub fn oracle_read(
-        address: u16,
+        address: crate::core::Address,
         value: u64,
         epoch: usize,
         is_temporal: bool,
@@ -532,7 +522,7 @@ impl AuditEntry {
 
     /// Create an entry for a PROPHECY write operation.
     pub fn prophecy_write(
-        address: u16,
+        address: crate::core::Address,
         value: u64,
         previous: u64,
         epoch: usize,
@@ -576,9 +566,7 @@ impl AuditEntry {
         total_epochs: usize,
         total_duration_us: u64,
     ) -> Self {
-        let severity = if outcome.is_success()
-            || matches!(outcome, ConvergenceOutcome::Iterating)
-        {
+        let severity = if outcome.is_success() || matches!(outcome, ConvergenceOutcome::Iterating) {
             Severity::Info
         } else {
             Severity::Warning
@@ -657,7 +645,7 @@ impl AuditEntry {
     }
 
     /// Set the memory address.
-    pub fn with_address(mut self, addr: u16) -> Self {
+    pub fn with_address(mut self, addr: crate::core::Address) -> Self {
         self.address = Some(addr);
         self
     }
@@ -955,14 +943,13 @@ mod tests {
 
     #[test]
     fn test_convergence_result_factory() {
-        let entry = AuditEntry::convergence_result(
-            ConvergenceOutcome::Consistent,
-            10,
-            5_000_000,
-        );
+        let entry = AuditEntry::convergence_result(ConvergenceOutcome::Consistent, 10, 5_000_000);
 
         assert_eq!(entry.category, ActionCategory::ConvergenceCheck);
-        assert_eq!(entry.convergence_outcome, Some(ConvergenceOutcome::Consistent));
+        assert_eq!(
+            entry.convergence_outcome,
+            Some(ConvergenceOutcome::Consistent)
+        );
         assert_eq!(entry.outcome, Outcome::Success);
         assert_eq!(entry.epoch, Some(9)); // total_epochs - 1
     }
@@ -1058,8 +1045,14 @@ mod tests {
         assert!(!ConvergenceOutcome::Oscillating.is_success());
         assert!(ConvergenceOutcome::Oscillating.is_terminal());
 
-        assert_eq!(ConvergenceOutcome::Consistent.to_outcome(), Outcome::Success);
-        assert_eq!(ConvergenceOutcome::Oscillating.to_outcome(), Outcome::Failure);
+        assert_eq!(
+            ConvergenceOutcome::Consistent.to_outcome(),
+            Outcome::Success
+        );
+        assert_eq!(
+            ConvergenceOutcome::Oscillating.to_outcome(),
+            Outcome::Failure
+        );
     }
 
     #[test]

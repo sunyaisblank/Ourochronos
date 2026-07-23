@@ -4,8 +4,8 @@
 
 #[cfg(test)]
 mod tests {
+    use crate::core::{Memory, OutputItem, Value};
     use crate::*;
-    use crate::core::{Memory, Value, OutputItem};
     use proptest::prelude::*;
 
     /// Extract the numeric value from an OutputItem.
@@ -15,63 +15,63 @@ mod tests {
             OutputItem::Char(c) => *c as u64,
         }
     }
-    
+
     // ========================================================================
     // Memory Property Tests
     // ========================================================================
-    
+
     proptest! {
         /// Memory hash is consistent: same writes produce same hash.
         #[test]
         fn prop_memory_hash_deterministic(
-            addr1 in 0u16..1000,
+            addr1 in 0u64..1000,
             val1 in any::<u64>(),
-            addr2 in 0u16..1000,
+            addr2 in 0u64..1000,
             val2 in any::<u64>(),
         ) {
             let mut mem1 = Memory::new();
             let mut mem2 = Memory::new();
-            
+
             mem1.write(addr1, Value::new(val1));
             mem1.write(addr2, Value::new(val2));
-            
+
             mem2.write(addr1, Value::new(val1));
             mem2.write(addr2, Value::new(val2));
-            
+
             prop_assert_eq!(mem1.state_hash(), mem2.state_hash());
         }
-        
+
         /// Incremental hash matches full recompute.
         #[test]
         fn prop_incremental_hash_correct(
-            writes in prop::collection::vec((0u16..500, any::<u64>()), 1..20),
+            writes in prop::collection::vec((0u64..500, any::<u64>()), 1..20),
         ) {
             let mut mem = Memory::new();
-            
+
             for (addr, val) in writes {
                 mem.write(addr, Value::new(val));
             }
-            
+
             prop_assert_eq!(mem.state_hash(), mem.recompute_hash());
         }
-        
+
         /// Memory ordering is antisymmetric.
         #[test]
         fn prop_memory_ordering_antisymmetric(
-            addr in 0u16..100,
+            addr in 0u64..100,
             val1 in any::<u64>(),
             val2 in any::<u64>(),
         ) {
             let mut mem1 = Memory::new();
             let mut mem2 = Memory::new();
-            
+
             mem1.write(addr, Value::new(val1));
             mem2.write(addr, Value::new(val2));
-            
+
             use std::cmp::Ordering;
             let cmp1 = mem1.cmp(&mem2);
             let cmp2 = mem2.cmp(&mem1);
-            
+
             match cmp1 {
                 Ordering::Less => prop_assert_eq!(cmp2, Ordering::Greater),
                 Ordering::Greater => prop_assert_eq!(cmp2, Ordering::Less),
@@ -79,53 +79,53 @@ mod tests {
             }
         }
     }
-    
+
     // ========================================================================
     // Value Property Tests
     // ========================================================================
-    
+
     proptest! {
         /// Value arithmetic is commutative for addition.
         #[test]
         fn prop_value_add_commutative(a in any::<u64>(), b in any::<u64>()) {
             let va = Value::new(a);
             let vb = Value::new(b);
-            
+
             prop_assert_eq!((va.clone() + vb.clone()).val, (vb + va).val);
         }
-        
+
         /// Value arithmetic is commutative for multiplication.
         #[test]
         fn prop_value_mul_commutative(a in any::<u64>(), b in any::<u64>()) {
             let va = Value::new(a);
             let vb = Value::new(b);
-            
+
             prop_assert_eq!((va.clone() * vb.clone()).val, (vb * va).val);
         }
-        
+
         /// Division by zero returns zero.
         #[test]
         fn prop_div_by_zero_is_zero(a in any::<u64>()) {
             let va = Value::new(a);
             let zero = Value::new(0);
-            
+
             prop_assert_eq!((va / zero).val, 0);
         }
-        
+
         /// Modulo by zero returns zero.
         #[test]
         fn prop_mod_by_zero_is_zero(a in any::<u64>()) {
             let va = Value::new(a);
             let zero = Value::new(0);
-            
+
             prop_assert_eq!((va % zero).val, 0);
         }
     }
-    
+
     // ========================================================================
     // Fixed-Point Selection Property Tests
     // ========================================================================
-    
+
     proptest! {
         /// Selection is idempotent: selecting from same candidates gives same result.
         #[test]
@@ -133,27 +133,27 @@ mod tests {
             vals in prop::collection::vec(0u64..1000, 2..10),
         ) {
             use crate::temporal::action::{ActionPrinciple, ActionConfig, FixedPointSelector};
-            
+
             let principle = ActionPrinciple::new(ActionConfig::default());
             let seed = Memory::new();
-            
+
             let mut results = Vec::new();
-            
+
             for _ in 0..3 {
                 let mut selector = FixedPointSelector::new(principle.clone());
-                
+
                 for (i, &val) in vals.iter().enumerate() {
                     let mut mem = Memory::new();
                     mem.write(0, Value::new(val));
                     mem.write(1, Value::new(i as u64));
                     selector.add_candidate(mem, 1, vec![], seed.clone());
                 }
-                
+
                 if let Some(best) = selector.select_best() {
                     results.push(best.memory.read(0).val);
                 }
             }
-            
+
             // All selections should be identical
             if let Some(&first) = results.first() {
                 for &val in &results {
@@ -162,11 +162,11 @@ mod tests {
             }
         }
     }
-    
+
     // ========================================================================
-    // Execution Property Tests  
+    // Execution Property Tests
     // ========================================================================
-    
+
     proptest! {
         /// Pure programs (no ORACLE) always converge in 1 epoch.
         #[test]
@@ -177,12 +177,12 @@ mod tests {
             let source = format!("{} {} ADD OUTPUT", a, b);
             let tokens = tokenize(&source);
             let mut parser = Parser::new(&tokens);
-            
+
             if let Ok(program) = parser.parse_program() {
                 let config = crate::temporal::timeloop::TimeLoopConfig::default();
                 let mut driver = TimeLoop::new(config).expect("valid configuration");
                 let result = driver.run(&program);
-                
+
                 match result {
                     ConvergenceStatus::Consistent { epochs, output, .. } => {
                         prop_assert_eq!(epochs, 1);

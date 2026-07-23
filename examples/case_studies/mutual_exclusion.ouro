@@ -1,0 +1,30 @@
+# Bounded self-consistency synthesis and model checking.
+#
+# Cell 0 is a two-bit ownership mask:
+#   0 = nobody owns the resource
+#   1 = agent A owns it
+#   2 = agent B owns it
+#   3 = both own it (unsafe)
+#
+# The temporal constraint accepts either valid owner and rejects the two bad
+# schedules. There are deliberately two fixed states, but every fixed state is
+# safe. `--all-fixed` exhibits the ambiguity; `--verify` proves both safety
+# properties over all solutions.
+
+PROPERTY somebody_owns_it { ALL_FIXED CELL 0 NEQ 0; }
+PROPERTY mutual_exclusion { ALL_FIXED CELL 0 NEQ 3; }
+
+TEMPORAL 0 1 BITS 2 {
+    0 ORACLE
+    DUP
+    DUP 1 EQ
+    SWAP 2 EQ
+    OR
+    IF {
+        DUP 0 PROPHECY
+        OUTPUT
+    } ELSE {
+        POP
+        PARADOX
+    }
+}

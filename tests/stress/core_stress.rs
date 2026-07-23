@@ -6,11 +6,11 @@
 //! Or run a specific test:
 //! `cargo test --release stress_memory_writes -- --ignored`
 
+use ourochronos::core::error::SourceLocation;
 use ourochronos::core::memory::Memory;
 use ourochronos::core::provenance::Provenance;
 use ourochronos::core::stack::Stack;
 use ourochronos::core::value::Value;
-use ourochronos::core::error::SourceLocation;
 use std::collections::BTreeSet;
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -34,18 +34,24 @@ fn stress_memory_writes_1m() {
 
     // Perform 1M writes
     for _ in 0..1_000_000 {
-        let addr = (next_rand() % 65536) as u16;
+        let addr = next_rand() % 65536;
         let val = next_rand();
         mem.write(addr, Value::new(val));
     }
 
     // Verify hash is consistent (this implicitly tests the hash_mix function)
     let hash = mem.state_hash();
-    assert!(hash != 0 || mem.is_empty(), "Hash should be non-zero for non-empty memory");
+    assert!(
+        hash != 0 || mem.is_empty(),
+        "Hash should be non-zero for non-empty memory"
+    );
 
     // Verify non-zero cells exist
     let non_zero = mem.non_zero_cells();
-    assert!(!non_zero.is_empty(), "Memory should have non-zero cells after writes");
+    assert!(
+        !non_zero.is_empty(),
+        "Memory should have non-zero cells after writes"
+    );
 }
 
 /// Stress test: Write-read cycles with hash verification.
@@ -56,23 +62,23 @@ fn stress_memory_write_read_cycles() {
 
     // Write sequential values
     for i in 0..65536u64 {
-        mem.write(i as u16, Value::new(i));
+        mem.write(i, Value::new(i));
     }
 
     // Verify all values
     for i in 0..65536u64 {
-        let val = mem.read(i as u16);
+        let val = mem.read(i);
         assert_eq!(val.val, i, "Value at address {} should be {}", i, i);
     }
 
     // Zero out every other cell
     for i in (0..65536u64).step_by(2) {
-        mem.write(i as u16, Value::ZERO);
+        mem.write(i, Value::ZERO);
     }
 
     // Verify pattern
     for i in 0..65536u64 {
-        let val = mem.read(i as u16);
+        let val = mem.read(i);
         if i % 2 == 0 {
             assert_eq!(val.val, 0);
         } else {
@@ -94,8 +100,8 @@ fn stress_memory_values_equal() {
     // Write same values to both
     for i in 0..10000 {
         let addr = (i * 7) % 65536;
-        mem1.write(addr as u16, Value::new(i as u64));
-        mem2.write(addr as u16, Value::new(i as u64));
+        mem1.write(addr as u64, Value::new(i as u64));
+        mem2.write(addr as u64, Value::new(i as u64));
     }
 
     // Should still be equal
@@ -114,7 +120,7 @@ fn stress_memory_values_equal() {
 // Provenance Stress Tests
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Stress test: 10K provenance merges performance.
+/// Stress test: 10K provenance merges remain conservatively bounded.
 #[test]
 #[ignore]
 fn stress_provenance_merges_10k() {
@@ -122,16 +128,18 @@ fn stress_provenance_merges_10k() {
 
     // Merge 10K single-address provenances
     for i in 0..10_000 {
-        let p = Provenance::single(i as u16);
+        let p = Provenance::single(i as u64);
         accumulated = accumulated.merge(&p);
     }
 
-    // Verify all addresses are present
-    assert_eq!(accumulated.dependency_count(), 10_000);
+    // The default exact-set budget is deliberately smaller than this input,
+    // so the lattice join must compact to top instead of retaining 10K nodes.
+    assert!(accumulated.is_saturated());
+    assert!(accumulated.dependency_count() >= 10_000);
 
-    // Verify we can iterate over all dependencies
+    // Top still enumerates the complete configured address space.
     let count = accumulated.dependencies().count();
-    assert_eq!(count, 10_000);
+    assert_eq!(count, accumulated.dependency_count());
 }
 
 /// Stress test: Provenance merge with many overlapping sets.
@@ -144,7 +152,7 @@ fn stress_provenance_overlapping_merges() {
     for i in 0..100 {
         let start = i * 10;
         let end = start + 50;
-        let set: BTreeSet<u16> = (start..end).collect();
+        let set: BTreeSet<u64> = (start..end).collect();
         provenances.push(Provenance::from_set(set));
     }
 
@@ -156,12 +164,12 @@ fn stress_provenance_overlapping_merges() {
 
     // Calculate expected count: 0 to (99*10 + 49) = 0 to 1039
     let expected_max = 99 * 10 + 49;
-    assert!(result.dependency_count() <= (expected_max + 1) as usize);
-    assert!(result.dependency_count() > 0);
+    assert!(result.is_saturated());
+    assert!(result.dependency_count() >= (expected_max + 1) as usize);
 
     // Verify specific addresses
     assert!(result.dependencies().any(|a| a == 0));
-    assert!(result.dependencies().any(|a| a == expected_max as u16));
+    assert!(result.dependencies().any(|a| a == expected_max as u64));
 }
 
 /// Stress test: Subset reuse optimization under heavy load.
@@ -169,12 +177,12 @@ fn stress_provenance_overlapping_merges() {
 #[ignore]
 fn stress_provenance_subset_optimization() {
     // Create a large base set
-    let large_set: BTreeSet<u16> = (0..1000).collect();
+    let large_set: BTreeSet<u64> = (0..1000).collect();
     let p_large = Provenance::from_set(large_set);
 
     // Merge many subsets into it
     for i in 0..1000 {
-        let small_set: BTreeSet<u16> = (i..i+10).collect();
+        let small_set: BTreeSet<u64> = (i..i + 10).collect();
         let p_small = Provenance::from_set(small_set);
 
         let merged = p_large.merge(&p_small);
@@ -230,7 +238,9 @@ fn stress_stack_max_depth() {
 
     // Fill to max
     for i in 0..max_depth {
-        stack.push_checked(Value::new(i as u64), loc.clone()).unwrap();
+        stack
+            .push_checked(Value::new(i as u64), loc.clone())
+            .unwrap();
     }
     assert_eq!(stack.depth(), max_depth);
 

@@ -22,8 +22,8 @@
 
 use crate::common::*;
 
-use ourochronos::*;
 use ourochronos::temporal::timeloop::{ConvergenceStatus, ParadoxDiagnosis};
+use ourochronos::*;
 
 // =============================================================================
 // Consistent Execution Tests
@@ -207,7 +207,11 @@ mod oscillation {
         // Assert: Should oscillate with period 3
         match result {
             ConvergenceStatus::Oscillation { period, .. } => {
-                assert!(period >= 2, "Expected oscillation period >= 2, got {}", period);
+                assert!(
+                    period >= 2,
+                    "Expected oscillation period >= 2, got {}",
+                    period
+                );
             }
             ConvergenceStatus::Timeout { .. } => {
                 // Also acceptable - pattern too complex to detect
@@ -235,6 +239,82 @@ mod oscillation {
                 }
             }
             _ => panic!("Expected Oscillation with diagnosis, got {:?}", result),
+        }
+    }
+}
+
+// =============================================================================
+// Deutsch stationary-distribution semantics
+// =============================================================================
+
+mod deutsch_semantics {
+    use super::*;
+
+    fn run_deutsch(code: &str) -> ConvergenceStatus {
+        let mut config = default_config();
+        config.mode = ExecutionMode::Deutsch;
+        run_with_config(code, config)
+    }
+
+    #[test]
+    fn deterministic_two_cycle_is_a_stationary_ensemble() {
+        let result = run_deutsch("0 ORACLE NOT 0 PROPHECY");
+
+        match result {
+            ConvergenceStatus::DeutschConsistent {
+                cycle,
+                period,
+                transient_epochs,
+                unanimous_output,
+                ..
+            } => {
+                assert_eq!(period, 2);
+                assert_eq!(transient_epochs, 0);
+                assert_eq!(cycle[0].read(0).val, 0);
+                assert_eq!(cycle[1].read(0).val, 1);
+                assert_eq!(unanimous_output, Some(Vec::new()));
+            }
+            other => panic!("Expected Deutsch stationary ensemble, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn readout_must_agree_across_every_state_in_the_cycle() {
+        let result = run_deutsch("0 ORACLE DUP OUTPUT NOT 0 PROPHECY");
+
+        match result {
+            ConvergenceStatus::DeutschConsistent {
+                period,
+                outputs,
+                unanimous_output,
+                ..
+            } => {
+                assert_eq!(period, 2);
+                assert_eq!(outputs.len(), 2);
+                assert!(unanimous_output.is_none());
+            }
+            other => panic!("Expected Deutsch stationary ensemble, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn constant_readout_is_valid_on_a_nontrivial_cycle() {
+        let result = run_deutsch("0 ORACLE NOT 0 PROPHECY 7 OUTPUT");
+
+        match result {
+            ConvergenceStatus::DeutschConsistent {
+                period,
+                unanimous_output: Some(output),
+                ..
+            } => {
+                assert_eq!(period, 2);
+                assert_eq!(output.len(), 1);
+                match &output[0] {
+                    OutputItem::Val(value) => assert_eq!(value.val, 7),
+                    other => panic!("Expected numeric output, got {:?}", other),
+                }
+            }
+            other => panic!("Expected unanimous Deutsch readout, got {:?}", other),
         }
     }
 }
@@ -312,7 +392,10 @@ mod action_guided {
         // Assert: Should prefer the output-producing branch
         match result {
             ConvergenceStatus::Consistent { output, .. } => {
-                assert!(!output.is_empty(), "Action-guided should prefer output-producing fixed point");
+                assert!(
+                    !output.is_empty(),
+                    "Action-guided should prefer output-producing fixed point"
+                );
             }
             _ => panic!("Expected consistent execution, got {:?}", result),
         }
@@ -331,7 +414,11 @@ mod action_guided {
             ConvergenceStatus::Consistent { memory, output, .. } => {
                 let factor = memory.read(0).val;
                 // Factor should divide 15
-                assert!(factor > 1 && factor < 15, "Factor {} should be > 1 and < 15", factor);
+                assert!(
+                    factor > 1 && factor < 15,
+                    "Factor {} should be > 1 and < 15",
+                    factor
+                );
                 assert_eq!(15 % factor, 0, "Factor {} should divide 15", factor);
                 assert!(!output.is_empty(), "Should output the factor");
             }
@@ -392,7 +479,9 @@ mod determinism {
         // Act
         let mut results: Vec<u64> = Vec::new();
         for _ in 0..100 {
-            let result = TimeLoop::new(default_config()).expect("valid configuration").run(&program);
+            let result = TimeLoop::new(default_config())
+                .expect("valid configuration")
+                .run(&program);
             if let ConvergenceStatus::Consistent { memory, .. } = result {
                 results.push(memory.read(0).val);
             }
@@ -525,7 +614,9 @@ mod edge_cases {
         let program = parse(code);
 
         // Act
-        let result = TimeLoop::new(default_config()).expect("valid configuration").run(&program);
+        let result = TimeLoop::new(default_config())
+            .expect("valid configuration")
+            .run(&program);
 
         // Assert: Should converge immediately
         assert_consistent(&result);
@@ -538,7 +629,9 @@ mod edge_cases {
         let program = parse(code);
 
         // Act
-        let result = TimeLoop::new(default_config()).expect("valid configuration").run(&program);
+        let result = TimeLoop::new(default_config())
+            .expect("valid configuration")
+            .run(&program);
 
         // Assert
         assert_consistent(&result);
@@ -596,6 +689,30 @@ mod edge_cases {
     }
 }
 
+mod configurable_memory {
+    use super::*;
+
+    #[test]
+    fn temporal_cells_above_the_legacy_u16_boundary_converge() {
+        let mut config = default_config();
+        config.memory_cells = 70_000;
+        config.error_config = ErrorConfig::strict();
+        let result = run_with_config(
+            "42 65536 PROPHECY 65536 PRESENT OUTPUT 0 ORACLE POP",
+            config,
+        );
+
+        match result {
+            ConvergenceStatus::Consistent { memory, output, .. } => {
+                assert_eq!(memory.len(), 70_000);
+                assert_eq!(memory.read(65_536).val, 42);
+                assert!(matches!(&output[0], OutputItem::Val(v) if v.val == 42));
+            }
+            other => panic!("Expected wide-memory consistency, got {:?}", other),
+        }
+    }
+}
+
 // =============================================================================
 // Epoch cache scope (regression: shared per-run, cleared between runs)
 // =============================================================================
@@ -624,8 +741,8 @@ mod epoch_cache_scope {
         // The cache is keyed on the anamnesis alone. Without clearing at
         // run() entry, this grandfather paradox would hit the identity
         // programme's cached all-zero result and be reported consistent.
-        let mut timeloop = ourochronos::TimeLoop::new(default_config())
-            .expect("valid configuration");
+        let mut timeloop =
+            ourochronos::TimeLoop::new(default_config()).expect("valid configuration");
 
         let identity = parse("0 ORACLE 0 PROPHECY");
         assert!(matches!(

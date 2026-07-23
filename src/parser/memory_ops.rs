@@ -3,18 +3,18 @@
 //! Handles memory operation keywords: INDEX, STORE, PACK, UNPACK.
 //! These provide computed memory access with bounds checking.
 
-use crate::ast::{OpCode, Stmt};
 use super::domain::{DomainParser, ParseContext};
+use crate::ast::{OpCode, Stmt};
 
 /// Parser for memory operations.
 pub struct MemoryOpsParser;
 
 impl MemoryOpsParser {
     pub const KEYWORDS: &'static [&'static str] = &[
-        "INDEX",   // Read from present[base + offset]
-        "STORE",   // Write value to present[base + offset]
-        "PACK",    // Pack N stack values into contiguous memory
-        "UNPACK",  // Read N contiguous memory cells onto stack
+        "INDEX",  // Read from present[base + offset]
+        "STORE",  // Write value to present[base + offset]
+        "PACK",   // Pack N stack values into contiguous memory
+        "UNPACK", // Read N contiguous memory cells onto stack
     ];
 }
 
@@ -23,7 +23,7 @@ impl DomainParser for MemoryOpsParser {
         Self::KEYWORDS
     }
 
-    fn parse<'a>(&self, keyword: &str, ctx: &mut ParseContext<'a>) -> Result<Stmt, String> {
+    fn parse(&self, keyword: &str, ctx: &mut ParseContext<'_>) -> Result<Stmt, String> {
         match keyword {
             "INDEX" => ctx.emit_op(OpCode::Index),
             "STORE" => ctx.emit_op(OpCode::Store),

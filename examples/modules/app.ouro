@@ -8,7 +8,7 @@
 # - Using imported procedures
 # - Pure computation without temporal operations
 
-IMPORT "examples/modules/math_lib.ouro"
+IMPORT "math_lib.ouro"
 
 # ════ Test Suite ════
 "Math Library Test Suite" OUTPUT NEWLINE

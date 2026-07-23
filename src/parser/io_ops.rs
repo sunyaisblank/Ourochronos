@@ -2,8 +2,8 @@
 //!
 //! Handles input/output, file, buffer, network, and system operations.
 
-use crate::ast::{OpCode, Stmt};
 use super::domain::{DomainParser, ParseContext};
+use crate::ast::{OpCode, Stmt};
 
 /// Parser for I/O operations (file, buffer, network, system).
 pub struct IoOpsParser;
@@ -13,19 +13,36 @@ impl IoOpsParser {
         // Basic I/O
         "INPUT",
         // FFI operations
-        "FFI_CALL", "FFI_CALL_NAMED",
+        "FFI_CALL",
+        "FFI_CALL_NAMED",
         // File I/O operations
-        "FILE_OPEN", "FILE_READ", "FILE_WRITE", "FILE_SEEK",
-        "FILE_FLUSH", "FILE_CLOSE", "FILE_EXISTS", "FILE_SIZE",
+        "FILE_OPEN",
+        "FILE_READ",
+        "FILE_WRITE",
+        "FILE_SEEK",
+        "FILE_FLUSH",
+        "FILE_CLOSE",
+        "FILE_EXISTS",
+        "FILE_SIZE",
         // Buffer operations
-        "BUFFER_NEW", "BUFFER_FROM_STACK", "BUFFER_TO_STACK",
-        "BUFFER_LEN", "BUFFER_READ_BYTE", "BUFFER_WRITE_BYTE", "BUFFER_FREE",
+        "BUFFER_NEW",
+        "BUFFER_FROM_STACK",
+        "BUFFER_TO_STACK",
+        "BUFFER_LEN",
+        "BUFFER_READ_BYTE",
+        "BUFFER_WRITE_BYTE",
+        "BUFFER_FREE",
         // Network operations
-        "TCP_CONNECT", "SOCKET_SEND", "SOCKET_RECV", "SOCKET_CLOSE",
+        "TCP_CONNECT",
+        "SOCKET_SEND",
+        "SOCKET_RECV",
+        "SOCKET_CLOSE",
         // Process operations
         "PROC_EXEC",
         // System operations
-        "CLOCK", "SLEEP", "RANDOM",
+        "CLOCK",
+        "SLEEP",
+        "RANDOM",
     ];
 }
 
@@ -34,7 +51,7 @@ impl DomainParser for IoOpsParser {
         Self::KEYWORDS
     }
 
-    fn parse<'a>(&self, keyword: &str, ctx: &mut ParseContext<'a>) -> Result<Stmt, String> {
+    fn parse(&self, keyword: &str, ctx: &mut ParseContext<'_>) -> Result<Stmt, String> {
         match keyword {
             // Basic I/O
             "INPUT" => ctx.emit_op(OpCode::Input),

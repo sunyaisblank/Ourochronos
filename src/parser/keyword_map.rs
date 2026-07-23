@@ -2,14 +2,14 @@
 //!
 //! Maps uppercase keywords to their corresponding domain for fast lookup.
 
-use super::domain::{DomainParser, ParseContext};
-use super::stack_ops::StackOpsParser;
 use super::arithmetic::ArithmeticParser;
-use super::temporal::TemporalParser;
 use super::data_structures::DataStructuresParser;
+use super::domain::{DomainParser, ParseContext};
 use super::io_ops::IoOpsParser;
-use super::string_ops::StringOpsParser;
 use super::memory_ops::MemoryOpsParser;
+use super::stack_ops::StackOpsParser;
+use super::string_ops::StringOpsParser;
+use super::temporal::TemporalParser;
 use crate::ast::Stmt;
 
 /// Identifies which domain parser handles a keyword.
@@ -115,7 +115,10 @@ mod tests {
         assert_eq!(registry.lookup_domain("DUP"), Some(Domain::Stack));
         assert_eq!(registry.lookup_domain("ADD"), Some(Domain::Arithmetic));
         assert_eq!(registry.lookup_domain("ORACLE"), Some(Domain::Temporal));
-        assert_eq!(registry.lookup_domain("VEC_NEW"), Some(Domain::DataStructures));
+        assert_eq!(
+            registry.lookup_domain("VEC_NEW"),
+            Some(Domain::DataStructures)
+        );
         assert_eq!(registry.lookup_domain("FILE_OPEN"), Some(Domain::Io));
         assert_eq!(registry.lookup_domain("STR_REV"), Some(Domain::String));
         assert_eq!(registry.lookup_domain("INDEX"), Some(Domain::Memory));
@@ -136,15 +139,15 @@ mod tests {
     fn test_all_domains_covered() {
         let registry = DomainRegistry::new();
         // Sample from each domain to verify coverage
-        assert!(registry.handles("NOP"));       // Stack
-        assert!(registry.handles("MUL"));       // Arithmetic
-        assert!(registry.handles("PROPHECY"));  // Temporal
-        assert!(registry.handles("HASH_PUT"));  // DataStructures
-        assert!(registry.handles("CLOCK"));     // IO
-        assert!(registry.handles("CONCAT"));    // String
-        assert!(registry.handles("INDEX"));     // Memory
-        assert!(registry.handles("STORE"));     // Memory
-        assert!(registry.handles("PACK"));      // Memory
-        assert!(registry.handles("UNPACK"));    // Memory
+        assert!(registry.handles("NOP")); // Stack
+        assert!(registry.handles("MUL")); // Arithmetic
+        assert!(registry.handles("PROPHECY")); // Temporal
+        assert!(registry.handles("HASH_PUT")); // DataStructures
+        assert!(registry.handles("CLOCK")); // IO
+        assert!(registry.handles("CONCAT")); // String
+        assert!(registry.handles("INDEX")); // Memory
+        assert!(registry.handles("STORE")); // Memory
+        assert!(registry.handles("PACK")); // Memory
+        assert!(registry.handles("UNPACK")); // Memory
     }
 }

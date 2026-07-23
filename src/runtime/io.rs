@@ -29,14 +29,88 @@
 //! SOCKET_CLOSE                  # socket --
 //! ```
 
-use crate::core::{Value, Handle};
 use crate::core::error::{OuroError, OuroResult, SourceLocation};
+use crate::core::{Handle, Value};
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Write, Seek, SeekFrom, BufWriter};
+use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::net::TcpStream;
 use std::path::PathBuf;
 use std::time::Duration;
+
+/// Conservative retained-output ceiling for the legacy direct process API.
+const LEGACY_PROCESS_OUTPUT_LIMIT: usize = 64 * 1024 * 1024;
+
+#[cfg(unix)]
+fn set_nonblocking<T: std::os::fd::AsRawFd>(stream: &T) -> std::io::Result<()> {
+    let descriptor = stream.as_raw_fd();
+    // SAFETY: descriptor is borrowed from a live ChildStdout/ChildStderr and
+    // fcntl neither takes ownership nor retains the pointer-free argument.
+    let flags = unsafe { libc::fcntl(descriptor, libc::F_GETFL) };
+    if flags == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: as above; this only adds O_NONBLOCK to the descriptor flags.
+    if unsafe { libc::fcntl(descriptor, libc::F_SETFL, flags | libc::O_NONBLOCK) } == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PipeDrain {
+    Open,
+    Eof,
+    Overflow,
+}
+
+#[cfg(unix)]
+fn drain_process_stream<R: Read + ?Sized>(
+    stream: &mut R,
+    captured: &mut Vec<u8>,
+    total: &mut usize,
+    limit: usize,
+) -> std::io::Result<PipeDrain> {
+    let mut chunk = [0_u8; 8 * 1024];
+    loop {
+        match stream.read(&mut chunk) {
+            Ok(0) => return Ok(PipeDrain::Eof),
+            Ok(read) => {
+                let retained = read.min(limit.saturating_sub(*total));
+                captured.try_reserve(retained).map_err(|error| {
+                    std::io::Error::other(format!(
+                        "failed to reserve process-output buffer: {error}"
+                    ))
+                })?;
+                captured.extend_from_slice(&chunk[..retained]);
+                *total = total
+                    .checked_add(retained)
+                    .ok_or_else(|| std::io::Error::other("process-output byte count overflowed"))?;
+                if retained != read {
+                    return Ok(PipeDrain::Overflow);
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                return Ok(PipeDrain::Open);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+#[cfg(unix)]
+fn terminate_process_group(child: &mut std::process::Child) {
+    if let Ok(process_group) = i32::try_from(child.id()) {
+        // SAFETY: the child is created as the leader of a fresh process group,
+        // and a negative PID asks kill(2) to signal precisely that group.
+        unsafe {
+            libc::kill(-process_group, libc::SIGKILL);
+        }
+    }
+    let _ = child.kill();
+}
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // File Mode Flags
@@ -310,12 +384,14 @@ impl SocketHandle {
             Some(Duration::from_millis(timeout_ms))
         };
 
-        self.stream.set_read_timeout(duration).map_err(|e| OuroError::IO {
-            operation: "set_read_timeout".to_string(),
-            path: Some(self.remote_addr.clone()),
-            message: e.to_string(),
-            location: SourceLocation::default(),
-        })?;
+        self.stream
+            .set_read_timeout(duration)
+            .map_err(|e| OuroError::IO {
+                operation: "set_read_timeout".to_string(),
+                path: Some(self.remote_addr.clone()),
+                message: e.to_string(),
+                location: SourceLocation::default(),
+            })?;
 
         self.read_timeout = duration;
         Ok(())
@@ -329,12 +405,14 @@ impl SocketHandle {
             Some(Duration::from_millis(timeout_ms))
         };
 
-        self.stream.set_write_timeout(duration).map_err(|e| OuroError::IO {
-            operation: "set_write_timeout".to_string(),
-            path: Some(self.remote_addr.clone()),
-            message: e.to_string(),
-            location: SourceLocation::default(),
-        })?;
+        self.stream
+            .set_write_timeout(duration)
+            .map_err(|e| OuroError::IO {
+                operation: "set_write_timeout".to_string(),
+                path: Some(self.remote_addr.clone()),
+                message: e.to_string(),
+                location: SourceLocation::default(),
+            })?;
 
         self.write_timeout = duration;
         Ok(())
@@ -371,12 +449,14 @@ impl SocketHandle {
 
     /// Shutdown the socket.
     pub fn shutdown(&self) -> OuroResult<()> {
-        self.stream.shutdown(std::net::Shutdown::Both).map_err(|e| OuroError::IO {
-            operation: "socket_shutdown".to_string(),
-            path: Some(self.remote_addr.clone()),
-            message: e.to_string(),
-            location: SourceLocation::default(),
-        })
+        self.stream
+            .shutdown(std::net::Shutdown::Both)
+            .map_err(|e| OuroError::IO {
+                operation: "socket_shutdown".to_string(),
+                path: Some(self.remote_addr.clone()),
+                message: e.to_string(),
+                location: SourceLocation::default(),
+            })
     }
 }
 
@@ -504,7 +584,10 @@ impl Default for Buffer {
 
 /// Context for all I/O operations.
 ///
-/// This manages file handles, sockets, and buffers for the VM.
+/// This legacy host-resource facade manages file handles, sockets, and
+/// buffers together. The canonical bytecode VM does not use its buffer
+/// lifetime as temporal state: it constructs a separate bounded buffer store
+/// afresh for every candidate epoch.
 pub struct IOContext {
     /// Open file handles.
     files: HashMap<Handle, FileHandle>,
@@ -564,7 +647,14 @@ impl IOContext {
     }
 
     /// Log an I/O operation.
-    fn log(&mut self, operation: &str, handle: Option<Handle>, path: Option<String>, bytes: Option<usize>, success: bool) {
+    fn log(
+        &mut self,
+        operation: &str,
+        handle: Option<Handle>,
+        path: Option<String>,
+        bytes: Option<usize>,
+        success: bool,
+    ) {
         self.io_log.push(IOLogEntry {
             operation: operation.to_string(),
             handle,
@@ -596,7 +686,8 @@ impl IOContext {
             self.cwd.join(path)
         };
 
-        let file = mode.to_open_options()
+        let file = mode
+            .to_open_options()
             .open(&full_path)
             .map_err(|e| OuroError::IO {
                 operation: "file_open".to_string(),
@@ -606,8 +697,15 @@ impl IOContext {
             })?;
 
         let handle = self.new_handle();
-        self.files.insert(handle, FileHandle::new(file, full_path.clone(), mode));
-        self.log("file_open", Some(handle), Some(full_path.display().to_string()), None, true);
+        self.files
+            .insert(handle, FileHandle::new(file, full_path.clone(), mode));
+        self.log(
+            "file_open",
+            Some(handle),
+            Some(full_path.display().to_string()),
+            None,
+            true,
+        );
 
         Ok(handle)
     }
@@ -628,19 +726,28 @@ impl IOContext {
         // Create a buffer for the data
         let buffer_handle = self.new_handle();
         self.buffers.insert(buffer_handle, Buffer::from_data(data));
-        self.log("file_read", Some(handle), Some(path), Some(bytes_read), true);
+        self.log(
+            "file_read",
+            Some(handle),
+            Some(path),
+            Some(bytes_read),
+            true,
+        );
 
         Ok((buffer_handle, bytes_read))
     }
 
     /// Write to a file.
     pub fn file_write(&mut self, handle: Handle, buffer_handle: Handle) -> OuroResult<usize> {
-        let buffer = self.buffers.get(&buffer_handle).ok_or_else(|| OuroError::IO {
-            operation: "file_write".to_string(),
-            path: None,
-            message: format!("Invalid buffer handle: {}", buffer_handle),
-            location: SourceLocation::default(),
-        })?;
+        let buffer = self
+            .buffers
+            .get(&buffer_handle)
+            .ok_or_else(|| OuroError::IO {
+                operation: "file_write".to_string(),
+                path: None,
+                message: format!("Invalid buffer handle: {}", buffer_handle),
+                location: SourceLocation::default(),
+            })?;
 
         let data = buffer.as_slice().to_vec();
 
@@ -653,13 +760,24 @@ impl IOContext {
 
         let path = file.path().display().to_string();
         let bytes_written = file.write(&data)?;
-        self.log("file_write", Some(handle), Some(path), Some(bytes_written), true);
+        self.log(
+            "file_write",
+            Some(handle),
+            Some(path),
+            Some(bytes_written),
+            true,
+        );
 
         Ok(bytes_written)
     }
 
     /// Seek in a file.
-    pub fn file_seek(&mut self, handle: Handle, origin: SeekOrigin, offset: i64) -> OuroResult<u64> {
+    pub fn file_seek(
+        &mut self,
+        handle: Handle,
+        origin: SeekOrigin,
+        offset: i64,
+    ) -> OuroResult<u64> {
         let file = self.files.get_mut(&handle).ok_or_else(|| OuroError::IO {
             operation: "file_seek".to_string(),
             path: None,
@@ -757,12 +875,15 @@ impl IOContext {
 
     /// Send data over a socket.
     pub fn socket_send(&mut self, handle: Handle, buffer_handle: Handle) -> OuroResult<usize> {
-        let buffer = self.buffers.get(&buffer_handle).ok_or_else(|| OuroError::IO {
-            operation: "socket_send".to_string(),
-            path: None,
-            message: format!("Invalid buffer handle: {}", buffer_handle),
-            location: SourceLocation::default(),
-        })?;
+        let buffer = self
+            .buffers
+            .get(&buffer_handle)
+            .ok_or_else(|| OuroError::IO {
+                operation: "socket_send".to_string(),
+                path: None,
+                message: format!("Invalid buffer handle: {}", buffer_handle),
+                location: SourceLocation::default(),
+            })?;
 
         let data = buffer.as_slice().to_vec();
 
@@ -775,7 +896,13 @@ impl IOContext {
 
         let addr = socket.remote_addr().to_string();
         let bytes_sent = socket.send(&data)?;
-        self.log("socket_send", Some(handle), Some(addr), Some(bytes_sent), true);
+        self.log(
+            "socket_send",
+            Some(handle),
+            Some(addr),
+            Some(bytes_sent),
+            true,
+        );
 
         Ok(bytes_sent)
     }
@@ -795,7 +922,13 @@ impl IOContext {
 
         let buffer_handle = self.new_handle();
         self.buffers.insert(buffer_handle, Buffer::from_data(data));
-        self.log("socket_recv", Some(handle), Some(addr), Some(bytes_recv), true);
+        self.log(
+            "socket_recv",
+            Some(handle),
+            Some(addr),
+            Some(bytes_recv),
+            true,
+        );
 
         Ok((buffer_handle, bytes_recv))
     }
@@ -830,7 +963,8 @@ impl IOContext {
     /// Create a buffer from string data.
     pub fn buffer_from_string(&mut self, s: &str) -> Handle {
         let handle = self.new_handle();
-        self.buffers.insert(handle, Buffer::from_data(s.as_bytes().to_vec()));
+        self.buffers
+            .insert(handle, Buffer::from_data(s.as_bytes().to_vec()));
         handle
     }
 
@@ -844,7 +978,8 @@ impl IOContext {
 
     /// Get buffer length.
     pub fn buffer_len(&self, handle: Handle) -> OuroResult<usize> {
-        self.buffers.get(&handle)
+        self.buffers
+            .get(&handle)
             .map(|b| b.len())
             .ok_or_else(|| OuroError::IO {
                 operation: "buffer_len".to_string(),
@@ -856,7 +991,8 @@ impl IOContext {
 
     /// Read a byte from a buffer.
     pub fn buffer_read_byte(&mut self, handle: Handle) -> OuroResult<Option<u8>> {
-        self.buffers.get_mut(&handle)
+        self.buffers
+            .get_mut(&handle)
             .map(|b| b.read_byte())
             .ok_or_else(|| OuroError::IO {
                 operation: "buffer_read_byte".to_string(),
@@ -868,7 +1004,8 @@ impl IOContext {
 
     /// Write a byte to a buffer.
     pub fn buffer_write_byte(&mut self, handle: Handle, byte: u8) -> OuroResult<()> {
-        self.buffers.get_mut(&handle)
+        self.buffers
+            .get_mut(&handle)
             .map(|b| b.write(&[byte]))
             .ok_or_else(|| OuroError::IO {
                 operation: "buffer_write_byte".to_string(),
@@ -880,7 +1017,8 @@ impl IOContext {
 
     /// Get buffer as string.
     pub fn buffer_to_string(&self, handle: Handle) -> OuroResult<String> {
-        self.buffers.get(&handle)
+        self.buffers
+            .get(&handle)
             .map(|b| b.to_string_lossy())
             .ok_or_else(|| OuroError::IO {
                 operation: "buffer_to_string".to_string(),
@@ -892,8 +1030,14 @@ impl IOContext {
 
     /// Copy buffer contents to stack as values.
     pub fn buffer_to_values(&self, handle: Handle) -> OuroResult<Vec<Value>> {
-        self.buffers.get(&handle)
-            .map(|b| b.as_slice().iter().map(|&byte| Value::new(byte as u64)).collect())
+        self.buffers
+            .get(&handle)
+            .map(|b| {
+                b.as_slice()
+                    .iter()
+                    .map(|&byte| Value::new(byte as u64))
+                    .collect()
+            })
             .ok_or_else(|| OuroError::IO {
                 operation: "buffer_to_values".to_string(),
                 path: None,
@@ -911,39 +1055,216 @@ impl IOContext {
     // Process Operations
     // ═══════════════════════════════════════════════════════════════════════════
 
-    /// Execute a command and capture output.
+    /// Execute a command and capture at most 64 MiB of combined output.
     pub fn exec(&mut self, command: &str) -> OuroResult<(Handle, i32)> {
-        use std::process::Command;
+        self.exec_with_output_limit(command, LEGACY_PROCESS_OUTPUT_LIMIT)
+    }
 
-        let output = if cfg!(windows) {
-            Command::new("cmd")
-                .args(["/C", command])
-                .output()
-        } else {
-            Command::new("sh")
-                .args(["-c", command])
-                .output()
-        };
-
-        match output {
-            Ok(output) => {
-                let mut data = output.stdout;
-                data.extend_from_slice(&output.stderr);
-
-                let buffer_handle = self.new_handle();
-                self.buffers.insert(buffer_handle, Buffer::from_data(data));
-
-                let exit_code = output.status.code().unwrap_or(-1);
-                self.log("exec", Some(buffer_handle), Some(command.to_string()), None, true);
-
-                Ok((buffer_handle, exit_code))
-            }
-            Err(e) => Err(OuroError::IO {
+    /// Execute a command with an explicit combined stdout/stderr byte limit.
+    ///
+    /// Both pipes are drained concurrently. If their aggregate output crosses
+    /// the limit, the child is killed before either pipe can grow without
+    /// bound and no output buffer is installed in this context.
+    pub fn exec_with_output_limit(
+        &mut self,
+        command: &str,
+        max_output_bytes: usize,
+    ) -> OuroResult<(Handle, i32)> {
+        #[cfg(unix)]
+        {
+            self.exec_with_output_limit_unix(command, max_output_bytes)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = max_output_bytes;
+            Err(OuroError::IO {
                 operation: "exec".to_string(),
                 path: Some(command.to_string()),
-                message: e.to_string(),
+                message: "bounded process-tree capture is unavailable on this platform".to_string(),
                 location: SourceLocation::default(),
-            }),
+            })
+        }
+    }
+
+    #[cfg(unix)]
+    fn exec_with_output_limit_unix(
+        &mut self,
+        command: &str,
+        max_output_bytes: usize,
+    ) -> OuroResult<(Handle, i32)> {
+        use std::os::unix::process::CommandExt;
+        use std::process::{Command, Stdio};
+
+        let mut process = Command::new("sh");
+        process.args(["-c", command]).process_group(0);
+        let mut child = process
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|error| OuroError::IO {
+                operation: "exec".to_string(),
+                path: Some(command.to_string()),
+                message: error.to_string(),
+                location: SourceLocation::default(),
+            })?;
+
+        let mut stdout = match child.stdout.take() {
+            Some(stdout) => stdout,
+            None => {
+                terminate_process_group(&mut child);
+                let _ = child.wait();
+                return Err(OuroError::IO {
+                    operation: "exec".to_string(),
+                    path: Some(command.to_string()),
+                    message: "child stdout pipe was unavailable".to_string(),
+                    location: SourceLocation::default(),
+                });
+            }
+        };
+        let mut stderr = match child.stderr.take() {
+            Some(stderr) => stderr,
+            None => {
+                terminate_process_group(&mut child);
+                let _ = child.wait();
+                return Err(OuroError::IO {
+                    operation: "exec".to_string(),
+                    path: Some(command.to_string()),
+                    message: "child stderr pipe was unavailable".to_string(),
+                    location: SourceLocation::default(),
+                });
+            }
+        };
+
+        if let Err(error) = set_nonblocking(&stdout).and_then(|()| set_nonblocking(&stderr)) {
+            terminate_process_group(&mut child);
+            drop(stdout);
+            drop(stderr);
+            let _ = child.wait();
+            return Err(OuroError::IO {
+                operation: "exec".to_string(),
+                path: Some(command.to_string()),
+                message: error.to_string(),
+                location: SourceLocation::default(),
+            });
+        }
+
+        let mut stdout_data = Vec::new();
+        let mut stderr_data = Vec::new();
+        let mut total = 0usize;
+        loop {
+            let stdout_state =
+                drain_process_stream(&mut stdout, &mut stdout_data, &mut total, max_output_bytes);
+            let stderr_state =
+                drain_process_stream(&mut stderr, &mut stderr_data, &mut total, max_output_bytes);
+            let (stdout_state, stderr_state) = match (stdout_state, stderr_state) {
+                (Ok(stdout_state), Ok(stderr_state)) => (stdout_state, stderr_state),
+                (Err(error), _) | (_, Err(error)) => {
+                    terminate_process_group(&mut child);
+                    drop(stdout);
+                    drop(stderr);
+                    let _ = child.wait();
+                    return Err(OuroError::IO {
+                        operation: "exec".to_string(),
+                        path: Some(command.to_string()),
+                        message: error.to_string(),
+                        location: SourceLocation::default(),
+                    });
+                }
+            };
+            if stdout_state == PipeDrain::Overflow || stderr_state == PipeDrain::Overflow {
+                terminate_process_group(&mut child);
+                drop(stdout);
+                drop(stderr);
+                let _ = child.wait();
+                return Err(OuroError::IO {
+                    operation: "exec".to_string(),
+                    path: Some(command.to_string()),
+                    message: format!(
+                        "combined process output exceeds {max_output_bytes} byte limit"
+                    ),
+                    location: SourceLocation::default(),
+                });
+            }
+
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    // A descendant may retain or even escape with a write end.
+                    // Drain bytes already available, then close the parent's
+                    // nonblocking read ends instead of waiting for pipe EOF.
+                    let final_stdout = drain_process_stream(
+                        &mut stdout,
+                        &mut stdout_data,
+                        &mut total,
+                        max_output_bytes,
+                    );
+                    let final_stderr = drain_process_stream(
+                        &mut stderr,
+                        &mut stderr_data,
+                        &mut total,
+                        max_output_bytes,
+                    );
+                    if matches!(&final_stdout, Ok(PipeDrain::Overflow))
+                        || matches!(&final_stderr, Ok(PipeDrain::Overflow))
+                    {
+                        drop(stdout);
+                        drop(stderr);
+                        return Err(OuroError::IO {
+                            operation: "exec".to_string(),
+                            path: Some(command.to_string()),
+                            message: format!(
+                                "combined process output exceeds {max_output_bytes} byte limit"
+                            ),
+                            location: SourceLocation::default(),
+                        });
+                    }
+                    if let Err(error) = final_stdout.and(final_stderr) {
+                        drop(stdout);
+                        drop(stderr);
+                        return Err(OuroError::IO {
+                            operation: "exec".to_string(),
+                            path: Some(command.to_string()),
+                            message: error.to_string(),
+                            location: SourceLocation::default(),
+                        });
+                    }
+                    drop(stdout);
+                    drop(stderr);
+                    stdout_data
+                        .try_reserve(stderr_data.len())
+                        .map_err(|error| OuroError::IO {
+                            operation: "exec".to_string(),
+                            path: Some(command.to_string()),
+                            message: format!("failed to combine process output: {error}"),
+                            location: SourceLocation::default(),
+                        })?;
+                    stdout_data.extend_from_slice(&stderr_data);
+
+                    let buffer_handle = self.new_handle();
+                    self.buffers
+                        .insert(buffer_handle, Buffer::from_data(stdout_data));
+                    self.log(
+                        "exec",
+                        Some(buffer_handle),
+                        Some(command.to_string()),
+                        None,
+                        true,
+                    );
+                    return Ok((buffer_handle, status.code().unwrap_or(-1)));
+                }
+                Ok(None) => std::thread::sleep(Duration::from_millis(1)),
+                Err(error) => {
+                    terminate_process_group(&mut child);
+                    drop(stdout);
+                    drop(stderr);
+                    let _ = child.wait();
+                    return Err(OuroError::IO {
+                        operation: "exec".to_string(),
+                        path: Some(command.to_string()),
+                        message: error.to_string(),
+                        location: SourceLocation::default(),
+                    });
+                }
+            }
         }
     }
 
@@ -1107,6 +1428,25 @@ mod tests {
         let handle = ctx.buffer_from_string("Hello, World!");
         let s = ctx.buffer_to_string(handle).unwrap();
         assert_eq!(s, "Hello, World!");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_output_limit_is_aggregate_and_installs_no_partial_buffer() {
+        let mut ctx = IOContext::new();
+        let started = std::time::Instant::now();
+        let command = if cfg!(target_os = "linux") {
+            "setsid sh -c 'while printf x >&2; do :; done' & printf 123; printf 456 >&2"
+        } else {
+            "sleep 30 & printf 123; printf 456 >&2"
+        };
+        let error = ctx
+            .exec_with_output_limit(command, 5)
+            .expect_err("combined stdout and stderr must share one limit");
+
+        assert!(error.to_string().contains("exceeds 5 byte limit"));
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert_eq!(ctx.stats().active_buffers, 0);
     }
 
     #[test]

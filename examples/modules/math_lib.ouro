@@ -3,7 +3,7 @@
 # A collection of pure mathematical procedures for reuse across programs.
 # All procedures in this module are PURE - they have no side effects.
 #
-# Import this module with: IMPORT "examples/modules/math_lib.ouro"
+# From a sibling module, import this file with: IMPORT "math_lib.ouro"
 
 # ════ Unary Operations ════
 

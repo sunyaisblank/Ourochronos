@@ -55,8 +55,8 @@ PROCEDURE stabilize {
     0 PROPHECY  # c0 -> addr 0
 }
 
-# Pure: Output the string using EMIT
-PROCEDURE print_hello PURE {
+# Reads present memory and performs character I/O
+PROCEDURE print_hello READS(0) READS(1) READS(2) READS(3) READS(4) IO {
     # Read from PRESENT memory and emit
     0 PRESENT EMIT
     1 PRESENT EMIT

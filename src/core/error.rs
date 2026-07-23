@@ -17,8 +17,8 @@
 //! 3. **Context-Rich**: Errors carry location and diagnostic information
 //! 4. **Lightweight**: Minimal overhead when not triggered
 
-use std::fmt;
 use super::address::Address;
+use std::fmt;
 
 /// Configuration for error handling behavior.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -154,7 +154,6 @@ pub enum OuroError {
     // ═══════════════════════════════════════════════════════════════════
     // Runtime Errors
     // ═══════════════════════════════════════════════════════════════════
-
     /// Stack underflow: attempted to pop from empty stack.
     StackUnderflow {
         operation: String,
@@ -211,11 +210,8 @@ pub enum OuroError {
     // ═══════════════════════════════════════════════════════════════════
     // Temporal Errors
     // ═══════════════════════════════════════════════════════════════════
-
     /// Explicit paradox triggered by PARADOX instruction.
-    ExplicitParadox {
-        location: SourceLocation,
-    },
+    ExplicitParadox { location: SourceLocation },
 
     /// Temporal consistency violation (fixed-point not achieved).
     TemporalInconsistency {
@@ -231,16 +227,14 @@ pub enum OuroError {
         epoch: usize,
     },
 
-    /// Divergence detected (state grows unboundedly).
+    /// Diagnostic monotone-growth trend detected on a finite prefix.
     Divergence {
         epoch: usize,
         diverging_cells: Vec<Address>,
     },
 
     /// Maximum epochs exceeded.
-    MaxEpochsExceeded {
-        max_epochs: usize,
-    },
+    MaxEpochsExceeded { max_epochs: usize },
 
     /// Negative causal loop detected (grandfather paradox).
     NegativeCausalLoop {
@@ -251,7 +245,6 @@ pub enum OuroError {
     // ═══════════════════════════════════════════════════════════════════
     // Parse Errors
     // ═══════════════════════════════════════════════════════════════════
-
     /// Unexpected token during parsing.
     UnexpectedToken {
         expected: String,
@@ -293,7 +286,6 @@ pub enum OuroError {
     // ═══════════════════════════════════════════════════════════════════
     // Type Errors
     // ═══════════════════════════════════════════════════════════════════
-
     /// Effect violation: procedure declared PURE but has side effects.
     EffectViolation {
         procedure: String,
@@ -327,7 +319,6 @@ pub enum OuroError {
     // ═══════════════════════════════════════════════════════════════════
     // Data Structure Errors
     // ═══════════════════════════════════════════════════════════════════
-
     /// Invalid data structure handle.
     InvalidHandle {
         handle_type: String,
@@ -352,15 +343,11 @@ pub enum OuroError {
     },
 
     /// Key not found in hash table.
-    KeyNotFound {
-        key: u64,
-        location: SourceLocation,
-    },
+    KeyNotFound { key: u64, location: SourceLocation },
 
     // ═══════════════════════════════════════════════════════════════════
     // FFI Errors
     // ═══════════════════════════════════════════════════════════════════
-
     /// FFI function not found.
     FFIFunctionNotFound {
         name: String,
@@ -404,7 +391,6 @@ pub enum OuroError {
     // ═══════════════════════════════════════════════════════════════════
     // I/O Errors
     // ═══════════════════════════════════════════════════════════════════
-
     /// File/network I/O error.
     IO {
         operation: String,
@@ -449,7 +435,6 @@ pub enum OuroError {
     // ═══════════════════════════════════════════════════════════════════
     // Internal Errors
     // ═══════════════════════════════════════════════════════════════════
-
     /// Internal error (should not occur in normal operation).
     Internal {
         message: String,
@@ -457,9 +442,7 @@ pub enum OuroError {
     },
 
     /// Configuration rejected at construction time.
-    InvalidConfiguration {
-        errors: Vec<String>,
-    },
+    InvalidConfiguration { errors: Vec<String> },
 }
 
 /// Memory operation type for error context.
@@ -494,12 +477,27 @@ impl fmt::Display for OuroError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             // Runtime Errors
-            OuroError::StackUnderflow { operation, required, available, location } => {
-                write!(f, "[{}] Stack underflow in {}: requires {} values, but only {} available",
-                       location, operation, required, available)
+            OuroError::StackUnderflow {
+                operation,
+                required,
+                available,
+                location,
+            } => {
+                write!(
+                    f,
+                    "[{}] Stack underflow in {}: requires {} values, but only {} available",
+                    location, operation, required, available
+                )
             }
-            OuroError::StackOverflow { max_depth, location } => {
-                write!(f, "[{}] Stack overflow: exceeded maximum depth of {}", location, max_depth)
+            OuroError::StackOverflow {
+                max_depth,
+                location,
+            } => {
+                write!(
+                    f,
+                    "[{}] Stack overflow: exceeded maximum depth of {}",
+                    location, max_depth
+                )
             }
             OuroError::DivisionByZero { dividend, location } => {
                 write!(f, "[{}] Division by zero: {} / 0", location, dividend)
@@ -507,15 +505,35 @@ impl fmt::Display for OuroError {
             OuroError::ModuloByZero { dividend, location } => {
                 write!(f, "[{}] Modulo by zero: {} % 0", location, dividend)
             }
-            OuroError::MemoryBoundsViolation { address, max_address, operation, location } => {
-                write!(f, "[{}] Memory bounds violation: {} at address {} (max: {})",
-                       location, operation, address, max_address)
+            OuroError::MemoryBoundsViolation {
+                address,
+                max_address,
+                operation,
+                location,
+            } => {
+                write!(
+                    f,
+                    "[{}] Memory bounds violation: {} at address {} (max: {})",
+                    location, operation, address, max_address
+                )
             }
             OuroError::InstructionLimitExceeded { limit, location } => {
-                write!(f, "[{}] Instruction limit exceeded: {} instructions", location, limit)
+                write!(
+                    f,
+                    "[{}] Instruction limit exceeded: {} instructions",
+                    location, limit
+                )
             }
-            OuroError::InvalidQuoteId { id, max_id, location } => {
-                write!(f, "[{}] Invalid quote ID: {} (valid range: 0..{})", location, id, max_id)
+            OuroError::InvalidQuoteId {
+                id,
+                max_id,
+                location,
+            } => {
+                write!(
+                    f,
+                    "[{}] Invalid quote ID: {} (valid range: 0..{})",
+                    location, id, max_id
+                )
             }
             OuroError::AssertionFailed { message, location } => {
                 write!(f, "[{}] Assertion failed: {}", location, message)
@@ -525,33 +543,76 @@ impl fmt::Display for OuroError {
             OuroError::ExplicitParadox { location } => {
                 write!(f, "[{}] Explicit paradox triggered", location)
             }
-            OuroError::TemporalInconsistency { epoch, differing_cells, message } => {
-                write!(f, "[epoch {}] Temporal inconsistency: {} (cells: {:?})",
-                       epoch, message, differing_cells)
+            OuroError::TemporalInconsistency {
+                epoch,
+                differing_cells,
+                message,
+            } => {
+                write!(
+                    f,
+                    "[epoch {}] Temporal inconsistency: {} (cells: {:?})",
+                    epoch, message, differing_cells
+                )
             }
-            OuroError::Oscillation { period, oscillating_cells, epoch } => {
-                write!(f, "[epoch {}] Oscillation detected with period {} at cells {:?}",
-                       epoch, period, oscillating_cells)
+            OuroError::Oscillation {
+                period,
+                oscillating_cells,
+                epoch,
+            } => {
+                write!(
+                    f,
+                    "[epoch {}] Oscillation detected with period {} at cells {:?}",
+                    epoch, period, oscillating_cells
+                )
             }
-            OuroError::Divergence { epoch, diverging_cells } => {
-                write!(f, "[epoch {}] Divergence detected at cells {:?}", epoch, diverging_cells)
+            OuroError::Divergence {
+                epoch,
+                diverging_cells,
+            } => {
+                write!(
+                    f,
+                    "[epoch {}] Divergence detected at cells {:?}",
+                    epoch, diverging_cells
+                )
             }
             OuroError::MaxEpochsExceeded { max_epochs } => {
                 write!(f, "Maximum epochs exceeded: {}", max_epochs)
             }
-            OuroError::NegativeCausalLoop { involved_addresses, epoch } => {
-                write!(f, "[epoch {}] Negative causal loop (grandfather paradox) at addresses {:?}",
-                       epoch, involved_addresses)
+            OuroError::NegativeCausalLoop {
+                involved_addresses,
+                epoch,
+            } => {
+                write!(
+                    f,
+                    "[epoch {}] Negative causal loop (grandfather paradox) at addresses {:?}",
+                    epoch, involved_addresses
+                )
             }
 
             // Parse Errors
-            OuroError::UnexpectedToken { expected, found, location } => {
-                write!(f, "[{}] Unexpected token: expected {}, found '{}'", location, expected, found)
+            OuroError::UnexpectedToken {
+                expected,
+                found,
+                location,
+            } => {
+                write!(
+                    f,
+                    "[{}] Unexpected token: expected {}, found '{}'",
+                    location, expected, found
+                )
             }
             OuroError::UnexpectedEof { context, location } => {
-                write!(f, "[{}] Unexpected end of input while parsing {}", location, context)
+                write!(
+                    f,
+                    "[{}] Unexpected end of input while parsing {}",
+                    location, context
+                )
             }
-            OuroError::UnknownKeyword { keyword, suggestions, location } => {
+            OuroError::UnknownKeyword {
+                keyword,
+                suggestions,
+                location,
+            } => {
                 let mut msg = format!("[{}] Unknown keyword: '{}'", location, keyword);
                 if !suggestions.is_empty() {
                     msg.push_str(&format!(". Did you mean: {}?", suggestions.join(", ")));
@@ -564,39 +625,89 @@ impl fmt::Display for OuroError {
             OuroError::InvalidNumber { text, location } => {
                 write!(f, "[{}] Invalid numeric literal: '{}'", location, text)
             }
-            OuroError::Unclosed { construct, opened_at } => {
+            OuroError::Unclosed {
+                construct,
+                opened_at,
+            } => {
                 write!(f, "[{}] Unclosed {}", opened_at, construct)
             }
 
             // Type Errors
-            OuroError::EffectViolation { procedure, declared_effect, actual_effect, location } => {
-                write!(f, "[{}] Effect violation in '{}': declared {} but performs {}",
-                       location, procedure, declared_effect, actual_effect)
+            OuroError::EffectViolation {
+                procedure,
+                declared_effect,
+                actual_effect,
+                location,
+            } => {
+                write!(
+                    f,
+                    "[{}] Effect violation in '{}': declared {} but performs {}",
+                    location, procedure, declared_effect, actual_effect
+                )
             }
             OuroError::TemporalTaintViolation { message, location } => {
                 write!(f, "[{}] Temporal taint violation: {}", location, message)
             }
-            OuroError::StackEffectMismatch { expected_inputs, expected_outputs,
-                                              actual_inputs, actual_outputs, location } => {
-                write!(f, "[{}] Stack effect mismatch: expected ({} -- {}) but got ({} -- {})",
-                       location, expected_inputs, expected_outputs, actual_inputs, actual_outputs)
+            OuroError::StackEffectMismatch {
+                expected_inputs,
+                expected_outputs,
+                actual_inputs,
+                actual_outputs,
+                location,
+            } => {
+                write!(
+                    f,
+                    "[{}] Stack effect mismatch: expected ({} -- {}) but got ({} -- {})",
+                    location, expected_inputs, expected_outputs, actual_inputs, actual_outputs
+                )
             }
-            OuroError::LinearViolation { message, value_description, location } => {
-                write!(f, "[{}] Linear type violation: {} (value: {})",
-                       location, message, value_description)
+            OuroError::LinearViolation {
+                message,
+                value_description,
+                location,
+            } => {
+                write!(
+                    f,
+                    "[{}] Linear type violation: {} (value: {})",
+                    location, message, value_description
+                )
             }
 
             // Data Structure Errors
-            OuroError::InvalidHandle { handle_type, handle, max_handle, location } => {
-                write!(f, "[{}] Invalid {} handle: {} (valid range: 0..{})",
-                       location, handle_type, handle, max_handle)
+            OuroError::InvalidHandle {
+                handle_type,
+                handle,
+                max_handle,
+                location,
+            } => {
+                write!(
+                    f,
+                    "[{}] Invalid {} handle: {} (valid range: 0..{})",
+                    location, handle_type, handle, max_handle
+                )
             }
-            OuroError::EmptyStructure { structure_type, operation, location } => {
-                write!(f, "[{}] Cannot {} empty {}", location, operation, structure_type)
+            OuroError::EmptyStructure {
+                structure_type,
+                operation,
+                location,
+            } => {
+                write!(
+                    f,
+                    "[{}] Cannot {} empty {}",
+                    location, operation, structure_type
+                )
             }
-            OuroError::IndexOutOfBounds { structure_type, index, length, location } => {
-                write!(f, "[{}] {} index out of bounds: {} (length: {})",
-                       location, structure_type, index, length)
+            OuroError::IndexOutOfBounds {
+                structure_type,
+                index,
+                length,
+                location,
+            } => {
+                write!(
+                    f,
+                    "[{}] {} index out of bounds: {} (length: {})",
+                    location, structure_type, index, length
+                )
             }
             OuroError::KeyNotFound { key, location } => {
                 write!(f, "[{}] Key not found: {}", location, key)
@@ -606,30 +717,66 @@ impl fmt::Display for OuroError {
             OuroError::FFIFunctionNotFound { name, location } => {
                 write!(f, "[{}] FFI function not found: '{}'", location, name)
             }
-            OuroError::FFIArgumentMismatch { function, expected, got, location } => {
-                write!(f, "[{}] FFI argument mismatch in '{}': expected {} arguments, got {}",
-                       location, function, expected, got)
+            OuroError::FFIArgumentMismatch {
+                function,
+                expected,
+                got,
+                location,
+            } => {
+                write!(
+                    f,
+                    "[{}] FFI argument mismatch in '{}': expected {} arguments, got {}",
+                    location, function, expected, got
+                )
             }
-            OuroError::FFITypeConversion { expected, got, location } => {
-                write!(f, "[{}] FFI type conversion failed: expected {}, got {}",
-                       location, expected, got)
+            OuroError::FFITypeConversion {
+                expected,
+                got,
+                location,
+            } => {
+                write!(
+                    f,
+                    "[{}] FFI type conversion failed: expected {}, got {}",
+                    location, expected, got
+                )
             }
             OuroError::FFILibraryNotLoaded { library, location } => {
                 write!(f, "[{}] FFI library not loaded: '{}'", location, library)
             }
-            OuroError::FFICallFailed { function, message, location } => {
-                write!(f, "[{}] FFI call to '{}' failed: {}", location, function, message)
+            OuroError::FFICallFailed {
+                function,
+                message,
+                location,
+            } => {
+                write!(
+                    f,
+                    "[{}] FFI call to '{}' failed: {}",
+                    location, function, message
+                )
             }
             OuroError::FFI { message, location } => {
                 write!(f, "[{}] FFI error: {}", location, message)
             }
 
             // I/O Errors
-            OuroError::IO { operation, path, message, location } => {
+            OuroError::IO {
+                operation,
+                path,
+                message,
+                location,
+            } => {
                 if let Some(p) = path {
-                    write!(f, "[{}] I/O error during {} on '{}': {}", location, operation, p, message)
+                    write!(
+                        f,
+                        "[{}] I/O error during {} on '{}': {}",
+                        location, operation, p, message
+                    )
                 } else {
-                    write!(f, "[{}] I/O error during {}: {}", location, operation, message)
+                    write!(
+                        f,
+                        "[{}] I/O error during {}: {}",
+                        location, operation, message
+                    )
                 }
             }
             OuroError::InvalidFileHandle { handle, location } => {
@@ -641,11 +788,28 @@ impl fmt::Display for OuroError {
             OuroError::InvalidBufferHandle { handle, location } => {
                 write!(f, "[{}] Invalid buffer handle: {}", location, handle)
             }
-            OuroError::ConnectionFailed { host, port, message, location } => {
-                write!(f, "[{}] Connection to {}:{} failed: {}", location, host, port, message)
+            OuroError::ConnectionFailed {
+                host,
+                port,
+                message,
+                location,
+            } => {
+                write!(
+                    f,
+                    "[{}] Connection to {}:{} failed: {}",
+                    location, host, port, message
+                )
             }
-            OuroError::Timeout { operation, timeout_ms, location } => {
-                write!(f, "[{}] Operation '{}' timed out after {}ms", location, operation, timeout_ms)
+            OuroError::Timeout {
+                operation,
+                timeout_ms,
+                location,
+            } => {
+                write!(
+                    f,
+                    "[{}] Operation '{}' timed out after {}ms",
+                    location, operation, timeout_ms
+                )
             }
 
             // Internal Errors
@@ -684,7 +848,12 @@ impl OuroError {
 
     /// Create an InvalidHandle error with specific location.
     #[inline]
-    pub fn invalid_handle_at(handle_type: &str, handle: u64, max_handle: u64, location: SourceLocation) -> Self {
+    pub fn invalid_handle_at(
+        handle_type: &str,
+        handle: u64,
+        max_handle: u64,
+        location: SourceLocation,
+    ) -> Self {
         OuroError::InvalidHandle {
             handle_type: handle_type.to_string(),
             handle,
@@ -706,7 +875,12 @@ impl OuroError {
 
     /// Create a StackUnderflow error with specific location.
     #[inline]
-    pub fn stack_underflow_at(operation: &str, required: usize, available: usize, location: SourceLocation) -> Self {
+    pub fn stack_underflow_at(
+        operation: &str,
+        required: usize,
+        available: usize,
+        location: SourceLocation,
+    ) -> Self {
         OuroError::StackUnderflow {
             operation: operation.to_string(),
             required,
@@ -728,7 +902,12 @@ impl OuroError {
 
     /// Create an IndexOutOfBounds error with specific location.
     #[inline]
-    pub fn index_out_of_bounds_at(structure_type: &str, index: u64, length: u64, location: SourceLocation) -> Self {
+    pub fn index_out_of_bounds_at(
+        structure_type: &str,
+        index: u64,
+        length: u64,
+        location: SourceLocation,
+    ) -> Self {
         OuroError::IndexOutOfBounds {
             structure_type: structure_type.to_string(),
             index,
@@ -749,7 +928,11 @@ impl OuroError {
 
     /// Create an EmptyStructure error with specific location.
     #[inline]
-    pub fn empty_structure_at(structure_type: &str, operation: &str, location: SourceLocation) -> Self {
+    pub fn empty_structure_at(
+        structure_type: &str,
+        operation: &str,
+        location: SourceLocation,
+    ) -> Self {
         OuroError::EmptyStructure {
             structure_type: structure_type.to_string(),
             operation: operation.to_string(),
@@ -759,66 +942,68 @@ impl OuroError {
 
     /// Check if this error is recoverable.
     pub fn is_recoverable(&self) -> bool {
-        matches!(self,
-            OuroError::DivisionByZero { .. } |
-            OuroError::ModuloByZero { .. } |
-            OuroError::StackUnderflow { .. } |
-            OuroError::MemoryBoundsViolation { .. }
+        matches!(
+            self,
+            OuroError::DivisionByZero { .. }
+                | OuroError::ModuloByZero { .. }
+                | OuroError::StackUnderflow { .. }
+                | OuroError::MemoryBoundsViolation { .. }
         )
     }
 
     /// Get the error category.
     pub fn category(&self) -> ErrorCategory {
         match self {
-            OuroError::StackUnderflow { .. } |
-            OuroError::StackOverflow { .. } |
-            OuroError::DivisionByZero { .. } |
-            OuroError::ModuloByZero { .. } |
-            OuroError::MemoryBoundsViolation { .. } |
-            OuroError::InstructionLimitExceeded { .. } |
-            OuroError::InvalidQuoteId { .. } |
-            OuroError::AssertionFailed { .. } => ErrorCategory::Runtime,
+            OuroError::StackUnderflow { .. }
+            | OuroError::StackOverflow { .. }
+            | OuroError::DivisionByZero { .. }
+            | OuroError::ModuloByZero { .. }
+            | OuroError::MemoryBoundsViolation { .. }
+            | OuroError::InstructionLimitExceeded { .. }
+            | OuroError::InvalidQuoteId { .. }
+            | OuroError::AssertionFailed { .. } => ErrorCategory::Runtime,
 
-            OuroError::ExplicitParadox { .. } |
-            OuroError::TemporalInconsistency { .. } |
-            OuroError::Oscillation { .. } |
-            OuroError::Divergence { .. } |
-            OuroError::MaxEpochsExceeded { .. } |
-            OuroError::NegativeCausalLoop { .. } => ErrorCategory::Temporal,
+            OuroError::ExplicitParadox { .. }
+            | OuroError::TemporalInconsistency { .. }
+            | OuroError::Oscillation { .. }
+            | OuroError::Divergence { .. }
+            | OuroError::MaxEpochsExceeded { .. }
+            | OuroError::NegativeCausalLoop { .. } => ErrorCategory::Temporal,
 
-            OuroError::UnexpectedToken { .. } |
-            OuroError::UnexpectedEof { .. } |
-            OuroError::UnknownKeyword { .. } |
-            OuroError::UndefinedProcedure { .. } |
-            OuroError::InvalidNumber { .. } |
-            OuroError::Unclosed { .. } => ErrorCategory::Parse,
+            OuroError::UnexpectedToken { .. }
+            | OuroError::UnexpectedEof { .. }
+            | OuroError::UnknownKeyword { .. }
+            | OuroError::UndefinedProcedure { .. }
+            | OuroError::InvalidNumber { .. }
+            | OuroError::Unclosed { .. } => ErrorCategory::Parse,
 
-            OuroError::EffectViolation { .. } |
-            OuroError::TemporalTaintViolation { .. } |
-            OuroError::StackEffectMismatch { .. } |
-            OuroError::LinearViolation { .. } => ErrorCategory::Type,
+            OuroError::EffectViolation { .. }
+            | OuroError::TemporalTaintViolation { .. }
+            | OuroError::StackEffectMismatch { .. }
+            | OuroError::LinearViolation { .. } => ErrorCategory::Type,
 
-            OuroError::InvalidHandle { .. } |
-            OuroError::EmptyStructure { .. } |
-            OuroError::IndexOutOfBounds { .. } |
-            OuroError::KeyNotFound { .. } => ErrorCategory::Runtime,
+            OuroError::InvalidHandle { .. }
+            | OuroError::EmptyStructure { .. }
+            | OuroError::IndexOutOfBounds { .. }
+            | OuroError::KeyNotFound { .. } => ErrorCategory::Runtime,
 
-            OuroError::FFIFunctionNotFound { .. } |
-            OuroError::FFIArgumentMismatch { .. } |
-            OuroError::FFITypeConversion { .. } |
-            OuroError::FFILibraryNotLoaded { .. } |
-            OuroError::FFICallFailed { .. } |
-            OuroError::FFI { .. } => ErrorCategory::FFI,
+            OuroError::FFIFunctionNotFound { .. }
+            | OuroError::FFIArgumentMismatch { .. }
+            | OuroError::FFITypeConversion { .. }
+            | OuroError::FFILibraryNotLoaded { .. }
+            | OuroError::FFICallFailed { .. }
+            | OuroError::FFI { .. } => ErrorCategory::FFI,
 
-            OuroError::IO { .. } |
-            OuroError::InvalidFileHandle { .. } |
-            OuroError::InvalidSocketHandle { .. } |
-            OuroError::InvalidBufferHandle { .. } |
-            OuroError::ConnectionFailed { .. } |
-            OuroError::Timeout { .. } => ErrorCategory::IO,
+            OuroError::IO { .. }
+            | OuroError::InvalidFileHandle { .. }
+            | OuroError::InvalidSocketHandle { .. }
+            | OuroError::InvalidBufferHandle { .. }
+            | OuroError::ConnectionFailed { .. }
+            | OuroError::Timeout { .. } => ErrorCategory::IO,
 
-            OuroError::Internal { .. } |
-            OuroError::InvalidConfiguration { .. } => ErrorCategory::Internal,
+            OuroError::Internal { .. } | OuroError::InvalidConfiguration { .. } => {
+                ErrorCategory::Internal
+            }
         }
     }
 
@@ -888,41 +1073,44 @@ impl OuroError {
     /// Get the source location if available.
     pub fn location(&self) -> Option<&SourceLocation> {
         match self {
-            OuroError::StackUnderflow { location, .. } |
-            OuroError::StackOverflow { location, .. } |
-            OuroError::DivisionByZero { location, .. } |
-            OuroError::ModuloByZero { location, .. } |
-            OuroError::MemoryBoundsViolation { location, .. } |
-            OuroError::InstructionLimitExceeded { location, .. } |
-            OuroError::InvalidQuoteId { location, .. } |
-            OuroError::AssertionFailed { location, .. } |
-            OuroError::ExplicitParadox { location, .. } |
-            OuroError::UnexpectedToken { location, .. } |
-            OuroError::UnexpectedEof { location, .. } |
-            OuroError::UnknownKeyword { location, .. } |
-            OuroError::UndefinedProcedure { location, .. } |
-            OuroError::InvalidNumber { location, .. } |
-            OuroError::Unclosed { opened_at: location, .. } |
-            OuroError::EffectViolation { location, .. } |
-            OuroError::TemporalTaintViolation { location, .. } |
-            OuroError::StackEffectMismatch { location, .. } |
-            OuroError::LinearViolation { location, .. } |
-            OuroError::InvalidHandle { location, .. } |
-            OuroError::EmptyStructure { location, .. } |
-            OuroError::IndexOutOfBounds { location, .. } |
-            OuroError::KeyNotFound { location, .. } |
-            OuroError::FFIFunctionNotFound { location, .. } |
-            OuroError::FFIArgumentMismatch { location, .. } |
-            OuroError::FFITypeConversion { location, .. } |
-            OuroError::FFILibraryNotLoaded { location, .. } |
-            OuroError::FFICallFailed { location, .. } |
-            OuroError::FFI { location, .. } |
-            OuroError::IO { location, .. } |
-            OuroError::InvalidFileHandle { location, .. } |
-            OuroError::InvalidSocketHandle { location, .. } |
-            OuroError::InvalidBufferHandle { location, .. } |
-            OuroError::ConnectionFailed { location, .. } |
-            OuroError::Timeout { location, .. } => Some(location),
+            OuroError::StackUnderflow { location, .. }
+            | OuroError::StackOverflow { location, .. }
+            | OuroError::DivisionByZero { location, .. }
+            | OuroError::ModuloByZero { location, .. }
+            | OuroError::MemoryBoundsViolation { location, .. }
+            | OuroError::InstructionLimitExceeded { location, .. }
+            | OuroError::InvalidQuoteId { location, .. }
+            | OuroError::AssertionFailed { location, .. }
+            | OuroError::ExplicitParadox { location, .. }
+            | OuroError::UnexpectedToken { location, .. }
+            | OuroError::UnexpectedEof { location, .. }
+            | OuroError::UnknownKeyword { location, .. }
+            | OuroError::UndefinedProcedure { location, .. }
+            | OuroError::InvalidNumber { location, .. }
+            | OuroError::Unclosed {
+                opened_at: location,
+                ..
+            }
+            | OuroError::EffectViolation { location, .. }
+            | OuroError::TemporalTaintViolation { location, .. }
+            | OuroError::StackEffectMismatch { location, .. }
+            | OuroError::LinearViolation { location, .. }
+            | OuroError::InvalidHandle { location, .. }
+            | OuroError::EmptyStructure { location, .. }
+            | OuroError::IndexOutOfBounds { location, .. }
+            | OuroError::KeyNotFound { location, .. }
+            | OuroError::FFIFunctionNotFound { location, .. }
+            | OuroError::FFIArgumentMismatch { location, .. }
+            | OuroError::FFITypeConversion { location, .. }
+            | OuroError::FFILibraryNotLoaded { location, .. }
+            | OuroError::FFICallFailed { location, .. }
+            | OuroError::FFI { location, .. }
+            | OuroError::IO { location, .. }
+            | OuroError::InvalidFileHandle { location, .. }
+            | OuroError::InvalidSocketHandle { location, .. }
+            | OuroError::InvalidBufferHandle { location, .. }
+            | OuroError::ConnectionFailed { location, .. }
+            | OuroError::Timeout { location, .. } => Some(location),
 
             OuroError::Internal { location, .. } => location.as_ref(),
 
@@ -1055,7 +1243,10 @@ mod tests {
         assert_eq!(strict.division_by_zero, DivisionByZeroPolicy::Error);
 
         let permissive = ErrorConfig::permissive();
-        assert_eq!(permissive.division_by_zero, DivisionByZeroPolicy::ReturnZero);
+        assert_eq!(
+            permissive.division_by_zero,
+            DivisionByZeroPolicy::ReturnZero
+        );
     }
 
     #[test]

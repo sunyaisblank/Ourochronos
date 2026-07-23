@@ -1,0 +1,54 @@
+# Turing-completeness witness: a two-counter Minsky machine
+#
+# A two-counter machine with INC and DECJZ instructions is a universal model
+# of computation. Ourochronos vectors represent counters in unary: VEC_PUSH
+# increments and VEC_POP decrements. In the idealized semantics vectors and
+# execution time are unbounded. The concrete Rust process is, inevitably,
+# limited by host memory and --max-inst.
+#
+# This machine transfers three tokens from counter 0 to counter 1:
+#
+#   0: DECJZ c0, halt=2, nonzero=1
+#   1: INC   c1, next=0
+#   2: HALT  (output c1)
+#
+# Cells 0 and 1 hold epoch-local vector handles, cell 2 is the program
+# counter, and cell 3 is the running flag. Handles in present memory are safe
+# here because this non-temporal program executes exactly one epoch.
+
+VEC_NEW 0 PROPHECY
+VEC_NEW 1 PROPHECY
+
+# Counter 0 := 3; counter 1 := 0.
+0 PRESENT 1 VEC_PUSH POP
+0 PRESENT 1 VEC_PUSH POP
+0 PRESENT 1 VEC_PUSH POP
+
+0 2 PROPHECY
+1 3 PROPHECY
+
+WHILE { 3 PRESENT } {
+    2 PRESENT 0 EQ IF {
+        # 0: DECJZ c0, 2, 1
+        0 PRESENT VEC_LEN SWAP POP 0 EQ IF {
+            2 2 PROPHECY
+        } ELSE {
+            0 PRESENT VEC_POP POP POP
+            1 2 PROPHECY
+        }
+    } ELSE {
+        2 PRESENT 1 EQ IF {
+            # 1: INC c1, 0
+            1 PRESENT 1 VEC_PUSH POP
+            0 2 PROPHECY
+        } ELSE {
+            # 2: HALT and expose the result.
+            1 PRESENT VEC_LEN SWAP POP
+            DUP OUTPUT
+            3 EQ ASSERT "two-counter machine transferred all three tokens"
+            0 3 PROPHECY
+        }
+    }
+}
+
+# Expected output: [3]

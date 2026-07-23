@@ -79,6 +79,23 @@ mod stack_operations {
     }
 }
 
+#[test]
+fn two_counter_machine_witness_executes() {
+    let source = include_str!("../../examples/turing_complete.ouro");
+    let result = run(source);
+
+    match result {
+        ConvergenceStatus::Consistent { output, .. } => {
+            assert_eq!(output.len(), 1);
+            match &output[0] {
+                OutputItem::Val(value) => assert_eq!(value.val, 3),
+                other => panic!("Expected numeric Minsky-machine output, got {:?}", other),
+            }
+        }
+        other => panic!("Two-counter machine failed: {:?}", other),
+    }
+}
+
 // =============================================================================
 // Arithmetic Operation Tests
 // =============================================================================
@@ -383,9 +400,16 @@ mod output {
         let result = run("1 OUTPUT 2 OUTPUT 3 OUTPUT 0 0 PROPHECY");
         let output = extract_output(&result);
         assert_eq!(output.len(), 3);
-        let values: Vec<u64> = output.iter().filter_map(|o| {
-            if let ourochronos::OutputItem::Val(v) = o { Some(v.val) } else { None }
-        }).collect();
+        let values: Vec<u64> = output
+            .iter()
+            .filter_map(|o| {
+                if let ourochronos::OutputItem::Val(v) = o {
+                    Some(v.val)
+                } else {
+                    None
+                }
+            })
+            .collect();
         assert_eq!(values, vec![1, 2, 3]);
     }
 
@@ -412,8 +436,7 @@ mod invariants {
         // Should either handle gracefully or error, but not panic
         assert!(matches!(
             result,
-            ConvergenceStatus::Consistent { .. }
-            | ConvergenceStatus::Error { .. }
+            ConvergenceStatus::Consistent { .. } | ConvergenceStatus::Error { .. }
         ));
     }
 
@@ -434,10 +457,7 @@ mod invariants {
         let mem1 = extract_memory(&result1);
         let mem2 = extract_memory(&result2);
 
-        assert_eq!(
-            mem1.read(0).val,
-            mem2.read(0).val
-        );
+        assert_eq!(mem1.read(0).val, mem2.read(0).val);
     }
 
     #[test]
@@ -449,9 +469,6 @@ mod invariants {
         let mem1 = extract_memory(&result1);
         let mem2 = extract_memory(&result2);
 
-        assert_eq!(
-            mem1.read(0).val,
-            mem2.read(0).val
-        );
+        assert_eq!(mem1.read(0).val, mem2.read(0).val);
     }
 }

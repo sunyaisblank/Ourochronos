@@ -13,7 +13,7 @@
 # ════ Procedures ════
 
 # Print a labeled test result
-PROCEDURE print_test PURE {
+PROCEDURE print_test IO {
     # Stack: label result --
     SWAP OUTPUT ": " OUTPUT OUTPUT NEWLINE
 }

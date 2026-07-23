@@ -3,17 +3,16 @@
 //! Handles stack manipulation keywords: NOP, HALT, POP, DUP, SWAP, OVER,
 //! ROT, DEPTH, PICK, ROLL, REVERSE, EXEC, DIP, KEEP, BI, REC.
 
-use crate::ast::{OpCode, Stmt};
 use super::domain::{DomainParser, ParseContext};
+use crate::ast::{OpCode, Stmt};
 
 /// Parser for stack manipulation operations.
 pub struct StackOpsParser;
 
 impl StackOpsParser {
     pub const KEYWORDS: &'static [&'static str] = &[
-        "NOP", "HALT", "POP", "DROP", "DUP", "SWAP", "OVER", "ROT",
-        "DEPTH", "PICK", "PEEK", "ROLL", "REVERSE", "REV",
-        "EXEC", "CALL", "DIP", "KEEP", "BI", "CLEAVE", "REC",
+        "NOP", "HALT", "POP", "DROP", "DUP", "SWAP", "OVER", "ROT", "DEPTH", "PICK", "PEEK",
+        "ROLL", "REVERSE", "REV", "EXEC", "CALL", "DIP", "KEEP", "BI", "CLEAVE", "REC",
     ];
 }
 
@@ -22,7 +21,7 @@ impl DomainParser for StackOpsParser {
         Self::KEYWORDS
     }
 
-    fn parse<'a>(&self, keyword: &str, ctx: &mut ParseContext<'a>) -> Result<Stmt, String> {
+    fn parse(&self, keyword: &str, ctx: &mut ParseContext<'_>) -> Result<Stmt, String> {
         match keyword {
             "NOP" => ctx.emit_op(OpCode::Nop),
             "HALT" => ctx.emit_op(OpCode::Halt),

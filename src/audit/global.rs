@@ -1,17 +1,20 @@
 //! Global audit logger singleton.
 
+use super::entry::{AuditEntry, Outcome, Severity};
+use super::logger::{AuditConfig, AuditLogger};
 use std::sync::OnceLock;
-use super::entry::{AuditEntry, Severity, Outcome};
-use super::logger::{AuditLogger, AuditConfig};
 
 static GLOBAL_LOGGER: OnceLock<AuditLogger> = OnceLock::new();
 
 /// Initialize the global audit logger.
 pub fn init_global_logger(config: AuditConfig) -> std::io::Result<()> {
     let logger = AuditLogger::new(config)?;
-    GLOBAL_LOGGER
-        .set(logger)
-        .map_err(|_| std::io::Error::new(std::io::ErrorKind::AlreadyExists, "Logger already initialized"))
+    GLOBAL_LOGGER.set(logger).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "Logger already initialized",
+        )
+    })
 }
 
 /// Initialize a stdout-only global logger (for CLI use).

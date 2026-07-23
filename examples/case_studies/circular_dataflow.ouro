@@ -1,0 +1,18 @@
+# Prophetic/circular data-flow programming.
+#
+# The two equations are evaluated simultaneously over two-bit words:
+#   x = y + 1 (mod 4)
+#   y = 2*x   (mod 4)
+# Their unique solution is x=3, y=2. Neither assignment must be ordered before
+# the other; the global solver resolves the cycle and the VM replays it.
+
+PROPERTY x_is_three { ALL_FIXED CELL 0 EQ 3; }
+PROPERTY y_is_two { ALL_FIXED CELL 1 EQ 2; }
+
+TEMPORAL 0 2 BITS 2 {
+    1 ORACLE 1 ADD 3 AND 0 PROPHECY
+    0 ORACLE 2 MUL 3 AND 1 PROPHECY
+
+    0 PRESENT OUTPUT
+    1 PRESENT OUTPUT
+}

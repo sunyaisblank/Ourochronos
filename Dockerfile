@@ -4,9 +4,22 @@
 # =============================================================================
 # Build Stage
 # =============================================================================
-FROM rust:1.75-bookworm AS builder
+# Cargo.lock uses the stabilized v4 format, which requires Cargo 1.83 or
+# newer. Pin a current-enough toolchain instead of silently rewriting the
+# repository lockfile inside the image build.
+FROM rust:1.85-bookworm AS builder
 
 WORKDIR /build
+
+# z3-sys links the system solver and runs bindgen during compilation. Declare
+# both native dependencies instead of relying on whatever happens to be in the
+# Rust builder image.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        clang \
+        libclang-dev \
+        libz3-dev \
+    && rm -rf /var/lib/apt/lists/*
 
 # Copy manifests first for better caching
 COPY Cargo.toml Cargo.lock ./
@@ -17,14 +30,15 @@ RUN mkdir src && \
     echo "pub fn dummy() {}" > src/lib.rs
 
 # Build dependencies (cached layer)
-RUN cargo build --release && \
-    rm -rf src target/release/deps/ourochronos*
+RUN cargo build --release --locked && \
+    cargo clean --release --package ourochronos && \
+    rm -rf src
 
 # Copy actual source code
 COPY src ./src
 
 # Build the application
-RUN cargo build --release
+RUN cargo build --release --locked
 
 # =============================================================================
 # Runtime Stage
@@ -35,6 +49,7 @@ FROM debian:bookworm-slim AS runtime
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         ca-certificates \
+        libz3-4 \
         libssl3 \
     && rm -rf /var/lib/apt/lists/*
 
@@ -64,4 +79,4 @@ CMD ["--help"]
 LABEL org.opencontainers.image.title="Ourochronos"
 LABEL org.opencontainers.image.description="Closed Timelike Curve Programming Language"
 LABEL org.opencontainers.image.vendor="OUROCHRONOS Project"
-LABEL org.opencontainers.image.source="https://github.com/ourochronos/ourochronos"
+LABEL org.opencontainers.image.source="https://github.com/sunyaisblank/Ourochronos"

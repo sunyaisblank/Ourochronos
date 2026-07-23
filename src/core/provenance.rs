@@ -7,8 +7,8 @@
 //! - Paradox diagnosis via dependency analysis
 
 use std::collections::BTreeSet;
-use std::sync::Arc;
 use std::fmt;
+use std::sync::Arc;
 
 use super::address::Address;
 use super::address::MEMORY_SIZE;
@@ -22,6 +22,7 @@ use std::cell::Cell;
 
 thread_local! {
     static SATURATION_LIMIT: Cell<usize> = const { Cell::new(DEFAULT_PROVENANCE_SATURATION_LIMIT) };
+    static ADDRESS_SPACE_SIZE: Cell<usize> = const { Cell::new(MEMORY_SIZE) };
 }
 
 /// Set the provenance saturation limit for the current thread.
@@ -33,6 +34,17 @@ pub fn set_saturation_limit(limit: usize) {
 /// Get the current provenance saturation limit.
 pub fn saturation_limit() -> usize {
     SATURATION_LIMIT.with(|cell| cell.get())
+}
+
+/// Set the temporal address-space width used to interpret saturated
+/// provenance (the lattice top) for the current run.
+pub fn set_address_space_size(memory_cells: usize) {
+    ADDRESS_SPACE_SIZE.with(|cell| cell.set(memory_cells));
+}
+
+/// Current run's temporal address-space width.
+pub fn address_space_size() -> usize {
+    ADDRESS_SPACE_SIZE.with(|cell| cell.get())
 }
 
 /// Provenance tracks which anamnesis cells a value depends on.
@@ -65,7 +77,9 @@ impl fmt::Debug for Provenance {
             Some(set) => {
                 write!(f, "Oracle{{")?;
                 for (i, addr) in set.iter().enumerate() {
-                    if i > 0 { write!(f, ",")?; }
+                    if i > 0 {
+                        write!(f, ",")?;
+                    }
                     write!(f, "{}", addr)?;
                 }
                 write!(f, "}}")
@@ -77,19 +91,28 @@ impl fmt::Debug for Provenance {
 impl Provenance {
     /// Create provenance with no temporal dependency (⊥).
     pub const fn none() -> Self {
-        Self { deps: None, saturated: false }
+        Self {
+            deps: None,
+            saturated: false,
+        }
     }
 
     /// Create a saturated provenance (depends on all addresses, ⊤).
     pub const fn saturated() -> Self {
-        Self { deps: None, saturated: true }
+        Self {
+            deps: None,
+            saturated: true,
+        }
     }
 
     /// Create provenance depending on a single anamnesis cell.
     pub fn single(addr: Address) -> Self {
         let mut set = BTreeSet::new();
         set.insert(addr);
-        Self { deps: Some(Arc::new(set)), saturated: false }
+        Self {
+            deps: Some(Arc::new(set)),
+            saturated: false,
+        }
     }
 
     /// Create provenance depending on multiple anamnesis cells.
@@ -100,7 +123,10 @@ impl Provenance {
         } else if addrs.len() > saturation_limit() {
             Self::saturated()
         } else {
-            Self { deps: Some(Arc::new(addrs)), saturated: false }
+            Self {
+                deps: Some(Arc::new(addrs)),
+                saturated: false,
+            }
         }
     }
 
@@ -138,18 +164,30 @@ impl Provenance {
 
         match (&self.deps, &other.deps) {
             (None, None) => Self::NONE,
-            (Some(d), None) | (None, Some(d)) => Self { deps: Some(d.clone()), saturated: false },
+            (Some(d), None) | (None, Some(d)) => Self {
+                deps: Some(d.clone()),
+                saturated: false,
+            },
             (Some(d1), Some(d2)) => {
                 // Same Arc, no need to clone
                 if Arc::ptr_eq(d1, d2) {
-                    return Self { deps: Some(d1.clone()), saturated: false };
+                    return Self {
+                        deps: Some(d1.clone()),
+                        saturated: false,
+                    };
                 }
                 // Reuse larger set if smaller is a subset (avoids allocation)
                 if d1.len() >= d2.len() && d2.iter().all(|x| d1.contains(x)) {
-                    return Self { deps: Some(d1.clone()), saturated: false };
+                    return Self {
+                        deps: Some(d1.clone()),
+                        saturated: false,
+                    };
                 }
                 if d2.len() > d1.len() && d1.iter().all(|x| d2.contains(x)) {
-                    return Self { deps: Some(d2.clone()), saturated: false };
+                    return Self {
+                        deps: Some(d2.clone()),
+                        saturated: false,
+                    };
                 }
                 // Must create new set
                 let mut new_set = (**d1).clone();
@@ -158,14 +196,20 @@ impl Provenance {
                 if new_set.len() > saturation_limit() {
                     return Self::saturated();
                 }
-                Self { deps: Some(Arc::new(new_set)), saturated: false }
+                Self {
+                    deps: Some(Arc::new(new_set)),
+                    saturated: false,
+                }
             }
         }
     }
 
     /// Static constant for the pure (no dependency) provenance.
     /// Used to avoid allocation in the fast path.
-    pub const NONE: Self = Self { deps: None, saturated: false };
+    pub const NONE: Self = Self {
+        deps: None,
+        saturated: false,
+    };
 
     /// Check if this value has any temporal dependency.
     pub fn is_temporal(&self) -> bool {
@@ -189,20 +233,20 @@ impl Provenance {
     }
 
     /// Get the set of addresses this value depends on.
-    /// For saturated provenances, yields all addresses 0..MEMORY_SIZE.
+    /// For saturated provenances, yields every address in the configured run.
     pub fn dependencies(&self) -> Box<dyn Iterator<Item = Address> + '_> {
         if self.saturated {
-            Box::new(0..MEMORY_SIZE as Address)
+            Box::new(0..address_space_size() as Address)
         } else {
             Box::new(self.deps.iter().flat_map(|set| set.iter().copied()))
         }
     }
 
     /// Count the number of dependencies.
-    /// Returns MEMORY_SIZE for saturated provenances.
+    /// Returns the configured memory width for saturated provenances.
     pub fn dependency_count(&self) -> usize {
         if self.saturated {
-            MEMORY_SIZE
+            address_space_size()
         } else {
             self.deps.as_ref().map(|s| s.len()).unwrap_or(0)
         }
@@ -427,7 +471,10 @@ mod tests {
         let p_pure = Provenance::none();
 
         let result = p_temporal.merge_algebraic(&p_pure, AlgebraicOp::Mod, 10, 1);
-        assert!(result.is_pure(), "X % 1 should be pure (result is always 0)");
+        assert!(
+            result.is_pure(),
+            "X % 1 should be pure (result is always 0)"
+        );
     }
 
     #[test]
@@ -636,8 +683,14 @@ mod tests {
         for i in 0..(DEFAULT_PROVENANCE_SATURATION_LIMIT + 50) {
             accumulated = accumulated.merge(&Provenance::single(i as Address));
         }
-        assert!(accumulated.is_saturated(), "Should be saturated after exceeding limit");
-        assert!(accumulated.is_temporal(), "Saturated provenance is temporal");
+        assert!(
+            accumulated.is_saturated(),
+            "Should be saturated after exceeding limit"
+        );
+        assert!(
+            accumulated.is_temporal(),
+            "Saturated provenance is temporal"
+        );
         assert_eq!(accumulated.dependency_count(), MEMORY_SIZE);
     }
 
@@ -646,10 +699,16 @@ mod tests {
         let saturated = Provenance::saturated();
         let small = Provenance::single(42);
         let merged = saturated.merge(&small);
-        assert!(merged.is_saturated(), "Saturated merged with any set yields Saturated");
+        assert!(
+            merged.is_saturated(),
+            "Saturated merged with any set yields Saturated"
+        );
 
         let merged2 = small.merge(&saturated);
-        assert!(merged2.is_saturated(), "Any set merged with Saturated yields Saturated");
+        assert!(
+            merged2.is_saturated(),
+            "Any set merged with Saturated yields Saturated"
+        );
     }
 
     #[test]
@@ -669,7 +728,10 @@ mod tests {
     fn test_from_set_saturates_large_set() {
         let addrs: BTreeSet<Address> = (0..300).collect();
         let p = Provenance::from_set(addrs);
-        assert!(p.is_saturated(), "from_set with >256 addresses should saturate");
+        assert!(
+            p.is_saturated(),
+            "from_set with >256 addresses should saturate"
+        );
     }
 
     #[test]
@@ -678,15 +740,24 @@ mod tests {
         for i in 0..DEFAULT_PROVENANCE_SATURATION_LIMIT {
             accumulated = accumulated.merge(&Provenance::single(i as Address));
         }
-        assert!(!accumulated.is_saturated(), "Exactly at threshold should not saturate");
-        assert_eq!(accumulated.dependency_count(), DEFAULT_PROVENANCE_SATURATION_LIMIT);
+        assert!(
+            !accumulated.is_saturated(),
+            "Exactly at threshold should not saturate"
+        );
+        assert_eq!(
+            accumulated.dependency_count(),
+            DEFAULT_PROVENANCE_SATURATION_LIMIT
+        );
     }
 
     #[test]
     fn test_saturated_debug_format() {
         let p = Provenance::saturated();
         let debug = format!("{:?}", p);
-        assert!(debug.contains("Saturated"), "Debug output should indicate saturation");
+        assert!(
+            debug.contains("Saturated"),
+            "Debug output should indicate saturation"
+        );
     }
 
     #[test]
@@ -703,7 +774,10 @@ mod tests {
         for i in 0..15 {
             accumulated = accumulated.merge(&Provenance::single(i as Address));
         }
-        assert!(accumulated.is_saturated(), "Should saturate with limit of 10 after 15 merges");
+        assert!(
+            accumulated.is_saturated(),
+            "Should saturate with limit of 10 after 15 merges"
+        );
 
         // Restore original limit
         set_saturation_limit(original);

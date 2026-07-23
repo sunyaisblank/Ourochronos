@@ -13,8 +13,8 @@
 
 use crate::common::*;
 
-use ourochronos::*;
 use ourochronos::temporal::timeloop::ConvergenceStatus;
+use ourochronos::*;
 
 // =============================================================================
 // Closed Timelike Curve (CTC) Tests
@@ -41,10 +41,7 @@ mod ctc_semantics {
     #[test]
     fn ctc_no_solution_diverges() {
         // CTC with no solution: oracle + 1 = oracle (impossible)
-        let result = run_with_config(
-            "0 ORACLE 1 ADD 0 PROPHECY",
-            config_with_epochs(50)
-        );
+        let result = run_with_config("0 ORACLE 1 ADD 0 PROPHECY", config_with_epochs(50));
         assert_timeout_or_divergence(&result);
     }
 
@@ -114,10 +111,7 @@ mod fixed_point_existence {
     #[test]
     fn nonexistence_increment() {
         // f(x) = x + 1 has no finite fixed point
-        let result = run_with_config(
-            "0 ORACLE 1 ADD 0 PROPHECY",
-            config_with_epochs(30)
-        );
+        let result = run_with_config("0 ORACLE 1 ADD 0 PROPHECY", config_with_epochs(30));
         assert_timeout_or_divergence(&result);
     }
 
@@ -132,8 +126,7 @@ mod fixed_point_existence {
         // Should oscillate with period 10 or timeout
         assert!(matches!(
             result,
-            ConvergenceStatus::Oscillation { .. }
-            | ConvergenceStatus::Timeout { .. }
+            ConvergenceStatus::Oscillation { .. } | ConvergenceStatus::Timeout { .. }
         ));
     }
 }
@@ -477,9 +470,16 @@ mod temporal_invariants {
         // Outputs should appear in program order
         let result = run("1 OUTPUT 2 OUTPUT 3 OUTPUT 0 0 PROPHECY");
         let output = extract_output(&result);
-        let values: Vec<u64> = output.iter().filter_map(|o| {
-            if let ourochronos::OutputItem::Val(v) = o { Some(v.val) } else { None }
-        }).collect();
+        let values: Vec<u64> = output
+            .iter()
+            .filter_map(|o| {
+                if let ourochronos::OutputItem::Val(v) = o {
+                    Some(v.val)
+                } else {
+                    None
+                }
+            })
+            .collect();
         assert_eq!(values, vec![1, 2, 3]);
     }
 
@@ -542,7 +542,11 @@ mod effect_gate {
         match result {
             ConvergenceStatus::Error { message, .. } => {
                 assert!(message.contains("FILE_WRITE"), "message was: {}", message);
-                assert!(message.contains("external effect"), "message was: {}", message);
+                assert!(
+                    message.contains("external effect"),
+                    "message was: {}",
+                    message
+                );
             }
             other => panic!("expected decline error, got {:?}", other),
         }
@@ -554,7 +558,11 @@ mod effect_gate {
         match result {
             ConvergenceStatus::Error { message, .. } => {
                 assert!(message.contains("RANDOM"), "message was: {}", message);
-                assert!(message.contains("non-deterministic"), "message was: {}", message);
+                assert!(
+                    message.contains("non-deterministic"),
+                    "message was: {}",
+                    message
+                );
             }
             other => panic!("expected decline error, got {:?}", other),
         }
@@ -599,6 +607,37 @@ mod effect_gate {
     }
 
     #[test]
+    fn file_resource_state_declines_inside_search_even_when_operation_is_read_only() {
+        for (source, needle) in [
+            ("0 ORACLE POP \"unused\" 1 FILE_OPEN", "FILE_OPEN"),
+            (
+                "0 ORACLE POP \"unused\" FILE_EXISTS POP 0 0 PROPHECY",
+                "FILE_EXISTS",
+            ),
+        ] {
+            match run(source) {
+                ConvergenceStatus::Error { message, .. } => {
+                    assert!(message.contains(needle), "{}: {}", source, message);
+                    assert!(message.contains("external effect"), "{}", message);
+                }
+                other => panic!("{}: expected decline, got {:?}", source, other),
+            }
+        }
+    }
+
+    #[test]
+    fn buffer_state_is_epoch_local_and_deterministic() {
+        let result = run("0 ORACLE POP 0 BUFFER_NEW 0 PROPHECY");
+        match result {
+            ConvergenceStatus::Consistent { memory, epochs, .. } => {
+                assert_eq!(memory.read(0).val, 1);
+                assert_eq!(epochs, 2);
+            }
+            other => panic!("expected a fixed epoch-local buffer handle, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn input_beyond_the_frozen_stream_declines_inside_search() {
         // One frozen value, two INPUT reads: the second would re-open live
         // stdin, which the Temporal Input Invariant forbids.
@@ -638,12 +677,10 @@ mod temporal_variable_expansion {
         // address and the real address stayed behind as stack litter.
         // The copy at cell 11 must equal the value at the variable's
         // address (10), not anamnesis[99].
-        let result = run(
-            "TEMPORAL f @ 10 DEFAULT 99;\n\
+        let result = run("TEMPORAL f @ 10 DEFAULT 99;\n\
              5 10 PROPHECY\n\
              LET copy = f;\n\
-             copy 11 PROPHECY",
-        );
+             copy 11 PROPHECY");
         assert_consistent(&result);
         assert_memory_value(&result, 10, 5);
         assert_memory_value(&result, 11, 5);

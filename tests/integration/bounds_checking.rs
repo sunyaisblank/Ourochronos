@@ -9,9 +9,9 @@
 
 #![cfg(test)]
 
-use ourochronos::*;
 use ourochronos::core::error::ErrorConfig;
-use ourochronos::temporal::timeloop::{TimeLoopConfig, ConvergenceStatus};
+use ourochronos::temporal::timeloop::{ConvergenceStatus, TimeLoopConfig};
+use ourochronos::*;
 
 /// Run a programme (from source text) with a specific error config.
 fn run_with_error_config(code: &str, error_config: ErrorConfig) -> ConvergenceStatus {
@@ -24,26 +24,39 @@ fn run_with_error_config(code: &str, error_config: ErrorConfig) -> ConvergenceSt
         error_config,
         ..Default::default()
     };
-    TimeLoop::new(config).expect("valid configuration").run(&program)
+    TimeLoop::new(config)
+        .expect("valid configuration")
+        .run(&program)
 }
 
 /// Run a pre-built programme with a specific error config.
-fn run_program_with_error_config(program: &Program, error_config: ErrorConfig) -> ConvergenceStatus {
+fn run_program_with_error_config(
+    program: &Program,
+    error_config: ErrorConfig,
+) -> ConvergenceStatus {
     let config = TimeLoopConfig {
         max_epochs: 100,
         error_config,
         ..Default::default()
     };
-    TimeLoop::new(config).expect("valid configuration").run(program)
+    TimeLoop::new(config)
+        .expect("valid configuration")
+        .run(program)
 }
 
 /// Build a programme from a list of statements.
 fn make_program(body: Vec<Stmt>) -> Program {
     Program {
+        manifests: Vec::new(),
+        temporal_declarations: Vec::new(),
         procedures: Vec::new(),
         quotes: Vec::new(),
         body,
         ffi_declarations: Vec::new(),
+        family_declaration: None,
+        markov_declaration: None,
+        quantum_declaration: None,
+        temporal_properties: Vec::new(),
     }
 }
 
@@ -58,26 +71,23 @@ mod wrap_policy {
     fn oracle_wraps_out_of_bounds_address() {
         // Address 65536 should wrap to 0 under Wrap policy.
         // Write 42 to address 0, then oracle-read address 65536 (wraps to 0).
-        let result = run_with_error_config(
-            "42 0 PROPHECY 65536 ORACLE OUTPUT",
-            ErrorConfig::default(),
-        );
+        let result =
+            run_with_error_config("42 0 PROPHECY 65536 ORACLE OUTPUT", ErrorConfig::default());
         assert!(
             matches!(result, ConvergenceStatus::Consistent { .. }),
-            "Wrap policy should allow out-of-bounds oracle: {:?}", result
+            "Wrap policy should allow out-of-bounds oracle: {:?}",
+            result
         );
     }
 
     #[test]
     fn prophecy_wraps_out_of_bounds_address() {
         // Writing to address 65536 should wrap to address 0.
-        let result = run_with_error_config(
-            "99 65536 PROPHECY",
-            ErrorConfig::default(),
-        );
+        let result = run_with_error_config("99 65536 PROPHECY", ErrorConfig::default());
         assert!(
             matches!(result, ConvergenceStatus::Consistent { .. }),
-            "Wrap policy should allow out-of-bounds prophecy: {:?}", result
+            "Wrap policy should allow out-of-bounds prophecy: {:?}",
+            result
         );
     }
 
@@ -87,17 +97,18 @@ mod wrap_policy {
         // Push 42 to address 0 (65500+36 wraps to 0), then Index-read it.
         let program = make_program(vec![
             Stmt::Push(Value::new(42)),
-            Stmt::Push(Value::new(0)),       // address for prophecy (where the value lands)
+            Stmt::Push(Value::new(0)), // address for prophecy (where the value lands)
             Stmt::Op(OpCode::Prophecy),
-            Stmt::Push(Value::new(65500)),   // base
-            Stmt::Push(Value::new(36)),      // offset (65500+36 = 65536 wraps to 0)
+            Stmt::Push(Value::new(65500)), // base
+            Stmt::Push(Value::new(36)),    // offset (65500+36 = 65536 wraps to 0)
             Stmt::Op(OpCode::Index),
             Stmt::Op(OpCode::Output),
         ]);
         let result = run_program_with_error_config(&program, ErrorConfig::default());
         assert!(
             matches!(result, ConvergenceStatus::Consistent { .. }),
-            "Wrap policy should allow index overflow: {:?}", result
+            "Wrap policy should allow index overflow: {:?}",
+            result
         );
     }
 }
@@ -112,15 +123,15 @@ mod error_policy {
     #[test]
     fn oracle_errors_on_out_of_bounds() {
         // Under Error policy, out-of-bounds oracle should produce an error.
-        let result = run_with_error_config(
-            "65536 ORACLE OUTPUT",
-            ErrorConfig::strict(),
-        );
+        let result = run_with_error_config("65536 ORACLE OUTPUT", ErrorConfig::strict());
         match &result {
             ConvergenceStatus::Error { message, .. } => {
                 assert!(
-                    message.contains("bounds") || message.contains("Memory") || message.contains("address"),
-                    "Error message should mention bounds violation: {}", message
+                    message.contains("bounds")
+                        || message.contains("Memory")
+                        || message.contains("address"),
+                    "Error message should mention bounds violation: {}",
+                    message
                 );
             }
             ConvergenceStatus::Consistent { .. } => {
@@ -135,30 +146,31 @@ mod error_policy {
     #[test]
     fn oracle_errors_on_large_address() {
         // Address 100000 is clearly out of bounds.
-        let result = run_with_error_config(
-            "100000 ORACLE OUTPUT",
-            ErrorConfig::strict(),
-        );
+        let result = run_with_error_config("100000 ORACLE OUTPUT", ErrorConfig::strict());
         match &result {
             ConvergenceStatus::Error { message, .. } => {
                 assert!(
-                    message.contains("bounds") || message.contains("Memory") || message.contains("address"),
-                    "Error message should mention bounds: {}", message
+                    message.contains("bounds")
+                        || message.contains("Memory")
+                        || message.contains("address"),
+                    "Error message should mention bounds: {}",
+                    message
                 );
             }
-            _ => panic!("Expected Error for out-of-bounds oracle under strict mode, got {:?}", result),
+            _ => panic!(
+                "Expected Error for out-of-bounds oracle under strict mode, got {:?}",
+                result
+            ),
         }
     }
 
     #[test]
     fn prophecy_errors_on_large_address() {
-        let result = run_with_error_config(
-            "42 100000 PROPHECY",
-            ErrorConfig::strict(),
-        );
+        let result = run_with_error_config("42 100000 PROPHECY", ErrorConfig::strict());
         assert!(
             matches!(result, ConvergenceStatus::Error { .. }),
-            "Strict mode should error on out-of-bounds prophecy: {:?}", result
+            "Strict mode should error on out-of-bounds prophecy: {:?}",
+            result
         );
     }
 
@@ -174,7 +186,8 @@ mod error_policy {
         let result = run_program_with_error_config(&program, ErrorConfig::strict());
         assert!(
             matches!(result, ConvergenceStatus::Error { .. }),
-            "Strict mode should error on index overflow: {:?}", result
+            "Strict mode should error on index overflow: {:?}",
+            result
         );
     }
 
@@ -190,7 +203,8 @@ mod error_policy {
         let result = run_program_with_error_config(&program, ErrorConfig::strict());
         assert!(
             matches!(result, ConvergenceStatus::Error { .. }),
-            "Strict mode should error on store overflow: {:?}", result
+            "Strict mode should error on store overflow: {:?}",
+            result
         );
     }
 }
@@ -205,13 +219,12 @@ mod valid_operations {
     #[test]
     fn oracle_prophecy_in_bounds_strict() {
         // Normal in-bounds operations should work under strict mode.
-        let result = run_with_error_config(
-            "42 100 PROPHECY 100 ORACLE OUTPUT",
-            ErrorConfig::strict(),
-        );
+        let result =
+            run_with_error_config("42 100 PROPHECY 100 ORACLE OUTPUT", ErrorConfig::strict());
         assert!(
             matches!(result, ConvergenceStatus::Consistent { .. }),
-            "In-bounds operations should succeed under strict mode: {:?}", result
+            "In-bounds operations should succeed under strict mode: {:?}",
+            result
         );
     }
 
@@ -231,7 +244,8 @@ mod valid_operations {
         let result = run_program_with_error_config(&program, ErrorConfig::strict());
         assert!(
             matches!(result, ConvergenceStatus::Consistent { .. }),
-            "In-bounds index/store should succeed under strict mode: {:?}", result
+            "In-bounds index/store should succeed under strict mode: {:?}",
+            result
         );
     }
 }

@@ -3,11 +3,11 @@
 //! All arithmetic is performed modulo 2^64 (wrapping semantics).
 //! Provenance tracks which anamnesis cells influenced this value.
 
-use std::ops::{Add, Sub, Mul, Div, Rem, Not, BitAnd, BitOr, BitXor};
 use std::fmt;
+use std::ops::{Add, BitAnd, BitOr, BitXor, Div, Mul, Not, Rem, Sub};
 
+use super::error::{DivisionByZeroPolicy, OuroError, OuroResult, SourceLocation};
 use super::provenance::Provenance;
-use super::error::{OuroError, OuroResult, DivisionByZeroPolicy, SourceLocation};
 
 /// A value in OUROCHRONOS: 64-bit unsigned integer with provenance tracking.
 ///
@@ -48,6 +48,20 @@ impl Default for OutputItem {
     }
 }
 
+impl OutputItem {
+    /// Conservative deterministic charge for retaining this output item.
+    /// The base charge covers the enum, `Value`, `Arc`, and small allocator
+    /// metadata; every explicit B-tree provenance entry receives an additional
+    /// charge. Shared provenance is deliberately charged per retained item so
+    /// the bound remains valid without allocator-specific pointer accounting.
+    pub fn retained_size_charge(&self) -> usize {
+        match self {
+            Self::Char(_) => 64,
+            Self::Val(value) => 32usize.saturating_add(value.retained_size_charge()),
+        }
+    }
+}
+
 impl PartialOrd for Value {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
@@ -56,30 +70,70 @@ impl PartialOrd for Value {
 
 impl Ord for Value {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.val.cmp(&other.val)
+        self.val
+            .cmp(&other.val)
+            .then_with(|| self.prov.saturated.cmp(&other.prov.saturated))
+            .then_with(|| match (&self.prov.deps, &other.prov.deps) {
+                (None, None) => std::cmp::Ordering::Equal,
+                (None, Some(_)) => std::cmp::Ordering::Less,
+                (Some(_), None) => std::cmp::Ordering::Greater,
+                (Some(left), Some(right)) => left.iter().cmp(right.iter()),
+            })
     }
 }
 
 impl Value {
+    /// Conservative deterministic charge for retaining this value and its
+    /// explicit provenance tree. Shared provenance is charged per reference.
+    pub fn retained_size_charge(&self) -> usize {
+        const BASE_BYTES: usize = 32;
+        BASE_BYTES.saturating_add(self.provenance_retained_size_charge())
+    }
+
+    /// Conservative heap charge for explicit provenance, excluding the value
+    /// slot itself.
+    pub fn provenance_retained_size_charge(&self) -> usize {
+        self.prov
+            .deps
+            .as_ref()
+            .map_or(0, |dependencies| dependencies.len())
+            .saturating_mul(32)
+    }
+
     /// The zero value with no provenance.
-    pub const ZERO: Value = Value { val: 0, prov: Provenance::none() };
+    pub const ZERO: Value = Value {
+        val: 0,
+        prov: Provenance::none(),
+    };
 
     /// The one value with no provenance.
-    pub const ONE: Value = Value { val: 1, prov: Provenance::none() };
+    pub const ONE: Value = Value {
+        val: 1,
+        prov: Provenance::none(),
+    };
 
     /// Minus one (-1) as two's complement.
-    pub const MINUS_ONE: Value = Value { val: u64::MAX, prov: Provenance::none() };
+    pub const MINUS_ONE: Value = Value {
+        val: u64::MAX,
+        prov: Provenance::none(),
+    };
 
     /// Create a new value with no provenance.
     pub fn new(v: u64) -> Self {
-        Value { val: v, prov: Provenance::none() }
+        Value {
+            val: v,
+            prov: Provenance::none(),
+        }
     }
 
     /// Create a new value from a signed integer.
     ///
     /// The value is stored as two's complement representation.
     pub fn from_signed(v: i64) -> Self {
-        Value { val: v as u64, prov: Provenance::none() }
+        Value {
+            val: v as u64,
+            prov: Provenance::none(),
+        }
     }
 
     /// Create a value with explicit provenance.
@@ -89,7 +143,10 @@ impl Value {
 
     /// Create a signed value with explicit provenance.
     pub fn signed_with_provenance(v: i64, prov: Provenance) -> Self {
-        Value { val: v as u64, prov }
+        Value {
+            val: v as u64,
+            prov,
+        }
     }
 
     /// Check if this value is temporally pure.
@@ -104,7 +161,10 @@ impl Value {
 
     /// Create boolean value (1 or 0) with merged provenance.
     pub fn from_bool_with_prov(b: bool, prov: Provenance) -> Self {
-        Value { val: if b { 1 } else { 0 }, prov }
+        Value {
+            val: if b { 1 } else { 0 },
+            prov,
+        }
     }
 
     // ═══════════════════════════════════════════════════════════════════
@@ -354,7 +414,11 @@ impl Div for Value {
     /// v₁ ⟨Div⟩ v₂ = v₁ ÷ v₂ if v₂ ≠ 0, else 0
     fn div(self, rhs: Self) -> Self::Output {
         Value {
-            val: if rhs.val == 0 { 0 } else { self.val.wrapping_div(rhs.val) },
+            val: if rhs.val == 0 {
+                0
+            } else {
+                self.val.wrapping_div(rhs.val)
+            },
             prov: self.prov.merge(&rhs.prov),
         }
     }
@@ -366,7 +430,11 @@ impl Rem for Value {
     /// v₁ ⟨Mod⟩ v₂ = v₁ mod v₂ if v₂ ≠ 0, else 0
     fn rem(self, rhs: Self) -> Self::Output {
         Value {
-            val: if rhs.val == 0 { 0 } else { self.val.wrapping_rem(rhs.val) },
+            val: if rhs.val == 0 {
+                0
+            } else {
+                self.val.wrapping_rem(rhs.val)
+            },
             prov: self.prov.merge(&rhs.prov),
         }
     }
@@ -417,6 +485,19 @@ impl BitXor for Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ordering_distinguishes_equal_words_with_distinct_provenance() {
+        let pure = Value::new(7);
+        let temporal = Value::with_provenance(7, Provenance::single(3));
+        assert_ne!(pure, temporal);
+        assert_ne!(pure.cmp(&temporal), std::cmp::Ordering::Equal);
+
+        let mut ordered = std::collections::BTreeSet::new();
+        ordered.insert(pure);
+        ordered.insert(temporal);
+        assert_eq!(ordered.len(), 2);
+    }
 
     #[test]
     fn test_value_arithmetic() {
@@ -570,10 +651,16 @@ mod tests {
     fn test_signed_additive_inverse() {
         // Property: a + (-a) == 0 for all a (except i64::MIN which cannot be negated)
         let test_values: Vec<i64> = vec![
-            0, 1, -1, 42, -42,
+            0,
+            1,
+            -1,
+            42,
+            -42,
             i64::MAX,
-            i64::MAX / 2, i64::MIN / 2,
-            1000000, -1000000,
+            i64::MAX / 2,
+            i64::MIN / 2,
+            1000000,
+            -1000000,
         ];
 
         for val in test_values {
@@ -589,15 +676,23 @@ mod tests {
         let min = Value::from_signed(i64::MIN);
         let neg_min = Value::from_signed(i64::MIN.wrapping_neg());
         let sum = min.signed_add(neg_min);
-        assert_eq!(sum.val, 0, "i64::MIN + wrapping_neg(i64::MIN) should equal 0");
+        assert_eq!(
+            sum.val, 0,
+            "i64::MIN + wrapping_neg(i64::MIN) should equal 0"
+        );
     }
 
     #[test]
     fn test_addition_commutativity() {
         // Property: a + b == b + a
         let test_pairs: Vec<(u64, u64)> = vec![
-            (0, 0), (1, 0), (0, 1), (1, 1),
-            (42, 100), (u64::MAX, 0), (u64::MAX, 1),
+            (0, 0),
+            (1, 0),
+            (0, 1),
+            (1, 1),
+            (42, 100),
+            (u64::MAX, 0),
+            (u64::MAX, 1),
             (u64::MAX / 2, u64::MAX / 2),
         ];
 
@@ -606,7 +701,11 @@ mod tests {
             let b = Value::new(bv);
             let sum1 = a.clone() + b.clone();
             let sum2 = b + a;
-            assert_eq!(sum1.val, sum2.val, "a + b should equal b + a for {} + {}", av, bv);
+            assert_eq!(
+                sum1.val, sum2.val,
+                "a + b should equal b + a for {} + {}",
+                av, bv
+            );
         }
     }
 
@@ -614,8 +713,14 @@ mod tests {
     fn test_multiplication_commutativity() {
         // Property: a * b == b * a
         let test_pairs: Vec<(u64, u64)> = vec![
-            (0, 0), (1, 0), (0, 1), (1, 1),
-            (7, 13), (42, 100), (u64::MAX, 0), (u64::MAX, 1),
+            (0, 0),
+            (1, 0),
+            (0, 1),
+            (1, 1),
+            (7, 13),
+            (42, 100),
+            (u64::MAX, 0),
+            (u64::MAX, 1),
         ];
 
         for (av, bv) in test_pairs {
@@ -623,7 +728,11 @@ mod tests {
             let b = Value::new(bv);
             let prod1 = a.clone() * b.clone();
             let prod2 = b * a;
-            assert_eq!(prod1.val, prod2.val, "a * b should equal b * a for {} * {}", av, bv);
+            assert_eq!(
+                prod1.val, prod2.val,
+                "a * b should equal b * a for {} * {}",
+                av, bv
+            );
         }
     }
 
@@ -631,9 +740,7 @@ mod tests {
     fn test_division_policy_consistency() {
         // Property: checked_div behaves same as checked_div_at with default location
         let dividend = Value::new(100);
-        let divisors = vec![
-            Value::new(0), Value::new(1), Value::new(7), Value::new(100),
-        ];
+        let divisors = vec![Value::new(0), Value::new(1), Value::new(7), Value::new(100)];
         let policies = vec![
             DivisionByZeroPolicy::ReturnZero,
             DivisionByZeroPolicy::Error,
@@ -646,7 +753,7 @@ mod tests {
                 let r2 = dividend.clone().checked_div_at(
                     divisor.clone(),
                     *policy,
-                    SourceLocation::default()
+                    SourceLocation::default(),
                 );
 
                 match (r1, r2) {
@@ -662,9 +769,7 @@ mod tests {
     fn test_modulo_policy_consistency() {
         // Property: checked_mod behaves same as checked_mod_at with default location
         let dividend = Value::new(100);
-        let divisors = vec![
-            Value::new(0), Value::new(1), Value::new(7), Value::new(100),
-        ];
+        let divisors = vec![Value::new(0), Value::new(1), Value::new(7), Value::new(100)];
         let policies = vec![
             DivisionByZeroPolicy::ReturnZero,
             DivisionByZeroPolicy::Error,
@@ -677,7 +782,7 @@ mod tests {
                 let r2 = dividend.clone().checked_mod_at(
                     divisor.clone(),
                     *policy,
-                    SourceLocation::default()
+                    SourceLocation::default(),
                 );
 
                 match (r1, r2) {
@@ -692,9 +797,7 @@ mod tests {
     #[test]
     fn test_bitwise_identity() {
         // Property: a & a == a, a | a == a, a ^ 0 == a
-        let test_values: Vec<u64> = vec![
-            0, 1, 42, u64::MAX, u64::MAX / 2, 0xDEADBEEF,
-        ];
+        let test_values: Vec<u64> = vec![0, 1, 42, u64::MAX, u64::MAX / 2, 0xDEADBEEF];
 
         for val in test_values {
             let a = Value::new(val);

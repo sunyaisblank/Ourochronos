@@ -1,29 +1,24 @@
-//! Fast Virtual Machine for OUROCHRONOS epoch execution.
+//! Pure-program compatibility facade over the validated bytecode VM.
 //!
-//! This module provides an optimised execution path for programmes that do not
-//! use temporal operations (ORACLE/PROPHECY). When a programme is statically
-//! determined to be pure, or when executing within a pure region, this VM
-//! bypasses provenance tracking entirely.
-//!
-//! # Performance Characteristics
-//!
-//! The fast VM achieves better performance through:
-//! - **Stack register caching**: Top 4 stack elements cached in local variables
-//! - **No provenance tracking**: Pure operations work with raw u64 values
-//! - **Fused operations**: Common patterns executed as single operations
-//! - **Reduced dispatch overhead**: Specialised instruction handling
-//!
-//! # Semantic Preservation
-//!
-//! For pure programmes the fast VM must be observably indistinguishable from
-//! the standard VM: same output buffer, same status, same INPUT sourcing
-//! (scripted values, then interactive), same RANDOM implementation. The
-//! differential invariant test in tests/benchmark pins this. Temporal
-//! programmes fall back to the standard VM.
+//! The former fast path recursively interpreted source AST and duplicated a
+//! large opcode switch. That was not an acceptable optimized backend: its
+//! stack, quotation, gas, and input behavior could drift from the executable
+//! authority. `FastExecutor` now resolves and lowers the program to the same
+//! validated [`BytecodeProgram`] used by normal execution, then delegates to
+//! [`BytecodeVm`] through its immutable prevalidated dispatch path. That
+//! removes repeated artifact scans while leaving instruction dispatch, gas,
+//! errors, and observations identical. The public facade and experimental
+//! [`FastStack`] remain for compatibility and benchmarking, but there is no
+//! second language runtime in this module.
 
-use crate::ast::{OpCode, Stmt, Program};
-use crate::core::{Value, Memory, OutputItem};
-use super::executor::{EpochStatus, EpochResult, ExecutorConfig, Executor};
+use super::executor::{EpochResult, EpochStatus, ExecutorConfig};
+use crate::ast::{OpCode, Program, Stmt};
+use crate::bytecode::BytecodeProgram;
+use crate::bytecode_vm::{
+    BytecodeVm, BytecodeVmConfig, BytecodeVmError, BytecodeVmStatus, PreparedBytecode,
+};
+use crate::core::{Memory, OutputItem, PagedMemory, Value};
+use crate::hir::HirProgram;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Stack Register Cache
@@ -129,10 +124,14 @@ impl FastStack {
         self.count == 0
     }
 
-    /// Swap top two elements.
+    /// Swap top two elements, returning false on stack underflow.
     #[inline(always)]
-    pub fn swap(&mut self) {
+    pub fn swap(&mut self) -> bool {
+        if self.count < 2 {
+            return false;
+        }
         std::mem::swap(&mut self.r0, &mut self.r1);
+        true
     }
 
     /// Duplicate the top element.
@@ -258,7 +257,7 @@ impl FastStack {
         }
     }
 
-    /// Convert to a Vec<Value> with pure provenance.
+    /// Convert to a `Vec<Value>` with pure provenance.
     pub fn to_value_vec(&self) -> Vec<Value> {
         let mut result = Vec::with_capacity(self.count);
 
@@ -268,15 +267,23 @@ impl FastStack {
         }
 
         // Add cached elements in order (r3, r2, r1, r0)
-        if let Some(v) = self.r3 { result.push(Value::new(v)); }
-        if let Some(v) = self.r2 { result.push(Value::new(v)); }
-        if let Some(v) = self.r1 { result.push(Value::new(v)); }
-        if let Some(v) = self.r0 { result.push(Value::new(v)); }
+        if let Some(v) = self.r3 {
+            result.push(Value::new(v));
+        }
+        if let Some(v) = self.r2 {
+            result.push(Value::new(v));
+        }
+        if let Some(v) = self.r1 {
+            result.push(Value::new(v));
+        }
+        if let Some(v) = self.r0 {
+            result.push(Value::new(v));
+        }
 
         result
     }
 
-    /// Create from a Vec<Value>, discarding provenance.
+    /// Create from a `Vec<Value>`, discarding provenance.
     pub fn from_value_vec(values: &[Value]) -> Self {
         let mut stack = Self::new();
         for v in values {
@@ -296,11 +303,10 @@ impl Default for FastStack {
 // Fast Executor
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Fast executor for pure (non-temporal) code regions.
+/// Compatibility executor for pure (non-temporal) code regions.
 ///
-/// This executor operates on raw u64 values without provenance tracking,
-/// providing significantly better performance for computationally intensive
-/// pure code like the Fibonacci benchmark.
+/// Execution is authoritative validated bytecode; fields mirror the historic
+/// API so callers can inspect stack, output, gas, and status.
 pub struct FastExecutor {
     /// Stack with register caching
     pub stack: FastStack,
@@ -319,6 +325,8 @@ pub struct FastExecutor {
     pub input: Vec<u64>,
     /// Position in the scripted input.
     input_cursor: usize,
+    /// Exact input tape consumed by the bytecode authority.
+    inputs_consumed: Vec<u64>,
 }
 
 impl FastExecutor {
@@ -333,6 +341,7 @@ impl FastExecutor {
             status: EpochStatus::Running,
             input: Vec::new(),
             input_cursor: 0,
+            inputs_consumed: Vec::new(),
         }
     }
 
@@ -340,6 +349,7 @@ impl FastExecutor {
     pub fn with_input(mut self, input: Vec<u64>) -> Self {
         self.input = input;
         self.input_cursor = 0;
+        self.inputs_consumed.clear();
         self
     }
 
@@ -348,519 +358,45 @@ impl FastExecutor {
     /// Returns Err if the program contains temporal operations that require
     /// the full VM.
     pub fn execute_pure(&mut self, program: &Program, quotes: &[Vec<Stmt>]) -> Result<(), String> {
-        self.execute_block(&program.body, quotes)
+        let _ = quotes;
+        if !is_program_pure(program) {
+            return Err("program requires the full temporal/effect runtime".to_string());
+        }
+        self.execute_bytecode(program)
     }
 
-    /// Execute a block of statements.
-    fn execute_block(&mut self, stmts: &[Stmt], quotes: &[Vec<Stmt>]) -> Result<(), String> {
-        for stmt in stmts {
-            // Check for termination conditions
-            match &self.status {
-                EpochStatus::Paradox | EpochStatus::Finished | EpochStatus::Error(_) => {
-                    return Ok(());
-                }
-                EpochStatus::Running => {}
-            }
+    fn execute_bytecode(&mut self, program: &Program) -> Result<(), String> {
+        let hir = HirProgram::resolve(program)
+            .map_err(|errors| format!("fast bytecode name resolution failed: {errors:?}"))?;
+        let bytecode = BytecodeProgram::compile(&hir)
+            .map_err(|error| format!("fast bytecode lowering failed: {error}"))?;
+        let prepared = PreparedBytecode::new(bytecode)
+            .map_err(|error| format!("fast bytecode preparation failed: {error}"))?;
+        let anamnesis = PagedMemory::with_size(self.present.len())
+            .map_err(|error| format!("fast bytecode memory failed: {error}"))?;
+        let result = BytecodeVm::with_config(BytecodeVmConfig {
+            max_instructions: self.max_instructions,
+            input: self.input.clone(),
+            allow_interactive_input: true,
+            ..BytecodeVmConfig::default()
+        })
+        .run_prepared(&prepared, &anamnesis)
+        .map_err(format_bytecode_error)?;
 
-            // Check gas limit
-            if self.instructions_executed >= self.max_instructions {
-                self.status = EpochStatus::Error("Instruction limit exceeded".to_string());
-                return Ok(());
-            }
-
-            self.execute_stmt(stmt, quotes)?;
+        self.stack = FastStack::from_value_vec(&result.stack);
+        self.present = Memory::with_size(result.present.len());
+        for (address, value) in result.present.iter_sparse() {
+            self.present.write(address, value.clone());
         }
+        self.output = result.output;
+        self.instructions_executed = result.instructions_executed;
+        self.input_cursor = result.inputs_consumed.len();
+        self.inputs_consumed = result.inputs_consumed;
+        self.status = match result.status {
+            BytecodeVmStatus::Finished | BytecodeVmStatus::Halted => EpochStatus::Finished,
+            BytecodeVmStatus::Paradox => EpochStatus::Paradox,
+        };
         Ok(())
-    }
-
-    /// Execute a single statement.
-    fn execute_stmt(&mut self, stmt: &Stmt, quotes: &[Vec<Stmt>]) -> Result<(), String> {
-        self.instructions_executed += 1;
-
-        match stmt {
-            Stmt::Op(op) => self.execute_op(*op, quotes),
-
-            Stmt::Push(v) => {
-                self.stack.push(v.val);
-                Ok(())
-            }
-
-            Stmt::Block(stmts) => self.execute_block(stmts, quotes),
-
-            Stmt::If { then_branch, else_branch } => {
-                let cond = self.stack.pop().ok_or("Stack underflow: IF")?;
-                if cond != 0 {
-                    self.execute_block(then_branch, quotes)
-                } else if let Some(else_stmts) = else_branch {
-                    self.execute_block(else_stmts, quotes)
-                } else {
-                    Ok(())
-                }
-            }
-
-            Stmt::While { cond, body } => {
-                loop {
-                    // Check termination
-                    if self.status != EpochStatus::Running {
-                        break;
-                    }
-
-                    // Evaluate condition
-                    self.execute_block(cond, quotes)?;
-                    let result = self.stack.pop().ok_or("Stack underflow: WHILE condition")?;
-
-                    if result == 0 {
-                        break;
-                    }
-
-                    // Execute body
-                    self.execute_block(body, quotes)?;
-
-                    // Gas check
-                    if self.instructions_executed >= self.max_instructions {
-                        self.status = EpochStatus::Error("Instruction limit in loop".to_string());
-                        break;
-                    }
-                }
-                Ok(())
-            }
-
-            Stmt::Call { name } => {
-                Err(format!("Procedure call '{}' not inlined - ensure program is preprocessed", name))
-            }
-
-            // Temporal operations cannot be executed in fast mode
-            Stmt::TemporalScope { .. } => {
-                Err("TemporalScope requires standard VM execution".to_string())
-            }
-        }
-    }
-
-    /// Execute a single opcode.
-    fn execute_op(&mut self, op: OpCode, quotes: &[Vec<Stmt>]) -> Result<(), String> {
-        match op {
-            // ═══════════════════════════════════════════════════════════
-            // Temporal Operations - NOT SUPPORTED in fast mode
-            // ═══════════════════════════════════════════════════════════
-            OpCode::Oracle | OpCode::Prophecy | OpCode::PresentRead | OpCode::Paradox => {
-                Err(format!("{:?} requires standard VM execution", op))
-            }
-
-            // ═══════════════════════════════════════════════════════════
-            // Stack Manipulation (optimised)
-            // ═══════════════════════════════════════════════════════════
-            OpCode::Nop => Ok(()),
-
-            OpCode::Halt => {
-                self.status = EpochStatus::Finished;
-                Ok(())
-            }
-
-            OpCode::Pop => {
-                self.stack.pop().ok_or("Stack underflow: POP")?;
-                Ok(())
-            }
-
-            OpCode::Dup => {
-                if !self.stack.dup() {
-                    return Err("Stack underflow: DUP".to_string());
-                }
-                Ok(())
-            }
-
-            OpCode::Swap => {
-                self.stack.swap();
-                Ok(())
-            }
-
-            OpCode::Over => {
-                if !self.stack.over() {
-                    return Err("Stack underflow: OVER".to_string());
-                }
-                Ok(())
-            }
-
-            OpCode::Rot => {
-                if !self.stack.rot() {
-                    return Err("Stack underflow: ROT".to_string());
-                }
-                Ok(())
-            }
-
-            OpCode::Depth => {
-                self.stack.push(self.stack.depth() as u64);
-                Ok(())
-            }
-
-            OpCode::Pick => {
-                let n = self.stack.pop().ok_or("Stack underflow: PICK")? as usize;
-                let depth = self.stack.depth();
-                if n >= depth {
-                    return Err(format!("PICK out of bounds: {} >= {}", n, depth));
-                }
-                // Convert to vec, pick, push back
-                let vec = self.stack.to_value_vec();
-                let idx = depth - 1 - n;
-                self.stack.push(vec[idx].val);
-                Ok(())
-            }
-
-            OpCode::Roll => {
-                let n = self.stack.pop().ok_or("Stack underflow: ROLL")? as usize;
-                let depth = self.stack.depth();
-                if n >= depth {
-                    return Err(format!("ROLL out of bounds: {} >= {}", n, depth));
-                }
-                // Convert to vec, roll, rebuild
-                let mut vec = self.stack.to_value_vec();
-                let idx = depth - 1 - n;
-                let val = vec.remove(idx);
-                vec.push(val);
-                self.stack = FastStack::from_value_vec(&vec);
-                Ok(())
-            }
-
-            OpCode::Reverse => {
-                let n = self.stack.pop().ok_or("Stack underflow: REVERSE")? as usize;
-                let depth = self.stack.depth();
-                if n > depth {
-                    return Err(format!("REVERSE out of bounds: {} > {}", n, depth));
-                }
-                if n > 1 {
-                    let mut vec = self.stack.to_value_vec();
-                    let start = depth - n;
-                    vec[start..].reverse();
-                    self.stack = FastStack::from_value_vec(&vec);
-                }
-                Ok(())
-            }
-
-            // ═══════════════════════════════════════════════════════════
-            // Arithmetic (optimised)
-            // ═══════════════════════════════════════════════════════════
-            OpCode::Add => {
-                if !self.stack.add() {
-                    return Err("Stack underflow: ADD".to_string());
-                }
-                Ok(())
-            }
-
-            OpCode::Sub => {
-                if !self.stack.sub() {
-                    return Err("Stack underflow: SUB".to_string());
-                }
-                Ok(())
-            }
-
-            OpCode::Mul => {
-                if !self.stack.mul() {
-                    return Err("Stack underflow: MUL".to_string());
-                }
-                Ok(())
-            }
-
-            OpCode::Div => {
-                let b = self.stack.pop().ok_or("Stack underflow: DIV")?;
-                let a = self.stack.pop().ok_or("Stack underflow: DIV")?;
-                let result = if b == 0 { 0 } else { a.wrapping_div(b) };
-                self.stack.push(result);
-                Ok(())
-            }
-
-            OpCode::Mod => {
-                let b = self.stack.pop().ok_or("Stack underflow: MOD")?;
-                let a = self.stack.pop().ok_or("Stack underflow: MOD")?;
-                let result = if b == 0 { 0 } else { a.wrapping_rem(b) };
-                self.stack.push(result);
-                Ok(())
-            }
-
-            OpCode::Neg => {
-                let a = self.stack.pop().ok_or("Stack underflow: NEG")?;
-                self.stack.push(a.wrapping_neg());
-                Ok(())
-            }
-
-            OpCode::Abs => {
-                let a = self.stack.pop().ok_or("Stack underflow: ABS")?;
-                self.stack.push((a as i64).wrapping_abs() as u64);
-                Ok(())
-            }
-
-            OpCode::Min => {
-                let b = self.stack.pop().ok_or("Stack underflow: MIN")?;
-                let a = self.stack.pop().ok_or("Stack underflow: MIN")?;
-                self.stack.push(a.min(b));
-                Ok(())
-            }
-
-            OpCode::Max => {
-                let b = self.stack.pop().ok_or("Stack underflow: MAX")?;
-                let a = self.stack.pop().ok_or("Stack underflow: MAX")?;
-                self.stack.push(a.max(b));
-                Ok(())
-            }
-
-            OpCode::Sign => {
-                let a = self.stack.pop().ok_or("Stack underflow: SIGN")?;
-                self.stack.push((a as i64).signum() as u64);
-                Ok(())
-            }
-
-            // ═══════════════════════════════════════════════════════════
-            // Bitwise (optimised)
-            // ═══════════════════════════════════════════════════════════
-            OpCode::Not => {
-                let a = self.stack.pop().ok_or("Stack underflow: NOT")?;
-                // Logical NOT: 0 -> 1, nonzero -> 0
-                self.stack.push(if a == 0 { 1 } else { 0 });
-                Ok(())
-            }
-
-            OpCode::And => {
-                let b = self.stack.pop().ok_or("Stack underflow: AND")?;
-                let a = self.stack.pop().ok_or("Stack underflow: AND")?;
-                self.stack.push(a & b);
-                Ok(())
-            }
-
-            OpCode::Or => {
-                let b = self.stack.pop().ok_or("Stack underflow: OR")?;
-                let a = self.stack.pop().ok_or("Stack underflow: OR")?;
-                self.stack.push(a | b);
-                Ok(())
-            }
-
-            OpCode::Xor => {
-                let b = self.stack.pop().ok_or("Stack underflow: XOR")?;
-                let a = self.stack.pop().ok_or("Stack underflow: XOR")?;
-                self.stack.push(a ^ b);
-                Ok(())
-            }
-
-            OpCode::Shl => {
-                let n = self.stack.pop().ok_or("Stack underflow: SHL")?;
-                let a = self.stack.pop().ok_or("Stack underflow: SHL")?;
-                let shift = (n % 64) as u32;
-                self.stack.push(a.wrapping_shl(shift));
-                Ok(())
-            }
-
-            OpCode::Shr => {
-                let n = self.stack.pop().ok_or("Stack underflow: SHR")?;
-                let a = self.stack.pop().ok_or("Stack underflow: SHR")?;
-                let shift = (n % 64) as u32;
-                self.stack.push(a.wrapping_shr(shift));
-                Ok(())
-            }
-
-            // ═══════════════════════════════════════════════════════════
-            // Comparison (optimised)
-            // ═══════════════════════════════════════════════════════════
-            OpCode::Eq => {
-                let b = self.stack.pop().ok_or("Stack underflow: EQ")?;
-                let a = self.stack.pop().ok_or("Stack underflow: EQ")?;
-                self.stack.push(if a == b { 1 } else { 0 });
-                Ok(())
-            }
-
-            OpCode::Neq => {
-                let b = self.stack.pop().ok_or("Stack underflow: NEQ")?;
-                let a = self.stack.pop().ok_or("Stack underflow: NEQ")?;
-                self.stack.push(if a != b { 1 } else { 0 });
-                Ok(())
-            }
-
-            OpCode::Lt => {
-                if !self.stack.lt() {
-                    return Err("Stack underflow: LT".to_string());
-                }
-                Ok(())
-            }
-
-            OpCode::Gt => {
-                let b = self.stack.pop().ok_or("Stack underflow: GT")?;
-                let a = self.stack.pop().ok_or("Stack underflow: GT")?;
-                self.stack.push(if a > b { 1 } else { 0 });
-                Ok(())
-            }
-
-            OpCode::Lte => {
-                let b = self.stack.pop().ok_or("Stack underflow: LTE")?;
-                let a = self.stack.pop().ok_or("Stack underflow: LTE")?;
-                self.stack.push(if a <= b { 1 } else { 0 });
-                Ok(())
-            }
-
-            OpCode::Gte => {
-                let b = self.stack.pop().ok_or("Stack underflow: GTE")?;
-                let a = self.stack.pop().ok_or("Stack underflow: GTE")?;
-                self.stack.push(if a >= b { 1 } else { 0 });
-                Ok(())
-            }
-
-            // Signed comparisons
-            OpCode::Slt => {
-                let b = self.stack.pop().ok_or("Stack underflow: SLT")? as i64;
-                let a = self.stack.pop().ok_or("Stack underflow: SLT")? as i64;
-                self.stack.push(if a < b { 1 } else { 0 });
-                Ok(())
-            }
-
-            OpCode::Sgt => {
-                let b = self.stack.pop().ok_or("Stack underflow: SGT")? as i64;
-                let a = self.stack.pop().ok_or("Stack underflow: SGT")? as i64;
-                self.stack.push(if a > b { 1 } else { 0 });
-                Ok(())
-            }
-
-            OpCode::Slte => {
-                let b = self.stack.pop().ok_or("Stack underflow: SLTE")? as i64;
-                let a = self.stack.pop().ok_or("Stack underflow: SLTE")? as i64;
-                self.stack.push(if a <= b { 1 } else { 0 });
-                Ok(())
-            }
-
-            OpCode::Sgte => {
-                let b = self.stack.pop().ok_or("Stack underflow: SGTE")? as i64;
-                let a = self.stack.pop().ok_or("Stack underflow: SGTE")? as i64;
-                self.stack.push(if a >= b { 1 } else { 0 });
-                Ok(())
-            }
-
-            // ═══════════════════════════════════════════════════════════
-            // I/O
-            // ═══════════════════════════════════════════════════════════
-            OpCode::Output => {
-                let val = self.stack.pop().ok_or("Stack underflow: OUTPUT")?;
-                self.output.push(OutputItem::Val(Value::new(val)));
-                Ok(())
-            }
-
-            OpCode::Emit => {
-                // Buffered only, exactly like the standard VM: the caller
-                // prints the output buffer, so printing here as well would
-                // emit every character twice.
-                let val = self.stack.pop().ok_or("Stack underflow: EMIT")?;
-                let char_val = (val % 256) as u8;
-                self.output.push(OutputItem::Char(char_val));
-                Ok(())
-            }
-
-            OpCode::Input => {
-                // Scripted values first, then interactive stdin: the same
-                // sourcing as the standard VM.
-                let val = if self.input_cursor < self.input.len() {
-                    let v = self.input[self.input_cursor];
-                    self.input_cursor += 1;
-                    v
-                } else {
-                    super::executor::read_input_interactive()
-                };
-                self.stack.push(val);
-                Ok(())
-            }
-
-            // ═══════════════════════════════════════════════════════════
-            // System
-            // ═══════════════════════════════════════════════════════════
-            OpCode::Clock => {
-                use std::time::{SystemTime, UNIX_EPOCH};
-                let millis = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .map(|d| d.as_millis() as u64)
-                    .unwrap_or(0);
-                self.stack.push(millis);
-                Ok(())
-            }
-
-            OpCode::Sleep => {
-                let millis = self.stack.pop().ok_or("Stack underflow: SLEEP")?;
-                std::thread::sleep(std::time::Duration::from_millis(millis));
-                Ok(())
-            }
-
-            OpCode::Random => {
-                self.stack.push(super::executor::random_u64());
-                Ok(())
-            }
-
-            // ═══════════════════════════════════════════════════════════
-            // Quotation execution
-            // ═══════════════════════════════════════════════════════════
-            OpCode::Exec => {
-                let id = self.stack.pop().ok_or("Stack underflow: EXEC")? as usize;
-                if id >= quotes.len() {
-                    return Err(format!("EXEC: Invalid quote ID {}", id));
-                }
-                self.execute_block(&quotes[id], quotes)
-            }
-
-            OpCode::Dip => {
-                let id = self.stack.pop().ok_or("Stack underflow: DIP")? as usize;
-                if id >= quotes.len() {
-                    return Err(format!("DIP: Invalid quote ID {}", id));
-                }
-                let x = self.stack.pop().ok_or("Stack underflow: DIP")?;
-                self.execute_block(&quotes[id], quotes)?;
-                self.stack.push(x);
-                Ok(())
-            }
-
-            OpCode::Keep => {
-                let id = self.stack.pop().ok_or("Stack underflow: KEEP")? as usize;
-                if id >= quotes.len() {
-                    return Err(format!("KEEP: Invalid quote ID {}", id));
-                }
-                let x = self.stack.pop().ok_or("Stack underflow: KEEP")?;
-                self.stack.push(x);
-                self.execute_block(&quotes[id], quotes)?;
-                self.stack.push(x);
-                Ok(())
-            }
-
-            OpCode::Bi => {
-                let q_id = self.stack.pop().ok_or("Stack underflow: BI")? as usize;
-                let p_id = self.stack.pop().ok_or("Stack underflow: BI")? as usize;
-                if q_id >= quotes.len() || p_id >= quotes.len() {
-                    return Err("BI: Invalid quote ID".to_string());
-                }
-                let x = self.stack.pop().ok_or("Stack underflow: BI")?;
-                self.stack.push(x);
-                self.execute_block(&quotes[p_id], quotes)?;
-                self.stack.push(x);
-                self.execute_block(&quotes[q_id], quotes)
-            }
-
-            OpCode::Rec => {
-                let id = self.stack.pop().ok_or("Stack underflow: REC")? as usize;
-                if id >= quotes.len() {
-                    return Err(format!("REC: Invalid quote ID {}", id));
-                }
-                self.stack.push(id as u64);
-                self.execute_block(&quotes[id], quotes)
-            }
-
-            // ═══════════════════════════════════════════════════════════
-            // Operations requiring full VM (not supported in fast mode)
-            // ═══════════════════════════════════════════════════════════
-            OpCode::Pack | OpCode::Unpack | OpCode::Index | OpCode::Store |
-            OpCode::VecNew | OpCode::VecPush | OpCode::VecPop | OpCode::VecGet |
-            OpCode::VecSet | OpCode::VecLen |
-            OpCode::HashNew | OpCode::HashPut | OpCode::HashGet | OpCode::HashDel |
-            OpCode::HashHas | OpCode::HashLen |
-            OpCode::SetNew | OpCode::SetAdd | OpCode::SetHas | OpCode::SetDel | OpCode::SetLen |
-            OpCode::FFICall | OpCode::FFICallNamed |
-            OpCode::FileOpen | OpCode::FileRead | OpCode::FileWrite | OpCode::FileSeek |
-            OpCode::FileFlush | OpCode::FileClose | OpCode::FileExists | OpCode::FileSize |
-            OpCode::BufferNew | OpCode::BufferFromStack | OpCode::BufferToStack |
-            OpCode::BufferLen | OpCode::BufferReadByte | OpCode::BufferWriteByte | OpCode::BufferFree |
-            OpCode::TcpConnect | OpCode::SocketSend | OpCode::SocketRecv | OpCode::SocketClose |
-            OpCode::ProcExec |
-            OpCode::StrRev | OpCode::StrCat | OpCode::StrSplit | OpCode::Assert => {
-                Err(format!("{:?} requires standard VM execution", op))
-            }
-        }
     }
 
     /// Convert to EpochResult for compatibility with standard VM.
@@ -870,8 +406,21 @@ impl FastExecutor {
             output: self.output,
             status: self.status,
             instructions_executed: self.instructions_executed,
-            inputs_consumed: Vec::new(),
+            inputs_consumed: self.inputs_consumed,
         }
+    }
+}
+
+fn format_bytecode_error(error: BytecodeVmError) -> String {
+    match error {
+        BytecodeVmError::StackUnderflow {
+            operation,
+            needed,
+            available,
+        } => format!(
+            "Stack underflow: {operation} requires {needed} values, only {available} available"
+        ),
+        other => other.to_string(),
     }
 }
 
@@ -885,7 +434,12 @@ impl FastExecutor {
 /// PRESENT, PARADOX) and no operations that require full VM support (data
 /// structures, FFI, file I/O, etc.).
 pub fn is_program_pure(program: &Program) -> bool {
-    is_stmts_pure(&program.body) && program.quotes.iter().all(|q| is_stmts_pure(q))
+    is_stmts_pure(&program.body)
+        && program.quotes.iter().all(|q| is_stmts_pure(q))
+        && program
+            .procedures
+            .iter()
+            .all(|procedure| is_stmts_pure(&procedure.body))
 }
 
 /// Check if a block of statements is pure.
@@ -900,7 +454,11 @@ fn is_stmt_pure(stmt: &Stmt) -> bool {
     match stmt {
         Stmt::Op(op) => is_op_pure(*op),
         Stmt::Push(_) => true,
-        Stmt::Call { .. } => true, // After inlining, calls become pure if their body is
+        Stmt::PushConstant { .. } => true,
+        Stmt::ReadTemporal { .. } => false,
+        Stmt::PushQuote(_) => true,
+        // Procedure bodies are checked once at the Program boundary above.
+        Stmt::Call { .. } => true,
         Stmt::TemporalScope { .. } => false, // Temporal scopes are never pure
         Stmt::If { .. } | Stmt::While { .. } | Stmt::Block(_) => {
             stmt.child_blocks().into_iter().all(is_stmts_pure)
@@ -915,56 +473,75 @@ fn is_op_pure(op: OpCode) -> bool {
         OpCode::Oracle | OpCode::Prophecy | OpCode::PresentRead | OpCode::Paradox => false,
 
         // Operations requiring full VM
-        OpCode::Pack | OpCode::Unpack | OpCode::Index | OpCode::Store |
-        OpCode::VecNew | OpCode::VecPush | OpCode::VecPop | OpCode::VecGet |
-        OpCode::VecSet | OpCode::VecLen |
-        OpCode::HashNew | OpCode::HashPut | OpCode::HashGet | OpCode::HashDel |
-        OpCode::HashHas | OpCode::HashLen |
-        OpCode::SetNew | OpCode::SetAdd | OpCode::SetHas | OpCode::SetDel | OpCode::SetLen |
-        OpCode::FFICall | OpCode::FFICallNamed |
-        OpCode::FileOpen | OpCode::FileRead | OpCode::FileWrite | OpCode::FileSeek |
-        OpCode::FileFlush | OpCode::FileClose | OpCode::FileExists | OpCode::FileSize |
-        OpCode::BufferNew | OpCode::BufferFromStack | OpCode::BufferToStack |
-        OpCode::BufferLen | OpCode::BufferReadByte | OpCode::BufferWriteByte | OpCode::BufferFree |
-        OpCode::TcpConnect | OpCode::SocketSend | OpCode::SocketRecv | OpCode::SocketClose |
-        OpCode::ProcExec |
-        OpCode::StrRev | OpCode::StrCat | OpCode::StrSplit | OpCode::Assert => false,
+        OpCode::Pack
+        | OpCode::Unpack
+        | OpCode::Index
+        | OpCode::Store
+        | OpCode::VecNew
+        | OpCode::VecPush
+        | OpCode::VecPop
+        | OpCode::VecGet
+        | OpCode::VecSet
+        | OpCode::VecLen
+        | OpCode::HashNew
+        | OpCode::HashPut
+        | OpCode::HashGet
+        | OpCode::HashDel
+        | OpCode::HashHas
+        | OpCode::HashLen
+        | OpCode::SetNew
+        | OpCode::SetAdd
+        | OpCode::SetHas
+        | OpCode::SetDel
+        | OpCode::SetLen
+        | OpCode::FFICall
+        | OpCode::FFICallNamed
+        | OpCode::FileOpen
+        | OpCode::FileRead
+        | OpCode::FileWrite
+        | OpCode::FileSeek
+        | OpCode::FileFlush
+        | OpCode::FileClose
+        | OpCode::FileExists
+        | OpCode::FileSize
+        | OpCode::BufferNew
+        | OpCode::BufferFromStack
+        | OpCode::BufferToStack
+        | OpCode::BufferLen
+        | OpCode::BufferReadByte
+        | OpCode::BufferWriteByte
+        | OpCode::BufferFree
+        | OpCode::TcpConnect
+        | OpCode::SocketSend
+        | OpCode::SocketRecv
+        | OpCode::SocketClose
+        | OpCode::ProcExec
+        | OpCode::Clock
+        | OpCode::Sleep
+        | OpCode::Random
+        | OpCode::StrRev
+        | OpCode::StrCat
+        | OpCode::StrSplit
+        | OpCode::Assert => false,
 
         // All other operations are pure
         _ => true,
     }
 }
 
-/// Try to execute a program in fast mode if it's pure, otherwise fall back to standard VM.
+/// Execute through the validated bytecode authority and prepared dispatcher.
 ///
-/// This is the main entry point for optimised execution.
-pub fn execute_with_fast_path(
-    program: &Program,
-    config: &ExecutorConfig,
-) -> EpochResult {
-    // Check if program can use fast path
-    if is_program_pure(program) {
-        let mut fast_exec = FastExecutor::new(config.max_instructions);
-
-        // Try fast execution
-        match fast_exec.execute_pure(program, &program.quotes) {
-            Ok(()) => {
-                // Successfully executed in fast mode
-                if fast_exec.status == EpochStatus::Running {
-                    fast_exec.status = EpochStatus::Finished;
-                }
-                return fast_exec.to_epoch_result();
-            }
-            Err(_) => {
-                // Fall through to standard VM
-            }
-        }
+/// This compatibility facade never falls back to the legacy AST executor: a
+/// bytecode compile, preparation, capability, or runtime failure is returned
+/// as an [`EpochStatus::Error`].
+pub fn execute_with_fast_path(program: &Program, config: &ExecutorConfig) -> EpochResult {
+    let mut fast_exec = FastExecutor::new(config.max_instructions).with_input(config.input.clone());
+    if let Err(message) = fast_exec.execute_bytecode(program) {
+        fast_exec.status = EpochStatus::Error(message);
+    } else if fast_exec.status == EpochStatus::Running {
+        fast_exec.status = EpochStatus::Finished;
     }
-
-    // Fall back to standard VM
-    let mut executor = Executor::with_config(config.clone());
-    let anamnesis = Memory::new();
-    executor.run_epoch(program, &anamnesis)
+    fast_exec.to_epoch_result()
 }
 
 #[cfg(test)]
@@ -989,9 +566,21 @@ mod tests {
         let mut stack = FastStack::new();
         stack.push(1);
         stack.push(2);
-        stack.swap();
+        assert!(stack.swap());
         assert_eq!(stack.pop(), Some(1));
         assert_eq!(stack.pop(), Some(2));
+    }
+
+    #[test]
+    fn test_fast_stack_swap_rejects_underflow_without_mutating() {
+        let mut stack = FastStack::new();
+        assert!(!stack.swap());
+        assert!(stack.is_empty());
+
+        stack.push(7);
+        assert!(!stack.swap());
+        assert_eq!(stack.depth(), 1);
+        assert_eq!(stack.pop(), Some(7));
     }
 
     #[test]
@@ -1012,8 +601,8 @@ mod tests {
         stack.push(1); // a
         stack.push(2); // b
         stack.push(3); // c
-        // Stack: [1, 2, 3] (3 on top)
-        // ROT: a b c -> b c a
+                       // Stack: [1, 2, 3] (3 on top)
+                       // ROT: a b c -> b c a
         stack.rot();
         assert_eq!(stack.pop(), Some(1)); // a
         assert_eq!(stack.pop(), Some(3)); // c
@@ -1076,5 +665,32 @@ mod tests {
         assert!(!is_op_pure(OpCode::Oracle));
         assert!(!is_op_pure(OpCode::Prophecy));
         assert!(!is_op_pure(OpCode::VecNew));
+    }
+
+    #[test]
+    fn fast_facade_never_falls_back_after_bytecode_capability_denial() {
+        let program = Program {
+            body: vec![Stmt::Push(Value::new(10)), Stmt::Op(OpCode::Sleep)],
+            ..Program::default()
+        };
+        let result = execute_with_fast_path(&program, &ExecutorConfig::default());
+        assert!(matches!(
+            result.status,
+            EpochStatus::Error(ref message) if message.contains("sleep capability denied")
+        ));
+    }
+
+    #[test]
+    fn purity_includes_procedure_bodies() {
+        let tokens = crate::parser::tokenize("PROCEDURE leak { 0 ORACLE } leak");
+        let program = crate::parser::Parser::new(&tokens)
+            .parse_program()
+            .expect("procedure program parses");
+        assert!(!is_program_pure(&program));
+
+        let error = FastExecutor::new(10_000)
+            .execute_pure(&program, &program.quotes)
+            .expect_err("temporal procedure must not be admitted as pure");
+        assert!(error.contains("full temporal/effect runtime"), "{error}");
     }
 }

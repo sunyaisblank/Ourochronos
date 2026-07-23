@@ -63,7 +63,8 @@ PROCEDURE find_sqrt {
         OUTPUT NEWLINE
     } ELSE {
         # Wrong candidate - binary search
-        DUP compare_with_target
+        # compare_with_target preserves candidate and pushes cmp
+        compare_with_target
         0 GT IF {
             # Too small: increment
             1 ADD ADDR_CANDIDATE PROPHECY

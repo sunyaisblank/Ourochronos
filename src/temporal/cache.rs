@@ -8,7 +8,8 @@
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
-use crate::core::{Memory, OutputItem};
+use crate::core::memory::ExactMemoryState;
+use crate::core::{Address, Memory, OutputItem};
 use crate::vm::EpochStatus;
 
 /// Maximum cache size before eviction.
@@ -24,11 +25,11 @@ pub struct MemoizedResult {
     /// Status of execution.
     pub status: EpochStatus,
     /// Cells that were modified.
-    pub modified_cells: HashSet<u16>,
+    pub modified_cells: HashSet<Address>,
     /// Oracle addresses read.
-    pub oracle_reads: HashSet<u16>,
+    pub oracle_reads: HashSet<Address>,
     /// Prophecy addresses written.
-    pub prophecy_writes: HashSet<u16>,
+    pub prophecy_writes: HashSet<Address>,
     /// Time taken to compute.
     pub compute_time: Duration,
     /// Number of instructions executed.
@@ -63,7 +64,7 @@ impl MemoizedResult {
     }
 
     /// Builder: set modified cells.
-    pub fn with_modified_cells(mut self, cells: HashSet<u16>) -> Self {
+    pub fn with_modified_cells(mut self, cells: HashSet<Address>) -> Self {
         self.modified_cells = cells;
         self
     }
@@ -72,14 +73,15 @@ impl MemoizedResult {
 /// Cache of epoch results keyed by anamnesis state hash.
 ///
 /// `Memory::state_hash` is a 64-bit XOR fold, so distinct states can collide.
-/// Each entry therefore stores the sparse form of the anamnesis that produced
-/// it, and a lookup only hits when that stored state compares equal; serving
-/// a colliding entry would hand the search a wrong next state. Bounded: when
-/// full, an arbitrary entry is evicted on insert, which only forces
-/// re-execution of an epoch.
+/// Each bucket therefore stores the exact sparse identity (including width and
+/// provenance) of every anamnesis that produced a result. A lookup only hits
+/// when that stored state compares equal; serving a bare hash match would hand
+/// the search a wrong next state. Bounded: when full, one entry is evicted on
+/// insert, which only forces re-execution of an epoch.
 #[derive(Debug)]
 pub struct EpochCache {
-    entries: HashMap<u64, (Vec<(u16, u64)>, MemoizedResult)>,
+    entries: HashMap<u64, Vec<(ExactMemoryState, MemoizedResult)>>,
+    entry_count: usize,
     max_size: usize,
     hits: usize,
     misses: usize,
@@ -102,6 +104,7 @@ impl EpochCache {
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
             entries: HashMap::with_capacity(capacity),
+            entry_count: 0,
             max_size: capacity,
             hits: 0,
             misses: 0,
@@ -109,12 +112,16 @@ impl EpochCache {
         }
     }
 
-    /// Look up the cached result for an anamnesis given as its sparse form
-    /// (Memory::sparse_state, computed once per epoch by the caller). A hash
-    /// match alone is not a hit; the stored state must compare equal.
-    pub fn get(&mut self, state_hash: u64, sparse: &[(u16, u64)]) -> Option<&MemoizedResult> {
-        match self.entries.get(&state_hash) {
-            Some((stored, result)) if stored.as_slice() == sparse => {
+    /// Look up a result using the caller's precomputed exact sparse identity.
+    /// A hash match alone is not a hit; width, values, and provenance must all
+    /// compare equal.
+    pub fn get(&mut self, state_hash: u64, state: &ExactMemoryState) -> Option<&MemoizedResult> {
+        match self.entries.get(&state_hash).and_then(|bucket| {
+            bucket
+                .iter()
+                .find_map(|(stored, result)| (stored == state).then_some(result))
+        }) {
+            Some(result) => {
                 self.hits += 1;
                 Some(result)
             }
@@ -125,15 +132,28 @@ impl EpochCache {
         }
     }
 
-    /// Store a result for this anamnesis, evicting an arbitrary entry when full.
-    pub fn insert(&mut self, state_hash: u64, sparse: &[(u16, u64)], result: MemoizedResult) {
-        if self.entries.len() >= self.max_size {
-            if let Some(&key) = self.entries.keys().next() {
-                self.entries.remove(&key);
-                self.evictions += 1;
-            }
+    /// Store a result for this anamnesis, retaining colliding exact states in
+    /// the same hash bucket and evicting one entry when full.
+    pub fn insert(&mut self, state_hash: u64, state: &ExactMemoryState, result: MemoizedResult) {
+        if let Some((_, existing)) = self
+            .entries
+            .get_mut(&state_hash)
+            .and_then(|bucket| bucket.iter_mut().find(|(stored, _)| stored == state))
+        {
+            *existing = result;
+            return;
         }
-        self.entries.insert(state_hash, (sparse.to_vec(), result));
+        if self.max_size == 0 {
+            return;
+        }
+        if self.entry_count >= self.max_size {
+            self.evict_one();
+        }
+        self.entries
+            .entry(state_hash)
+            .or_default()
+            .push((state.clone(), result));
+        self.entry_count += 1;
     }
 
     /// Check if a state hash has an entry (unverified; testing hook).
@@ -144,7 +164,7 @@ impl EpochCache {
     /// Get cache statistics.
     pub fn stats(&self) -> CacheStats {
         CacheStats {
-            size: self.entries.len(),
+            size: self.entry_count,
             hits: self.hits,
             misses: self.misses,
             evictions: self.evictions,
@@ -159,6 +179,7 @@ impl EpochCache {
     /// Clear the cache and statistics.
     pub fn clear(&mut self) {
         self.entries.clear();
+        self.entry_count = 0;
         self.hits = 0;
         self.misses = 0;
         self.evictions = 0;
@@ -166,12 +187,29 @@ impl EpochCache {
 
     /// Get current cache size.
     pub fn len(&self) -> usize {
-        self.entries.len()
+        self.entry_count
     }
 
     /// Check if cache is empty.
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.entry_count == 0
+    }
+
+    fn evict_one(&mut self) {
+        let Some(key) = self.entries.keys().copied().min() else {
+            return;
+        };
+        let remove_bucket = if let Some(bucket) = self.entries.get_mut(&key) {
+            bucket.pop();
+            bucket.is_empty()
+        } else {
+            false
+        };
+        if remove_bucket {
+            self.entries.remove(&key);
+        }
+        self.entry_count -= 1;
+        self.evictions += 1;
     }
 }
 
@@ -192,16 +230,22 @@ pub struct CacheStats {
 
 impl std::fmt::Display for CacheStats {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Cache: {} entries, {}/{} hits ({:.1}%), {} evictions",
-            self.size, self.hits, self.hits + self.misses, self.hit_rate * 100.0,
-            self.evictions)
+        write!(
+            f,
+            "Cache: {} entries, {}/{} hits ({:.1}%), {} evictions",
+            self.size,
+            self.hits,
+            self.hits + self.misses,
+            self.hit_rate * 100.0,
+            self.evictions
+        )
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::Memory;
+    use crate::core::{Memory, Provenance, Value};
 
     fn dummy_result() -> MemoizedResult {
         MemoizedResult::simple(Memory::new(), Vec::new(), EpochStatus::Finished)
@@ -210,7 +254,7 @@ mod tests {
     #[test]
     fn cached_result_is_returned_on_hit_and_counted() {
         let mut cache = EpochCache::new();
-        let sparse = Memory::new().sparse_state();
+        let sparse = Memory::new().exact_sparse_state();
         assert!(cache.get(42, &sparse).is_none());
         cache.insert(42, &sparse, dummy_result());
         assert!(cache.get(42, &sparse).is_some());
@@ -226,18 +270,78 @@ mod tests {
         // Same hash key, different anamnesis contents: the entry must not be
         // returned, because its result belongs to a different state.
         let mut cache = EpochCache::new();
-        cache.insert(42, &Memory::new().sparse_state(), dummy_result());
+        cache.insert(42, &Memory::new().exact_sparse_state(), dummy_result());
 
         let mut colliding = Memory::new();
         colliding.write(7, crate::core::Value::new(99));
-        assert!(cache.get(42, &colliding.sparse_state()).is_none());
+        assert!(cache.get(42, &colliding.exact_sparse_state()).is_none());
         assert_eq!(cache.stats().misses, 1);
+    }
+
+    #[test]
+    fn forced_hash_collision_retains_and_serves_each_exact_state() {
+        let mut first = Memory::with_size(8);
+        first.write(1, Value::new(11));
+        let mut second = Memory::with_size(8);
+        second.write(1, Value::new(22));
+        let first = first.exact_sparse_state();
+        let second = second.exact_sparse_state();
+        let mut cache = EpochCache::new();
+
+        let mut first_result = Memory::with_size(8);
+        first_result.write(0, Value::new(101));
+        let mut second_result = Memory::with_size(8);
+        second_result.write(0, Value::new(202));
+        cache.insert(
+            7,
+            &first,
+            MemoizedResult::simple(first_result, Vec::new(), EpochStatus::Finished),
+        );
+        cache.insert(
+            7,
+            &second,
+            MemoizedResult::simple(second_result, Vec::new(), EpochStatus::Finished),
+        );
+
+        assert_eq!(cache.len(), 2);
+        assert_eq!(cache.get(7, &first).unwrap().present.read(0).val, 101);
+        assert_eq!(cache.get(7, &second).unwrap().present.read(0).val, 202);
+    }
+
+    #[test]
+    fn equal_numbers_with_distinct_provenance_are_distinct_cache_keys() {
+        let mut pure = Memory::with_size(8);
+        pure.write(3, Value::new(55));
+        let mut temporal = Memory::with_size(8);
+        temporal.write(3, Value::with_provenance(55, Provenance::single(9)));
+        assert_eq!(pure.state_hash(), temporal.state_hash());
+        assert!(pure.numeric_values_equal(&temporal));
+
+        let pure = pure.exact_sparse_state();
+        let temporal = temporal.exact_sparse_state();
+        assert_ne!(pure, temporal);
+        let mut cache = EpochCache::new();
+        cache.insert(0, &pure, dummy_result());
+        assert!(cache.get(0, &temporal).is_none());
+        cache.insert(0, &temporal, dummy_result());
+        assert!(cache.get(0, &pure).is_some());
+        assert!(cache.get(0, &temporal).is_some());
+    }
+
+    #[test]
+    fn zero_value_provenance_is_not_discarded_from_cache_identity() {
+        let pure = Memory::with_size(4);
+        let mut temporal = pure.clone();
+        temporal.write(1, Value::with_provenance(0, Provenance::single(2)));
+        assert!(pure.sparse_state().is_empty());
+        assert!(temporal.sparse_state().is_empty());
+        assert_ne!(pure.exact_sparse_state(), temporal.exact_sparse_state());
     }
 
     #[test]
     fn insert_beyond_capacity_evicts_and_stays_bounded() {
         let mut cache = EpochCache::with_capacity(4);
-        let sparse = Memory::new().sparse_state();
+        let sparse = Memory::new().exact_sparse_state();
         for hash in 0..10u64 {
             cache.insert(hash, &sparse, dummy_result());
         }
@@ -248,7 +352,7 @@ mod tests {
     #[test]
     fn clear_resets_entries_and_statistics() {
         let mut cache = EpochCache::new();
-        let sparse = Memory::new().sparse_state();
+        let sparse = Memory::new().exact_sparse_state();
         cache.insert(1, &sparse, dummy_result());
         let _ = cache.get(1, &sparse);
         cache.clear();
@@ -274,7 +378,7 @@ mod tests {
     #[test]
     fn memoized_result_builders_set_metadata() {
         let mut cells = HashSet::new();
-        cells.insert(7u16);
+        cells.insert(7u64);
         let result = dummy_result()
             .with_compute_time(Duration::from_millis(5))
             .with_instruction_count(123)

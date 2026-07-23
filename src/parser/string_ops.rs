@@ -2,18 +2,15 @@
 //!
 //! Handles string manipulation operations: STR_REV, STR_CAT, STR_SPLIT.
 
-use crate::ast::{OpCode, Stmt};
 use super::domain::{DomainParser, ParseContext};
+use crate::ast::{OpCode, Stmt};
 
 /// Parser for string operations.
 pub struct StringOpsParser;
 
 impl StringOpsParser {
-    pub const KEYWORDS: &'static [&'static str] = &[
-        "STR_REV",
-        "STR_CAT", "CONCAT",
-        "STR_SPLIT", "SPLIT",
-    ];
+    pub const KEYWORDS: &'static [&'static str] =
+        &["STR_REV", "STR_CAT", "CONCAT", "STR_SPLIT", "SPLIT"];
 }
 
 impl DomainParser for StringOpsParser {
@@ -21,7 +18,7 @@ impl DomainParser for StringOpsParser {
         Self::KEYWORDS
     }
 
-    fn parse<'a>(&self, keyword: &str, ctx: &mut ParseContext<'a>) -> Result<Stmt, String> {
+    fn parse(&self, keyword: &str, ctx: &mut ParseContext<'_>) -> Result<Stmt, String> {
         match keyword {
             "STR_REV" => ctx.emit_op(OpCode::StrRev),
             "STR_CAT" | "CONCAT" => ctx.emit_op(OpCode::StrCat),

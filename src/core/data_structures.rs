@@ -3,10 +3,10 @@
 //! Provides dynamically allocated vectors, hash tables, and sets
 //! that are referenced by handles from the stack.
 
-use std::collections::{HashMap, HashSet};
 use super::address::Handle;
-use super::value::Value;
 use super::error::{OuroError, OuroResult};
+use super::value::Value;
+use std::collections::{HashMap, HashSet};
 
 /// Storage for dynamically allocated vectors.
 ///
@@ -21,7 +21,9 @@ pub struct VecStore {
 impl VecStore {
     /// Create a new empty vector store.
     pub fn new() -> Self {
-        Self { vectors: Vec::new() }
+        Self {
+            vectors: Vec::new(),
+        }
     }
 
     /// Allocate a new empty vector and return its handle.
@@ -44,7 +46,11 @@ impl VecStore {
         if idx < self.vectors.len() {
             Ok(idx)
         } else {
-            Err(OuroError::invalid_handle("vector", handle, self.vectors.len() as u64))
+            Err(OuroError::invalid_handle(
+                "vector",
+                handle,
+                self.vectors.len() as u64,
+            ))
         }
     }
 
@@ -68,7 +74,9 @@ impl VecStore {
     /// Pop a value from a vector.
     pub fn pop(&mut self, handle: Handle) -> OuroResult<Value> {
         let idx = self.validate(handle)?;
-        self.vectors[idx].pop().ok_or_else(|| OuroError::empty_structure("vector", "pop from"))
+        self.vectors[idx]
+            .pop()
+            .ok_or_else(|| OuroError::empty_structure("vector", "pop from"))
     }
 
     /// Get a value at index from a vector.
@@ -78,7 +86,11 @@ impl VecStore {
         if (index as usize) < vec.len() {
             Ok(vec[index as usize].clone())
         } else {
-            Err(OuroError::index_out_of_bounds("vector", index, vec.len() as u64))
+            Err(OuroError::index_out_of_bounds(
+                "vector",
+                index,
+                vec.len() as u64,
+            ))
         }
     }
 
@@ -90,7 +102,11 @@ impl VecStore {
             vec[index as usize] = value;
             Ok(())
         } else {
-            Err(OuroError::index_out_of_bounds("vector", index, vec.len() as u64))
+            Err(OuroError::index_out_of_bounds(
+                "vector",
+                index,
+                vec.len() as u64,
+            ))
         }
     }
 
@@ -142,7 +158,11 @@ impl HashStore {
         if idx < self.tables.len() {
             Ok(idx)
         } else {
-            Err(OuroError::invalid_handle("hash table", handle, self.tables.len() as u64))
+            Err(OuroError::invalid_handle(
+                "hash table",
+                handle,
+                self.tables.len() as u64,
+            ))
         }
     }
 
@@ -234,7 +254,11 @@ impl SetStore {
         if idx < self.sets.len() {
             Ok(idx)
         } else {
-            Err(OuroError::invalid_handle("set", handle, self.sets.len() as u64))
+            Err(OuroError::invalid_handle(
+                "set",
+                handle,
+                self.sets.len() as u64,
+            ))
         }
     }
 
@@ -310,6 +334,38 @@ impl DataStructures {
         self.hashes = HashStore::new();
         self.sets = SetStore::new();
     }
+
+    /// Conservative charge for retaining every collection and value.
+    pub fn retained_size_charge(&self) -> usize {
+        let vectors = self.vectors.vectors.iter().fold(0usize, |total, vector| {
+            vector.iter().fold(
+                total.saturating_add(64).saturating_add(
+                    vector
+                        .capacity()
+                        .saturating_mul(std::mem::size_of::<Value>()),
+                ),
+                |subtotal, value| subtotal.saturating_add(value.retained_size_charge()),
+            )
+        });
+        let hashes = self.hashes.tables.iter().fold(0usize, |total, table| {
+            table.iter().fold(
+                total
+                    .saturating_add(64)
+                    .saturating_add(table.capacity().saturating_mul(64)),
+                |subtotal, (_, value)| {
+                    subtotal.saturating_add(value.provenance_retained_size_charge())
+                },
+            )
+        });
+        self.sets
+            .sets
+            .iter()
+            .fold(vectors.saturating_add(hashes), |total, set| {
+                total
+                    .saturating_add(64)
+                    .saturating_add(set.capacity().saturating_mul(32))
+            })
+    }
 }
 
 #[cfg(test)]
@@ -348,7 +404,13 @@ mod tests {
         let result = store.len(999);
         assert!(result.is_err());
 
-        if let Err(OuroError::InvalidHandle { handle_type, handle, max_handle, .. }) = result {
+        if let Err(OuroError::InvalidHandle {
+            handle_type,
+            handle,
+            max_handle,
+            ..
+        }) = result
+        {
             assert_eq!(handle_type, "vector");
             assert_eq!(handle, 999);
             assert_eq!(max_handle, 0);
@@ -368,7 +430,13 @@ mod tests {
         let result = store.get_at(h, 10);
         assert!(result.is_err());
 
-        if let Err(OuroError::IndexOutOfBounds { structure_type, index, length, .. }) = result {
+        if let Err(OuroError::IndexOutOfBounds {
+            structure_type,
+            index,
+            length,
+            ..
+        }) = result
+        {
             assert_eq!(structure_type, "vector");
             assert_eq!(index, 10);
             assert_eq!(length, 2);
@@ -386,7 +454,12 @@ mod tests {
         let result = store.pop(h);
         assert!(result.is_err());
 
-        if let Err(OuroError::EmptyStructure { structure_type, operation, .. }) = result {
+        if let Err(OuroError::EmptyStructure {
+            structure_type,
+            operation,
+            ..
+        }) = result
+        {
             assert_eq!(structure_type, "vector");
             assert_eq!(operation, "pop from");
         } else {
@@ -429,7 +502,13 @@ mod tests {
         let result = store.len(999);
         assert!(result.is_err());
 
-        if let Err(OuroError::InvalidHandle { handle_type, handle, max_handle, .. }) = result {
+        if let Err(OuroError::InvalidHandle {
+            handle_type,
+            handle,
+            max_handle,
+            ..
+        }) = result
+        {
             assert_eq!(handle_type, "hash table");
             assert_eq!(handle, 999);
             assert_eq!(max_handle, 0);
@@ -445,7 +524,12 @@ mod tests {
         let result = store.put(999, 1, Value::new(42));
         assert!(result.is_err());
 
-        if let Err(OuroError::InvalidHandle { handle_type, handle, .. }) = result {
+        if let Err(OuroError::InvalidHandle {
+            handle_type,
+            handle,
+            ..
+        }) = result
+        {
             assert_eq!(handle_type, "hash table");
             assert_eq!(handle, 999);
         } else {
@@ -486,7 +570,13 @@ mod tests {
         let result = store.len(999);
         assert!(result.is_err());
 
-        if let Err(OuroError::InvalidHandle { handle_type, handle, max_handle, .. }) = result {
+        if let Err(OuroError::InvalidHandle {
+            handle_type,
+            handle,
+            max_handle,
+            ..
+        }) = result
+        {
             assert_eq!(handle_type, "set");
             assert_eq!(handle, 999);
             assert_eq!(max_handle, 0);
@@ -502,7 +592,12 @@ mod tests {
         let result = store.add(999, 42);
         assert!(result.is_err());
 
-        if let Err(OuroError::InvalidHandle { handle_type, handle, .. }) = result {
+        if let Err(OuroError::InvalidHandle {
+            handle_type,
+            handle,
+            ..
+        }) = result
+        {
             assert_eq!(handle_type, "set");
             assert_eq!(handle, 999);
         } else {
@@ -570,7 +665,13 @@ mod tests {
         let result = store.set_at(h, 5, Value::new(99));
         assert!(result.is_err());
 
-        if let Err(OuroError::IndexOutOfBounds { structure_type, index, length, .. }) = result {
+        if let Err(OuroError::IndexOutOfBounds {
+            structure_type,
+            index,
+            length,
+            ..
+        }) = result
+        {
             assert_eq!(structure_type, "vector");
             assert_eq!(index, 5);
             assert_eq!(length, 1);

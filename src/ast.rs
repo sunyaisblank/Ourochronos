@@ -5,6 +5,33 @@
 //! and can read from anamnesis (the temporal oracle).
 
 use crate::core::Value;
+use crate::source::SourceSpan;
+
+/// Compiler identity of an anonymous quotation in [`Program::quotes`].
+///
+/// A quotation reference is deliberately not a [`Value`]: source-level word
+/// literals and quotation identities are different compiler constants even
+/// though both are encoded as `u64` words by the current runtimes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct QuoteId(u64);
+
+impl QuoteId {
+    /// Construct an identity from its zero-based quotation-table index.
+    pub const fn new(index: u64) -> Self {
+        Self(index)
+    }
+
+    /// Return the runtime word encoding of this identity.
+    pub const fn as_u64(self) -> u64 {
+        self.0
+    }
+
+    /// Relocate this identity when its quotation table is appended to another.
+    pub fn checked_add(self, offset: usize) -> Option<Self> {
+        let offset = u64::try_from(offset).ok()?;
+        self.0.checked_add(offset).map(Self)
+    }
+}
 
 /// Defines the OpCode enum and its complete variant list from one source.
 ///
@@ -31,34 +58,34 @@ define_opcodes! {
     // ═══════════════════════════════════════════════════════════════════
     // Stack Manipulation
     // ═══════════════════════════════════════════════════════════════════
-    
+
     /// No operation.
     Nop,
-    
+
     /// Halt execution of the current epoch.
     /// Stack: ( -- )
     Halt,
-    
+
     /// Pop and discard the top of stack.
     /// Stack: ( a -- )
     Pop,
-    
+
     /// Duplicate the top of stack.
     /// Stack: ( a -- a a )
     Dup,
-    
+
     /// Swap the top two elements.
     /// Stack: ( a b -- b a )
     Swap,
-    
+
     /// Copy the second element to the top.
     /// Stack: ( a b -- a b a )
     Over,
-    
+
     /// Rotate the top three elements.
     /// Stack: ( a b c -- b c a )
     Rot,
-    
+
     /// Push the current stack depth.
     /// Stack: ( -- n )
     Depth,
@@ -88,25 +115,25 @@ define_opcodes! {
     /// Keep x, execute quote, restore x (below result).
     /// Stack: ( x quote -- ... x )
     Keep,
-    
+
     /// Bi-call: Apply p to x, then q to x.
     /// Stack: ( x p q -- ... ... )
     Bi,
-    
+
     /// Recursive combinator: Execute quote with quote on stack.
     /// Stack: ( quote -- ... )
     Rec,
-    
+
     // ════ String Operations ════
-    
+
     /// Reverse a string (len-suffixed sequence).
     /// Stack: ( chars... len -- reversed_chars... len )
     StrRev,
-    
+
     /// Concatenate two strings.
     /// Stack: ( c1.. len1 c2.. len2 -- c1..c2.. (len1+len2) )
     StrCat,
-    
+
     /// Split string by delimiter char.
     /// Stack: ( chars... len delim_char -- s1 s2 .. sn count )
     StrSplit,
@@ -114,27 +141,27 @@ define_opcodes! {
     // ═══════════════════════════════════════════════════════════════════
     // Arithmetic (modular, wrapping at 2^64)
     // ═══════════════════════════════════════════════════════════════════
-    
+
     /// Addition.
     /// Stack: ( a b -- a+b )
     Add,
-    
+
     /// Subtraction.
     /// Stack: ( a b -- a-b )
     Sub,
-    
+
     /// Multiplication.
     /// Stack: ( a b -- a*b )
     Mul,
-    
+
     /// Division (returns 0 if divisor is 0).
     /// Stack: ( a b -- a/b )
     Div,
-    
+
     /// Modulo (returns 0 if divisor is 0).
     /// Stack: ( a b -- a%b )
     Mod,
-    
+
     /// Negation (two's complement).
     /// Stack: ( a -- -a )
     Neg,
@@ -159,59 +186,59 @@ define_opcodes! {
     /// Pops length, chars, then condition. panics if condition is 0.
     /// Stack: ( cond chars... len -- )
     Assert,
-    
+
     // ═══════════════════════════════════════════════════════════════════
     // Bitwise Logic
     // ═══════════════════════════════════════════════════════════════════
-    
+
     /// Logical NOT: 0 -> 1, nonzero -> 0.
     /// Stack: ( a -- !a )
     Not,
-    
+
     /// Bitwise AND.
     /// Stack: ( a b -- a&b )
     And,
-    
+
     /// Bitwise OR.
     /// Stack: ( a b -- a|b )
     Or,
-    
+
     /// Bitwise XOR.
     /// Stack: ( a b -- a^b )
     Xor,
-    
+
     /// Left shift.
     /// Stack: ( a n -- a<<n )
     Shl,
-    
+
     /// Right shift (logical).
     /// Stack: ( a n -- a>>n )
     Shr,
-    
+
     // ═══════════════════════════════════════════════════════════════════
     // Comparison (result: 1 if true, 0 if false)
     // ═══════════════════════════════════════════════════════════════════
-    
+
     /// Equal.
     /// Stack: ( a b -- a==b )
     Eq,
-    
+
     /// Not equal.
     /// Stack: ( a b -- a!=b )
     Neq,
-    
+
     /// Less than.
     /// Stack: ( a b -- a<b )
     Lt,
-    
+
     /// Greater than.
     /// Stack: ( a b -- a>b )
     Gt,
-    
+
     /// Less than or equal.
     /// Stack: ( a b -- a<=b )
     Lte,
-    
+
     /// Greater than or equal.
     /// Stack: ( a b -- a>=b )
     Gte,
@@ -239,49 +266,49 @@ define_opcodes! {
     // ═══════════════════════════════════════════════════════════════════
     // Temporal Operations (the core of OUROCHRONOS)
     // ═══════════════════════════════════════════════════════════════════
-    
+
     /// ORACLE: Read from anamnesis (the future).
-    /// Pops an address, pushes the value from Anamnesis[address].
+    /// Pops an address, pushes the value from `Anamnesis[address]`.
     /// This is the mechanism for receiving information from the future.
-    /// Stack: ( addr -- A[addr] )
+    /// Stack: `( addr -- A[addr] )`
     Oracle,
-    
+
     /// PROPHECY: Write to present (fulfilling the future).
-    /// Pops value and address, writes value to Present[address].
+    /// Pops value and address, writes value to `Present[address]`.
     /// This is the mechanism for sending information to the past.
     /// Stack: ( value addr -- )
     Prophecy,
-    
+
     /// PRESENT_READ: Read from present memory (current epoch).
-    /// Stack: ( addr -- P[addr] )
+    /// Stack: `( addr -- P[addr] )`
     PresentRead,
-    
+
     /// PARADOX: Signal explicit inconsistency.
     /// Terminates the current epoch as paradoxical.
     /// In fixed-point search, this path is rejected.
     /// Stack: ( -- )
     Paradox,
-    
+
     // ═══════════════════════════════════════════════════════════════════
     // Array/Memory Operations
     // ═══════════════════════════════════════════════════════════════════
-    
+
     /// Pack n values into contiguous memory starting at base address.
     /// Stack: ( v1 v2 ... vn base n -- )
     Pack,
-    
+
     /// Unpack n values from contiguous memory at base address.
     /// Stack: ( base n -- v1 v2 ... vn )
     Unpack,
-    
+
     /// Read from memory at computed index: base + index.
     /// Stack: ( base index -- P[base+index] )
     Index,
-    
+
     /// Store to memory at computed index: base + index.
     /// Stack: ( value base index -- )
     Store,
-    
+
     // ═══════════════════════════════════════════════════════════════════
     // I/O Operations
     // ═══════════════════════════════════════════════════════════════════
@@ -533,40 +560,112 @@ impl OpCode {
     /// Exhaustive (no wildcard): adding an opcode forces a classification
     /// decision here, so nothing can silently escape the fixed-point
     /// search's effect gate the way an unclassified default would allow.
-    /// FILE_OPEN is Pure here because its destructiveness depends on the
-    /// mode operand; its executor arm gates write/append/create/truncate
-    /// modes where the operand is known.
+    /// File/socket/process resources are external. Byte buffers are different:
+    /// the canonical bytecode VM recreates their bounded handle store for each
+    /// candidate epoch, making buffer allocation and mutation deterministic
+    /// epoch-local scratch.
     pub fn effect_class(&self) -> EffectClass {
         match self {
-            OpCode::FileWrite | OpCode::SocketSend | OpCode::SocketRecv | OpCode::TcpConnect
-            | OpCode::ProcExec | OpCode::FFICall | OpCode::FFICallNamed | OpCode::Sleep => EffectClass::External,
+            OpCode::FileOpen
+            | OpCode::FileRead
+            | OpCode::FileWrite
+            | OpCode::FileSeek
+            | OpCode::FileFlush
+            | OpCode::FileClose
+            | OpCode::FileExists
+            | OpCode::FileSize
+            | OpCode::SocketSend
+            | OpCode::SocketRecv
+            | OpCode::TcpConnect
+            | OpCode::SocketClose
+            | OpCode::ProcExec
+            | OpCode::FFICall
+            | OpCode::FFICallNamed
+            | OpCode::Sleep => EffectClass::External,
             OpCode::Clock | OpCode::Random => EffectClass::NonDeterministic,
-            OpCode::Nop | OpCode::Halt | OpCode::Pop | OpCode::Dup
-            | OpCode::Swap | OpCode::Over | OpCode::Rot | OpCode::Depth
-            | OpCode::Pick | OpCode::Roll | OpCode::Reverse | OpCode::Exec
-            | OpCode::Dip | OpCode::Keep | OpCode::Bi | OpCode::Rec
-            | OpCode::StrRev | OpCode::StrCat | OpCode::StrSplit | OpCode::Add
-            | OpCode::Sub | OpCode::Mul | OpCode::Div | OpCode::Mod
-            | OpCode::Neg | OpCode::Abs | OpCode::Min | OpCode::Max
-            | OpCode::Sign | OpCode::Assert | OpCode::Not | OpCode::And
-            | OpCode::Or | OpCode::Xor | OpCode::Shl | OpCode::Shr
-            | OpCode::Eq | OpCode::Neq | OpCode::Lt | OpCode::Gt
-            | OpCode::Lte | OpCode::Gte | OpCode::Slt | OpCode::Sgt
-            | OpCode::Slte | OpCode::Sgte | OpCode::Oracle | OpCode::Prophecy
-            | OpCode::PresentRead | OpCode::Paradox | OpCode::Pack | OpCode::Unpack
-            | OpCode::Index | OpCode::Store | OpCode::Input | OpCode::Output
-            | OpCode::Emit | OpCode::VecNew | OpCode::VecPush | OpCode::VecPop
-            | OpCode::VecGet | OpCode::VecSet | OpCode::VecLen | OpCode::HashNew
-            | OpCode::HashPut | OpCode::HashGet | OpCode::HashDel | OpCode::HashHas
-            | OpCode::HashLen | OpCode::SetNew | OpCode::SetAdd | OpCode::SetHas
-            | OpCode::SetDel | OpCode::SetLen | OpCode::FileOpen | OpCode::FileRead
-            | OpCode::FileSeek | OpCode::FileFlush | OpCode::FileClose | OpCode::FileExists
-            | OpCode::FileSize | OpCode::BufferNew | OpCode::BufferFromStack | OpCode::BufferToStack
-            | OpCode::BufferLen | OpCode::BufferReadByte | OpCode::BufferWriteByte | OpCode::BufferFree
-            | OpCode::SocketClose => EffectClass::Pure,
+            OpCode::Nop
+            | OpCode::Halt
+            | OpCode::Pop
+            | OpCode::Dup
+            | OpCode::Swap
+            | OpCode::Over
+            | OpCode::Rot
+            | OpCode::Depth
+            | OpCode::Pick
+            | OpCode::Roll
+            | OpCode::Reverse
+            | OpCode::Exec
+            | OpCode::Dip
+            | OpCode::Keep
+            | OpCode::Bi
+            | OpCode::Rec
+            | OpCode::StrRev
+            | OpCode::StrCat
+            | OpCode::StrSplit
+            | OpCode::Add
+            | OpCode::Sub
+            | OpCode::Mul
+            | OpCode::Div
+            | OpCode::Mod
+            | OpCode::Neg
+            | OpCode::Abs
+            | OpCode::Min
+            | OpCode::Max
+            | OpCode::Sign
+            | OpCode::Assert
+            | OpCode::Not
+            | OpCode::And
+            | OpCode::Or
+            | OpCode::Xor
+            | OpCode::Shl
+            | OpCode::Shr
+            | OpCode::Eq
+            | OpCode::Neq
+            | OpCode::Lt
+            | OpCode::Gt
+            | OpCode::Lte
+            | OpCode::Gte
+            | OpCode::Slt
+            | OpCode::Sgt
+            | OpCode::Slte
+            | OpCode::Sgte
+            | OpCode::Oracle
+            | OpCode::Prophecy
+            | OpCode::PresentRead
+            | OpCode::Paradox
+            | OpCode::Pack
+            | OpCode::Unpack
+            | OpCode::Index
+            | OpCode::Store
+            | OpCode::Input
+            | OpCode::Output
+            | OpCode::Emit
+            | OpCode::VecNew
+            | OpCode::VecPush
+            | OpCode::VecPop
+            | OpCode::VecGet
+            | OpCode::VecSet
+            | OpCode::VecLen
+            | OpCode::HashNew
+            | OpCode::HashPut
+            | OpCode::HashGet
+            | OpCode::HashDel
+            | OpCode::HashHas
+            | OpCode::HashLen
+            | OpCode::SetNew
+            | OpCode::SetAdd
+            | OpCode::SetHas
+            | OpCode::SetDel
+            | OpCode::SetLen
+            | OpCode::BufferNew
+            | OpCode::BufferFromStack
+            | OpCode::BufferToStack
+            | OpCode::BufferLen
+            | OpCode::BufferReadByte
+            | OpCode::BufferWriteByte
+            | OpCode::BufferFree => EffectClass::Pure,
         }
     }
-
 
     /// Get the name of this opcode as it appears in source code.
     pub fn name(&self) -> &'static str {
@@ -681,7 +780,7 @@ impl OpCode {
             OpCode::Random => "RANDOM",
         }
     }
-    
+
     /// Get the stack effect: (inputs, outputs).
     pub fn stack_effect(&self) -> (usize, usize) {
         match self {
@@ -697,62 +796,79 @@ impl OpCode {
             OpCode::Neg | OpCode::Abs | OpCode::Sign => (1, 1),
             OpCode::Assert => (2, 0), // Effectively consumes cond + len (and chars via len)
             OpCode::Not => (1, 1),
-            OpCode::Add | OpCode::Sub | OpCode::Mul | OpCode::Div | OpCode::Mod |
-            OpCode::Min | OpCode::Max |
-            OpCode::And | OpCode::Or | OpCode::Xor | OpCode::Shl | OpCode::Shr |
-            OpCode::Eq | OpCode::Neq | OpCode::Lt | OpCode::Gt | OpCode::Lte | OpCode::Gte |
-            OpCode::Slt | OpCode::Sgt | OpCode::Slte | OpCode::Sgte => (2, 1),
+            OpCode::Add
+            | OpCode::Sub
+            | OpCode::Mul
+            | OpCode::Div
+            | OpCode::Mod
+            | OpCode::Min
+            | OpCode::Max
+            | OpCode::And
+            | OpCode::Or
+            | OpCode::Xor
+            | OpCode::Shl
+            | OpCode::Shr
+            | OpCode::Eq
+            | OpCode::Neq
+            | OpCode::Lt
+            | OpCode::Gt
+            | OpCode::Lte
+            | OpCode::Gte
+            | OpCode::Slt
+            | OpCode::Sgt
+            | OpCode::Slte
+            | OpCode::Sgte => (2, 1),
             OpCode::Oracle | OpCode::PresentRead => (1, 1),
             OpCode::Prophecy => (2, 0),
             // Array opcodes have variable effects, these are minimums
-            OpCode::Pack => (2, 0),    // base, n, (plus n values consumed)
-            OpCode::Unpack => (2, 0),  // base, n (produces n values)
-            OpCode::Index => (2, 1),   // base, index -> value
-            OpCode::Store => (3, 0),   // value, base, index
-            OpCode::Roll => (1, 0),    // pops n
-            OpCode::Reverse => (1, 0), // pops n
-            OpCode::Exec => (1, 0),    // pops quote_id
-            OpCode::Dip => (2, 1),     // pops x, quote_id; pushes x (restores it)
-            OpCode::Keep => (2, 1),    // pops x, quote; pushes x (under results?) -> complicated stack effect
-            OpCode::Bi => (3, 0),      // pops x, p, q
-            OpCode::Rec => (1, 0),     // pops quote (but pushes it back inside execution)
-            OpCode::StrRev => (1, 1),  // pops len, pushes len
-            OpCode::StrCat => (2, 1),  // pops len1, len2, pushes len_sum
+            OpCode::Pack => (2, 0),     // base, n, (plus n values consumed)
+            OpCode::Unpack => (2, 0),   // base, n (produces n values)
+            OpCode::Index => (2, 1),    // base, index -> value
+            OpCode::Store => (3, 0),    // value, base, index
+            OpCode::Roll => (1, 0),     // pops n
+            OpCode::Reverse => (1, 0),  // pops n
+            OpCode::Exec => (1, 0),     // pops quote_id
+            OpCode::Dip => (2, 1),      // pops x, quote_id; pushes x (restores it)
+            OpCode::Keep => (2, 1), // pops x, quote; pushes x (under results?) -> complicated stack effect
+            OpCode::Bi => (3, 0),   // pops x, p, q
+            OpCode::Rec => (1, 0),  // pops quote (but pushes it back inside execution)
+            OpCode::StrRev => (1, 1), // pops len, pushes len
+            OpCode::StrCat => (2, 1), // pops len1, len2, pushes len_sum
             OpCode::StrSplit => (2, 1), // variable return
             // Vector operations
-            OpCode::VecNew => (0, 1),   // ( -- vec )
-            OpCode::VecPush => (2, 1),  // ( vec value -- vec )
-            OpCode::VecPop => (1, 2),   // ( vec -- vec value )
-            OpCode::VecGet => (2, 2),   // ( vec index -- vec value )
-            OpCode::VecSet => (3, 1),   // ( vec value index -- vec )
-            OpCode::VecLen => (1, 2),   // ( vec -- vec length )
+            OpCode::VecNew => (0, 1),  // ( -- vec )
+            OpCode::VecPush => (2, 1), // ( vec value -- vec )
+            OpCode::VecPop => (1, 2),  // ( vec -- vec value )
+            OpCode::VecGet => (2, 2),  // ( vec index -- vec value )
+            OpCode::VecSet => (3, 1),  // ( vec value index -- vec )
+            OpCode::VecLen => (1, 2),  // ( vec -- vec length )
             // Hash table operations
-            OpCode::HashNew => (0, 1),  // ( -- hash )
-            OpCode::HashPut => (3, 1),  // ( hash key value -- hash )
-            OpCode::HashGet => (2, 3),  // ( hash key -- hash value found )
-            OpCode::HashDel => (2, 1),  // ( hash key -- hash )
-            OpCode::HashHas => (2, 2),  // ( hash key -- hash found )
-            OpCode::HashLen => (1, 2),  // ( hash -- hash count )
+            OpCode::HashNew => (0, 1), // ( -- hash )
+            OpCode::HashPut => (3, 1), // ( hash key value -- hash )
+            OpCode::HashGet => (2, 3), // ( hash key -- hash value found )
+            OpCode::HashDel => (2, 1), // ( hash key -- hash )
+            OpCode::HashHas => (2, 2), // ( hash key -- hash found )
+            OpCode::HashLen => (1, 2), // ( hash -- hash count )
             // Set operations
-            OpCode::SetNew => (0, 1),   // ( -- set )
-            OpCode::SetAdd => (2, 1),   // ( set value -- set )
-            OpCode::SetHas => (2, 2),   // ( set value -- set found )
-            OpCode::SetDel => (2, 1),   // ( set value -- set )
-            OpCode::SetLen => (1, 2),   // ( set -- set count )
+            OpCode::SetNew => (0, 1), // ( -- set )
+            OpCode::SetAdd => (2, 1), // ( set value -- set )
+            OpCode::SetHas => (2, 2), // ( set value -- set found )
+            OpCode::SetDel => (2, 1), // ( set value -- set )
+            OpCode::SetLen => (1, 2), // ( set -- set count )
             // FFI operations (variable stack effects based on function)
-            OpCode::FFICall => (1, 0),       // ( args... ffi_id -- results... ) - variable
-            OpCode::FFICallNamed => (1, 0),  // ( args... name_handle -- results... ) - variable
+            OpCode::FFICall => (1, 0), // ( args... ffi_id -- results... ) - variable
+            OpCode::FFICallNamed => (1, 0), // ( args... name_handle -- results... ) - variable
             // File I/O operations
-            OpCode::FileOpen => (2, 1),      // ( path_handle mode -- file_handle )
-            OpCode::FileRead => (2, 3),      // ( file_handle max_bytes -- file_handle buffer_handle bytes_read )
-            OpCode::FileWrite => (2, 2),     // ( file_handle buffer_handle -- file_handle bytes_written )
-            OpCode::FileSeek => (3, 2),      // ( file_handle offset origin -- file_handle new_position )
-            OpCode::FileFlush => (1, 1),     // ( file_handle -- file_handle )
-            OpCode::FileClose => (1, 0),     // ( file_handle -- )
-            OpCode::FileExists => (1, 1),    // ( path_handle -- exists )
-            OpCode::FileSize => (1, 1),      // ( path_handle -- size )
+            OpCode::FileOpen => (2, 1), // ( path_handle mode -- file_handle )
+            OpCode::FileRead => (2, 3), // ( file_handle max_bytes -- file_handle buffer_handle bytes_read )
+            OpCode::FileWrite => (2, 2), // ( file_handle buffer_handle -- file_handle bytes_written )
+            OpCode::FileSeek => (3, 2), // ( file_handle offset origin -- file_handle new_position )
+            OpCode::FileFlush => (1, 1), // ( file_handle -- file_handle )
+            OpCode::FileClose => (1, 0), // ( file_handle -- )
+            OpCode::FileExists => (1, 1), // ( path_handle -- exists )
+            OpCode::FileSize => (1, 1), // ( path_handle -- size )
             // Buffer operations
-            OpCode::BufferNew => (1, 1),     // ( capacity -- buffer_handle )
+            OpCode::BufferNew => (1, 1), // ( capacity -- buffer_handle )
             OpCode::BufferFromStack => (1, 1), // ( byte1..byteN n -- buffer_handle ) - variable input
             OpCode::BufferToStack => (1, 1), // ( buffer_handle -- byte1..byteN n ) - variable output
             OpCode::BufferLen => (1, 2),     // ( buffer_handle -- buffer_handle length )
@@ -760,16 +876,16 @@ impl OpCode {
             OpCode::BufferWriteByte => (2, 1), // ( buffer_handle byte -- buffer_handle )
             OpCode::BufferFree => (1, 0),    // ( buffer_handle -- )
             // Network operations
-            OpCode::TcpConnect => (2, 1),    // ( host_handle port -- socket_handle )
-            OpCode::SocketSend => (2, 2),    // ( socket_handle buffer_handle -- socket_handle bytes_sent )
-            OpCode::SocketRecv => (2, 3),    // ( socket_handle max_bytes -- socket_handle buffer_handle bytes_recv )
-            OpCode::SocketClose => (1, 0),   // ( socket_handle -- )
+            OpCode::TcpConnect => (2, 1), // ( host_handle port -- socket_handle )
+            OpCode::SocketSend => (2, 2), // ( socket_handle buffer_handle -- socket_handle bytes_sent )
+            OpCode::SocketRecv => (2, 3), // ( socket_handle max_bytes -- socket_handle buffer_handle bytes_recv )
+            OpCode::SocketClose => (1, 0), // ( socket_handle -- )
             // Process operations
-            OpCode::ProcExec => (1, 2),      // ( command_handle -- output_handle exit_code )
+            OpCode::ProcExec => (1, 2), // ( command_handle -- output_handle exit_code )
             // System operations
-            OpCode::Clock => (0, 1),         // ( -- timestamp )
-            OpCode::Sleep => (1, 0),         // ( milliseconds -- )
-            OpCode::Random => (0, 1),        // ( -- random_value )
+            OpCode::Clock => (0, 1),  // ( -- timestamp )
+            OpCode::Sleep => (1, 0),  // ( milliseconds -- )
+            OpCode::Random => (0, 1), // ( -- random_value )
         }
     }
 }
@@ -779,36 +895,46 @@ impl OpCode {
 pub enum Stmt {
     /// Execute a single opcode.
     Op(OpCode),
-    
+
     /// Push a constant value onto the stack.
     Push(Value),
-    
+
+    /// Push a retained MANIFEST symbol. Execution is identical to [`Stmt::Push`],
+    /// but the compiler preserves the symbolic identity until object linking.
+    PushConstant { name: String, value: u64 },
+
+    /// Read a retained named temporal cell.  The HIR resolves `name` to a
+    /// typed temporal declaration before bytecode lowering expands this to
+    /// `PushWord(address); Oracle`.
+    ReadTemporal { name: String, address: u64 },
+
+    /// Push a reference to an anonymous quotation onto the stack.
+    ///
+    /// Runtime execution encodes the reference as its checked `u64` table
+    /// index; the compiler keeps it distinct from an ordinary word literal.
+    PushQuote(QuoteId),
+
     /// Structured IF statement.
     /// Pops the condition from stack; if non-zero, executes then_branch.
     If {
         then_branch: Vec<Stmt>,
         else_branch: Option<Vec<Stmt>>,
     },
-    
+
     /// Structured WHILE loop.
     /// Evaluates cond block, pops result; if non-zero, executes body and repeats.
-    While {
-        cond: Vec<Stmt>,
-        body: Vec<Stmt>,
-    },
-    
+    While { cond: Vec<Stmt>, body: Vec<Stmt> },
+
     /// A block of statements (scoped grouping).
     Block(Vec<Stmt>),
-    
+
     /// Call a procedure by name.
     /// Stack effect depends on the procedure's parameter and return count.
-    Call {
-        name: String,
-    },
-    
+    Call { name: String },
+
     /// Temporal scope block.
-    /// TEMPORAL <base> <size> { body }
-    /// 
+    /// `TEMPORAL <base> <size> [BITS <cell_bits>] { body }`
+    ///
     /// Creates an isolated memory region for temporal operations.
     /// ORACLE/PROPHECY within the block are relative to base address.
     /// Changes within the scope are propagated to parent on successful exit.
@@ -818,6 +944,9 @@ pub enum Stmt {
         base: u64,
         /// Size of the isolated region.
         size: u64,
+        /// Stored word width. Prophecy writes are truncated to this width.
+        /// Legacy scopes default to the language word width of 64 bits.
+        cell_bits: u8,
         /// Body of the temporal scope.
         body: Vec<Stmt>,
     },
@@ -833,8 +962,16 @@ impl Stmt {
     /// construction: no wildcard arm.
     pub fn child_blocks(&self) -> Vec<&[Stmt]> {
         match self {
-            Stmt::Op(_) | Stmt::Push(_) | Stmt::Call { .. } => Vec::new(),
-            Stmt::If { then_branch, else_branch } => {
+            Stmt::Op(_)
+            | Stmt::Push(_)
+            | Stmt::PushConstant { .. }
+            | Stmt::ReadTemporal { .. }
+            | Stmt::PushQuote(_)
+            | Stmt::Call { .. } => Vec::new(),
+            Stmt::If {
+                then_branch,
+                else_branch,
+            } => {
                 let mut blocks = vec![then_branch.as_slice()];
                 if let Some(else_stmts) = else_branch {
                     blocks.push(else_stmts.as_slice());
@@ -892,9 +1029,178 @@ pub struct Procedure {
     pub body: Vec<Stmt>,
 }
 
+/// Source-level polynomial bound `coefficient * n^degree + additive`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PolynomialDeclaration {
+    pub coefficient: u64,
+    pub degree: u32,
+    pub additive: u64,
+}
+
+/// Explicit Aaronson--Watrous family assumptions declared by a program.
+/// These are auditable claims, not automatically proved semantic facts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PspaceFamilyDeclaration {
+    pub name: String,
+    pub ctc_cells: PolynomialDeclaration,
+    pub chronology_respecting_bits: PolynomialDeclaration,
+    pub transition_steps: PolynomialDeclaration,
+    pub polynomial_time_uniform: bool,
+    pub total_transition: bool,
+    pub all_fixed_points_agree: bool,
+    pub ideal_deutsch_selector: bool,
+    pub effects_frozen_or_modeled: bool,
+}
+
+/// Nonnegative exact rational literal used by source-level Markov models.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RationalLiteral {
+    pub numerator: u64,
+    pub denominator: u64,
+}
+
+/// Finite stochastic Deutsch model declared directly in Ourochronos source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MarkovDeclaration {
+    pub name: String,
+    pub states: usize,
+    pub transition: Vec<Vec<RationalLiteral>>,
+    pub accepting_states: Vec<usize>,
+    pub accept_at_least: RationalLiteral,
+    pub reject_at_most: RationalLiteral,
+}
+
+/// Signed exact rational component of a quantum amplitude.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SignedRationalLiteral {
+    pub numerator: i64,
+    pub denominator: u64,
+}
+
+/// Exact rational complex amplitude used by a source-level quantum channel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ComplexRationalLiteral {
+    pub real: SignedRationalLiteral,
+    pub imaginary: SignedRationalLiteral,
+}
+
+/// Source-level qubit CPTP channel in Kraus form.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuantumChannelDeclaration {
+    pub name: String,
+    /// Each Kraus operator contains four row-major complex entries.
+    pub kraus: Vec<Vec<ComplexRationalLiteral>>,
+    pub accepting_basis: usize,
+    pub accept_at_least: RationalLiteral,
+    pub reject_at_most: RationalLiteral,
+    pub validation_tolerance: RationalLiteral,
+    pub analysis_tolerance: RationalLiteral,
+}
+
+/// Comparison used by an all-fixed-state source property.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PropertyComparison {
+    Eq,
+    Ne,
+    Ult,
+    Ule,
+    Ugt,
+    Uge,
+}
+
+/// A cell operand in a retained property predicate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PropertyCell {
+    /// Resolved absolute temporal-memory address.
+    pub address: u64,
+    /// Retained named declaration spelling, when source used one.
+    pub name: Option<String>,
+}
+
+/// Bounded Boolean property expression.  Parsing enforces the public node and
+/// nesting limits; the representation itself remains useful to embedders.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PropertyPredicate {
+    Compare {
+        cell: PropertyCell,
+        comparison: PropertyComparison,
+        value: u64,
+    },
+    Not(Box<PropertyPredicate>),
+    And(Box<PropertyPredicate>, Box<PropertyPredicate>),
+    Or(Box<PropertyPredicate>, Box<PropertyPredicate>),
+}
+
+impl PropertyPredicate {
+    /// Sorted, duplicate-free addresses read by this expression.
+    pub fn touched_addresses(&self) -> Vec<u64> {
+        let mut addresses = Vec::new();
+        let mut work = vec![self];
+        while let Some(predicate) = work.pop() {
+            match predicate {
+                Self::Compare { cell, .. } => addresses.push(cell.address),
+                Self::Not(inner) => work.push(inner),
+                Self::And(left, right) | Self::Or(left, right) => {
+                    work.push(right);
+                    work.push(left);
+                }
+            }
+        }
+        addresses.sort_unstable();
+        addresses.dedup();
+        addresses
+    }
+}
+
+/// A finite temporal safety property checked over every point fixed state.
+///
+/// Source form:
+/// `PROPERTY name { ALL_FIXED predicate; }`
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TemporalPropertyDeclaration {
+    pub name: String,
+    pub address: u64,
+    pub comparison: PropertyComparison,
+    pub value: u64,
+    /// Extended predicate. `None` denotes the legacy single-cell fields above.
+    pub predicate: Option<PropertyPredicate>,
+}
+
+impl TemporalPropertyDeclaration {
+    /// Deterministic, sound property slice: precisely the addresses mentioned
+    /// by the predicate (not a claim of incremental solver reuse).
+    pub fn touched_addresses(&self) -> Vec<u64> {
+        self.predicate
+            .as_ref()
+            .map(PropertyPredicate::touched_addresses)
+            .unwrap_or_else(|| vec![self.address])
+    }
+}
+
+/// A retained named temporal-memory declaration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TemporalDeclaration {
+    pub name: String,
+    pub address: u64,
+    /// Declarative schema metadata. Present-state initialization remains zero;
+    /// this value does not seed fixed-point search.
+    pub default: u64,
+}
+
+/// A retained compile-time word symbol declared with `MANIFEST`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManifestDeclaration {
+    pub name: String,
+    pub value: u64,
+}
+
 /// A complete OUROCHRONOS program.
 #[derive(Debug, Clone)]
 pub struct Program {
+    /// Retained MANIFEST declarations in source order.
+    pub manifests: Vec<ManifestDeclaration>,
+    /// Named temporal cells in source/link order.
+    pub temporal_declarations: Vec<TemporalDeclaration>,
     /// Procedure definitions.
     pub procedures: Vec<Procedure>,
     /// Quotations (anonymous code blocks) indexed by ID.
@@ -903,19 +1209,156 @@ pub struct Program {
     pub body: Vec<Stmt>,
     /// FFI declarations from FOREIGN blocks.
     pub ffi_declarations: Vec<crate::parser::FFIDeclaration>,
+    /// Optional source-level PSPACE family contract.
+    pub family_declaration: Option<PspaceFamilyDeclaration>,
+    /// Optional finite exact stochastic CTC declaration.
+    pub markov_declaration: Option<MarkovDeclaration>,
+    /// Optional source-level qubit quantum channel.
+    pub quantum_declaration: Option<QuantumChannelDeclaration>,
+    /// Source-level properties quantified over all point fixed states.
+    pub temporal_properties: Vec<TemporalPropertyDeclaration>,
+}
+
+/// Source locations parallel to one [`Stmt`] tree.
+///
+/// The legacy AST deliberately remains location-free so existing embedders
+/// can continue constructing `Stmt` values directly. File-backed parsing
+/// carries this sidecar instead. `child_blocks` has exactly the same order and
+/// shape as [`Stmt::child_blocks`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StmtLocations {
+    /// Complete source spelling responsible for this statement.
+    pub span: SourceSpan,
+    /// Locations for each nested statement list, in AST child-block order.
+    pub child_blocks: Vec<Vec<StmtLocations>>,
+}
+
+impl StmtLocations {
+    /// Build a location tree, using `span` for generated child instructions.
+    pub fn uniform(statement: &Stmt, span: SourceSpan) -> Self {
+        Self {
+            span,
+            child_blocks: statement
+                .child_blocks()
+                .into_iter()
+                .map(|block| {
+                    block
+                        .iter()
+                        .map(|statement| Self::uniform(statement, span))
+                        .collect()
+                })
+                .collect(),
+        }
+    }
+
+    /// Return whether this sidecar has exactly the same recursive shape as
+    /// `statement`.
+    pub fn matches(&self, statement: &Stmt) -> bool {
+        let blocks = statement.child_blocks();
+        blocks.len() == self.child_blocks.len()
+            && blocks
+                .into_iter()
+                .zip(&self.child_blocks)
+                .all(|(statements, locations)| {
+                    statements.len() == locations.len()
+                        && statements
+                            .iter()
+                            .zip(locations)
+                            .all(|(statement, location)| location.matches(statement))
+                })
+    }
+}
+
+/// Locations belonging to a procedure declaration and its executable body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcedureLocations {
+    /// Complete declaration, from `PROCEDURE` through its closing brace.
+    pub declaration: SourceSpan,
+    /// Statement locations parallel to [`Procedure::body`].
+    pub body: Vec<StmtLocations>,
+}
+
+/// Location sidecar parallel to a complete legacy [`Program`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProgramLocations {
+    /// Declaration locations parallel to [`Program::manifests`].
+    pub manifests: Vec<Option<SourceSpan>>,
+    /// Declaration locations parallel to [`Program::temporal_declarations`].
+    pub temporals: Vec<Option<SourceSpan>>,
+    /// Locations parallel to [`Program::procedures`].
+    pub procedures: Vec<Option<ProcedureLocations>>,
+    /// Locations parallel to [`Program::quotes`].
+    pub quotes: Vec<Vec<StmtLocations>>,
+    /// Locations parallel to [`Program::body`].
+    pub body: Vec<StmtLocations>,
+    /// Declaration locations parallel to [`Program::ffi_declarations`].
+    pub foreigns: Vec<Option<SourceSpan>>,
+    /// Declaration locations parallel to [`Program::temporal_properties`].
+    pub properties: Vec<Option<SourceSpan>>,
+}
+
+impl ProgramLocations {
+    /// Return whether every executable location tree matches `program`.
+    pub fn matches(&self, program: &Program) -> bool {
+        self.manifests.len() == program.manifests.len()
+            && self.temporals.len() == program.temporal_declarations.len()
+            && self.procedures.len() == program.procedures.len()
+            && self.quotes.len() == program.quotes.len()
+            && self.body.len() == program.body.len()
+            && self.foreigns.len() == program.ffi_declarations.len()
+            && self.properties.len() == program.temporal_properties.len()
+            && self
+                .procedures
+                .iter()
+                .zip(&program.procedures)
+                .all(|(locations, procedure)| {
+                    locations.as_ref().is_none_or(|locations| {
+                        block_locations_match(&locations.body, &procedure.body)
+                    })
+                })
+            && self
+                .quotes
+                .iter()
+                .zip(&program.quotes)
+                .all(|(locations, quote)| block_locations_match(locations, quote))
+            && block_locations_match(&self.body, &program.body)
+    }
+}
+
+fn block_locations_match(locations: &[StmtLocations], statements: &[Stmt]) -> bool {
+    locations.len() == statements.len()
+        && locations
+            .iter()
+            .zip(statements)
+            .all(|(location, statement)| location.matches(statement))
+}
+
+/// A compatibility-preserving legacy AST paired with exact source locations.
+#[derive(Debug, Clone)]
+pub struct LocatedProgram {
+    /// Existing semantic AST.
+    pub program: Program,
+    /// Shape-checked location sidecar.
+    pub locations: ProgramLocations,
 }
 
 impl Program {
     /// Create an empty program.
     pub fn new() -> Self {
         Program {
+            manifests: Vec::new(),
+            temporal_declarations: Vec::new(),
             procedures: Vec::new(),
             quotes: Vec::new(),
             body: Vec::new(),
             ffi_declarations: Vec::new(),
+            family_declaration: None,
+            markov_declaration: None,
+            quantum_declaration: None,
+            temporal_properties: Vec::new(),
         }
     }
-    
+
     /// Every statement list the executor can reach: the main body, all
     /// quotations (run via EXEC), and all procedure bodies. Analyses that
     /// claim to cover "the whole programme" iterate this, so the executor's
@@ -934,7 +1377,9 @@ impl Program {
     /// constant in S and its unique fixed point is exactly the result of one
     /// epoch. A missed ORACLE here skips the fixed-point search entirely.
     pub fn is_trivially_consistent(&self) -> bool {
-        !self.all_code().any(|block| contains_op(block, &|op| op == OpCode::Oracle))
+        !self
+            .all_code()
+            .any(|block| contains_op(block, &|op| op == OpCode::Oracle))
     }
 
     /// Count the ORACLE and PROPHECY operations reachable by the executor.
@@ -942,31 +1387,53 @@ impl Program {
     /// Principle weights.
     pub fn temporal_op_count(&self) -> usize {
         self.all_code()
-            .map(|block| {
-                count_ops(block, &|op| op == OpCode::Oracle || op == OpCode::Prophecy)
-            })
+            .map(|block| count_ops(block, &|op| op == OpCode::Oracle || op == OpCode::Prophecy))
             .sum()
     }
-    
+
     /// Inline all procedure calls, replacing Stmt::Call with procedure bodies.
     /// Returns a new Program with all calls inlined.
     pub fn inline_procedures(&self) -> Self {
-        let proc_map: std::collections::HashMap<String, &Procedure> = 
-            self.procedures.iter().map(|p| (p.name.clone(), p)).collect();
-        
+        let proc_map: std::collections::HashMap<String, &Procedure> = self
+            .procedures
+            .iter()
+            .map(|p| (p.name.clone(), p))
+            .collect();
+
         Program {
+            manifests: self.manifests.clone(),
+            temporal_declarations: self.temporal_declarations.clone(),
             procedures: Vec::new(), // Procedures are now inlined
-            quotes: self.quotes.iter().map(|q| self.inline_stmts(q, &proc_map)).collect(),
+            quotes: self
+                .quotes
+                .iter()
+                .map(|q| self.inline_stmts(q, &proc_map))
+                .collect(),
             body: self.inline_stmts(&self.body, &proc_map),
             ffi_declarations: self.ffi_declarations.clone(),
+            family_declaration: self.family_declaration.clone(),
+            markov_declaration: self.markov_declaration.clone(),
+            quantum_declaration: self.quantum_declaration.clone(),
+            temporal_properties: self.temporal_properties.clone(),
         }
     }
-    
-    fn inline_stmts(&self, stmts: &[Stmt], procs: &std::collections::HashMap<String, &Procedure>) -> Vec<Stmt> {
-        stmts.iter().map(|stmt| self.inline_stmt(stmt, procs)).collect()
+
+    fn inline_stmts(
+        &self,
+        stmts: &[Stmt],
+        procs: &std::collections::HashMap<String, &Procedure>,
+    ) -> Vec<Stmt> {
+        stmts
+            .iter()
+            .map(|stmt| self.inline_stmt(stmt, procs))
+            .collect()
     }
-    
-    fn inline_stmt(&self, stmt: &Stmt, procs: &std::collections::HashMap<String, &Procedure>) -> Stmt {
+
+    fn inline_stmt(
+        &self,
+        stmt: &Stmt,
+        procs: &std::collections::HashMap<String, &Procedure>,
+    ) -> Stmt {
         match stmt {
             Stmt::Call { name } => {
                 if let Some(proc) = procs.get(name) {
@@ -977,7 +1444,10 @@ impl Program {
                     stmt.clone()
                 }
             }
-            Stmt::If { then_branch, else_branch } => Stmt::If {
+            Stmt::If {
+                then_branch,
+                else_branch,
+            } => Stmt::If {
                 then_branch: self.inline_stmts(then_branch, procs),
                 else_branch: else_branch.as_ref().map(|e| self.inline_stmts(e, procs)),
             },
@@ -986,12 +1456,22 @@ impl Program {
                 body: self.inline_stmts(body, procs),
             },
             Stmt::Block(inner) => Stmt::Block(self.inline_stmts(inner, procs)),
-            Stmt::TemporalScope { base, size, body } => Stmt::TemporalScope {
+            Stmt::TemporalScope {
+                base,
+                size,
+                cell_bits,
+                body,
+            } => Stmt::TemporalScope {
                 base: *base,
                 size: *size,
+                cell_bits: *cell_bits,
                 body: self.inline_stmts(body, procs),
             },
-            Stmt::Op(_) | Stmt::Push(_) => stmt.clone(),
+            Stmt::Op(_)
+            | Stmt::Push(_)
+            | Stmt::PushConstant { .. }
+            | Stmt::ReadTemporal { .. }
+            | Stmt::PushQuote(_) => stmt.clone(),
         }
     }
 }
@@ -1000,10 +1480,13 @@ impl Program {
 /// list or anything it nests (per Stmt::child_blocks).
 fn contains_op(stmts: &[Stmt], pred: &impl Fn(OpCode) -> bool) -> bool {
     stmts.iter().any(|stmt| {
-        if let Stmt::Op(op) = stmt {
-            if pred(*op) {
-                return true;
-            }
+        let semantic_op = match stmt {
+            Stmt::Op(op) => Some(*op),
+            Stmt::ReadTemporal { .. } => Some(OpCode::Oracle),
+            _ => None,
+        };
+        if semantic_op.is_some_and(pred) {
+            return true;
         }
         stmt.child_blocks()
             .into_iter()
@@ -1017,7 +1500,11 @@ fn count_ops(stmts: &[Stmt], pred: &impl Fn(OpCode) -> bool) -> usize {
     stmts
         .iter()
         .map(|stmt| {
-            let own = matches!(stmt, Stmt::Op(op) if pred(*op)) as usize;
+            let own = match stmt {
+                Stmt::Op(op) => pred(*op),
+                Stmt::ReadTemporal { .. } => pred(OpCode::Oracle),
+                _ => false,
+            } as usize;
             let nested: usize = stmt
                 .child_blocks()
                 .into_iter()
@@ -1031,5 +1518,45 @@ fn count_ops(stmts: &[Stmt], pred: &impl Fn(OpCode) -> bool) -> usize {
 impl Default for Program {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod effect_class_tests {
+    use super::{EffectClass, OpCode};
+
+    #[test]
+    fn buffers_are_epoch_local_while_host_resources_remain_external() {
+        for opcode in [
+            OpCode::BufferNew,
+            OpCode::BufferFromStack,
+            OpCode::BufferToStack,
+            OpCode::BufferLen,
+            OpCode::BufferReadByte,
+            OpCode::BufferWriteByte,
+            OpCode::BufferFree,
+        ] {
+            assert_eq!(
+                opcode.effect_class(),
+                EffectClass::Pure,
+                "{}",
+                opcode.name()
+            );
+        }
+        for opcode in [
+            OpCode::FileOpen,
+            OpCode::TcpConnect,
+            OpCode::ProcExec,
+            OpCode::Sleep,
+        ] {
+            assert_eq!(
+                opcode.effect_class(),
+                EffectClass::External,
+                "{}",
+                opcode.name()
+            );
+        }
+        assert_eq!(OpCode::Clock.effect_class(), EffectClass::NonDeterministic);
+        assert_eq!(OpCode::Random.effect_class(), EffectClass::NonDeterministic);
     }
 }

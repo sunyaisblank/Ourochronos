@@ -1,0 +1,9 @@
+# Qubit channel rho -> |0><0|. Both Kraus matrices are exact rational;
+# the full fixed-density space is the singleton |0><0|, so basis 0 accepts.
+
+QCHANNEL reset_to_zero {
+    QUBIT;
+    KRAUS { C 1/1 0/1 C 0/1 0/1 C 0/1 0/1 C 0/1 0/1 };
+    KRAUS { C 0/1 0/1 C 1/1 0/1 C 0/1 0/1 C 0/1 0/1 };
+    ACCEPT_BASIS 0;
+}

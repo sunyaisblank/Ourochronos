@@ -21,11 +21,11 @@
 //! cargo test benchmark::fibonacci --release -- --nocapture
 //! ```
 
-use std::time::{Duration, Instant};
-use ourochronos::*;
-use ourochronos::vm::{Executor, ExecutorConfig, EpochStatus};
-use ourochronos::vm::fast_vm::{FastExecutor, is_program_pure};
 use ourochronos::temporal::timeloop::TimeLoop;
+use ourochronos::vm::fast_vm::{is_program_pure, FastExecutor};
+use ourochronos::vm::{EpochStatus, Executor, ExecutorConfig};
+use ourochronos::*;
+use std::time::{Duration, Instant};
 
 /// Minimum iterations for stable timing.
 const MIN_ITERATIONS: u32 = 10;
@@ -81,8 +81,7 @@ impl BenchmarkResult {
 
 /// Compare two benchmark results.
 pub fn compare_results(baseline: &BenchmarkResult, optimized: &BenchmarkResult) {
-    let speedup = baseline.avg_time().as_nanos() as f64
-        / optimized.avg_time().as_nanos() as f64;
+    let speedup = baseline.avg_time().as_nanos() as f64 / optimized.avg_time().as_nanos() as f64;
 
     println!(
         "  {} vs {}: {:.2}x speedup",
@@ -123,10 +122,9 @@ fn benchmark_vm(name: &str, program: &Program, max_instructions: u64) -> Benchma
 
         match result.status {
             EpochStatus::Finished => {}
-            EpochStatus::Error(ref e)
-                if !e.contains("requires standard") => {
-                    success = false;
-                }
+            EpochStatus::Error(ref e) if !e.contains("requires standard") => {
+                success = false;
+            }
             _ => {}
         }
 
@@ -439,7 +437,9 @@ fn benchmark_timeloop_convergence() {
     let mut iterations = 0u32;
 
     while iterations < MIN_ITERATIONS || start.elapsed().as_millis() < TARGET_DURATION_MS as u128 {
-        let _result = TimeLoop::new(config.clone()).expect("valid configuration").run(&program);
+        let _result = TimeLoop::new(config.clone())
+            .expect("valid configuration")
+            .run(&program);
         iterations += 1;
 
         if iterations > 1000 {
@@ -450,10 +450,7 @@ fn benchmark_timeloop_convergence() {
     let elapsed = start.elapsed();
     let avg = elapsed / iterations;
 
-    println!(
-        "TimeLoop:consistent: {:?}/iter ({} iters)",
-        avg, iterations
-    );
+    println!("TimeLoop:consistent: {:?}/iter ({} iters)", avg, iterations);
 }
 
 // =============================================================================
@@ -491,19 +488,59 @@ fn invariant_fastvm_matches_vm() {
         let mut vm_exec = Executor::with_config(config);
         let anamnesis = Memory::new();
         let vm_result = vm_exec.run_epoch(&program, &anamnesis);
-        assert_eq!(vm_result.status, EpochStatus::Finished, "VM failed for: {}", code);
+        assert_eq!(
+            vm_result.status,
+            EpochStatus::Finished,
+            "VM failed for: {}",
+            code
+        );
 
         let mut fast_exec = FastExecutor::new(10_000).with_input(scripted_input.clone());
         fast_exec
             .execute_pure(&program, &program.quotes)
             .unwrap_or_else(|e| panic!("FastVM failed for {}: {}", code, e));
 
-        let vm_out: Vec<String> = vm_result.output.iter().map(crate::common::render_output_item).collect();
-        let fast_out: Vec<String> = fast_exec.output.iter().map(crate::common::render_output_item).collect();
+        let vm_out: Vec<String> = vm_result
+            .output
+            .iter()
+            .map(crate::common::render_output_item)
+            .collect();
+        let fast_out: Vec<String> = fast_exec
+            .output
+            .iter()
+            .map(crate::common::render_output_item)
+            .collect();
         assert_eq!(vm_out, fast_out, "output diverged for: {}", code);
     }
 }
 
+/// Rejection behavior is part of the optimized-runtime identity contract. In
+/// particular, register caching must not turn a statically invalid stack
+/// operation into a no-op when the cached registers are empty.
+#[test]
+fn invariant_fastvm_and_vm_reject_stack_underflow() {
+    for code in ["SWAP", "1 SWAP", "DUP", "1 OVER", "1 2 ROT"] {
+        let program = parse(code);
+        assert!(is_program_pure(&program), "expected pure: {}", code);
+
+        let mut vm_exec = Executor::with_config(ExecutorConfig::default());
+        let vm_result = vm_exec.run_epoch(&program, &Memory::new());
+        let vm_error = match vm_result.status {
+            EpochStatus::Error(message) => message,
+            status => panic!(
+                "reference VM unexpectedly returned {:?} for {}",
+                status, code
+            ),
+        };
+
+        let mut fast_exec = FastExecutor::new(10_000);
+        let fast_error = fast_exec
+            .execute_pure(&program, &program.quotes)
+            .expect_err("FastVM must report the same underflow");
+        assert!(!vm_error.is_empty(), "{}: missing VM rejection", code);
+        assert!(!fast_error.is_empty(), "{}: missing FastVM rejection", code);
+    }
+}
 
 /// Verify that purity analysis is sound (pure programs don't use temporal ops).
 #[test]
@@ -523,18 +560,12 @@ fn invariant_purity_analysis_sound() {
 
     for code in &pure_programs {
         let program = parse(code);
-        assert!(
-            is_program_pure(&program),
-            "Expected pure: {}", code
-        );
+        assert!(is_program_pure(&program), "Expected pure: {}", code);
     }
 
     for code in &impure_programs {
         let program = parse(code);
-        assert!(
-            !is_program_pure(&program),
-            "Expected impure: {}", code
-        );
+        assert!(!is_program_pure(&program), "Expected impure: {}", code);
     }
 }
 

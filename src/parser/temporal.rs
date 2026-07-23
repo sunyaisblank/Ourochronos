@@ -3,18 +3,18 @@
 //! Handles temporal keywords: ORACLE, PROPHECY, PRESENT, PARADOX.
 //! These are the core CTC (Closed Timelike Curve) operations.
 
-use crate::ast::{OpCode, Stmt};
 use super::domain::{DomainParser, ParseContext};
+use crate::ast::{OpCode, Stmt};
 
 /// Parser for temporal (CTC) operations.
 pub struct TemporalParser;
 
 impl TemporalParser {
     pub const KEYWORDS: &'static [&'static str] = &[
-        "ORACLE", "READ",      // Read from future (anamnesis)
+        "ORACLE", "READ", // Read from future (anamnesis)
         "PROPHECY", "WRITE",   // Write to past (anamnesis)
-        "PRESENT",             // Read current memory state
-        "PARADOX",             // Signal temporal inconsistency
+        "PRESENT", // Read current memory state
+        "PARADOX", // Signal temporal inconsistency
     ];
 }
 
@@ -23,7 +23,7 @@ impl DomainParser for TemporalParser {
         Self::KEYWORDS
     }
 
-    fn parse<'a>(&self, keyword: &str, ctx: &mut ParseContext<'a>) -> Result<Stmt, String> {
+    fn parse(&self, keyword: &str, ctx: &mut ParseContext<'_>) -> Result<Stmt, String> {
         match keyword {
             "ORACLE" | "READ" => ctx.emit_op(OpCode::Oracle),
             "PROPHECY" | "WRITE" => ctx.emit_op(OpCode::Prophecy),

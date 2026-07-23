@@ -11,10 +11,22 @@
 //! Requires the `lsp` feature: `cargo build --features lsp`
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 
-use crate::ast::{OpCode, Program, Stmt, Effect as AstEffect};
-use crate::parser::{Parser, tokenize, Token};
-use crate::types::{type_check, TypeCheckResult};
+use super::frontend::{
+    analyze_file_source, analyze_virtual_source, ToolingDiagnostic, ToolingPhase,
+};
+use crate::ast::{Effect as AstEffect, OpCode, Program, ProgramLocations, Stmt, StmtLocations};
+use crate::lexer::{LocatedToken, Token};
+use crate::source::SourceSpan;
+use crate::types::TypeCheckResult;
+
+/// Maximum simultaneously retained LSP documents.
+pub const MAX_LSP_DOCUMENTS: usize = 256;
+/// Maximum aggregate source bytes retained across open LSP documents.
+pub const MAX_LSP_SOURCE_BYTES: usize = 64 * 1024 * 1024;
+/// Conservative aggregate token/AST units retained across open documents.
+pub const MAX_LSP_ANALYSIS_UNITS: usize = 2_000_000;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Core Types
@@ -214,63 +226,74 @@ impl Document {
 
     /// Convert byte offset to line/column.
     pub fn offset_to_position(&self, offset: usize) -> (usize, usize) {
-        let line = self.line_offsets.partition_point(|&o| o <= offset).saturating_sub(1);
+        let mut offset = offset.min(self.text.len());
+        while !self.text.is_char_boundary(offset) {
+            offset = offset.saturating_sub(1);
+        }
+        let line = self
+            .line_offsets
+            .partition_point(|&o| o <= offset)
+            .saturating_sub(1);
         let line_start = self.line_offsets.get(line).copied().unwrap_or(0);
-        let column = offset.saturating_sub(line_start);
+        let column = self.text[line_start..offset].encode_utf16().count();
         (line, column)
     }
 
-    /// Convert line/column to byte offset.
+    /// Convert an LSP line/UTF-16 column to a UTF-8 byte offset.
     pub fn position_to_offset(&self, line: usize, column: usize) -> usize {
         let line_start = self.line_offsets.get(line).copied().unwrap_or(0);
-        line_start + column
+        let line_end = self
+            .line_offsets
+            .get(line.saturating_add(1))
+            .copied()
+            .unwrap_or(self.text.len());
+        let line_text = &self.text[line_start..line_end];
+        let mut utf16 = 0usize;
+        for (relative, character) in line_text.char_indices() {
+            let next = utf16.saturating_add(character.len_utf16());
+            if next > column {
+                return line_start + relative;
+            }
+            utf16 = next;
+            if utf16 == column {
+                return line_start + relative + character.len_utf8();
+            }
+        }
+        line_end
     }
 
     /// Get word at position (for completions/hover).
     /// Returns the word under or immediately before the cursor.
     pub fn word_at_position(&self, line: usize, column: usize) -> Option<&str> {
         let offset = self.position_to_offset(line, column);
-        let bytes = self.text.as_bytes();
-
-        if bytes.is_empty() {
+        if self.text.is_empty() {
             return None;
         }
+        let at_cursor = (offset < self.text.len())
+            .then(|| self.text[offset..].chars().next().map(|c| (offset, c)))
+            .flatten()
+            .filter(|(_, character)| is_word_char(*character));
+        let previous = self.text[..offset]
+            .char_indices()
+            .next_back()
+            .filter(|(_, character)| is_word_char(*character));
+        let (anchor, _) = at_cursor.or(previous)?;
 
-        // Determine start position for word search
-        let start_offset = if offset >= bytes.len() {
-            // Past end of text - check if last char is a word char
-            if is_word_char(bytes[bytes.len() - 1]) {
-                bytes.len() - 1
-            } else {
-                return None; // After whitespace/punctuation at end
+        let mut start = anchor;
+        while let Some((relative, character)) = self.text[..start].char_indices().next_back() {
+            if !is_word_char(character) {
+                break;
             }
-        } else if offset > 0 && !is_word_char(bytes[offset]) && is_word_char(bytes[offset - 1]) {
-            // Cursor right after a word (e.g., "ADD|" where | is cursor)
-            offset - 1
-        } else if is_word_char(bytes[offset]) {
-            // Cursor on a word char
-            offset
-        } else {
-            // Cursor on whitespace/punctuation with no word char before
-            return None;
-        };
-
-        // Find word boundaries
-        let mut start = start_offset;
-        while start > 0 && is_word_char(bytes[start - 1]) {
-            start -= 1;
+            start = relative;
         }
-
-        let mut end = start_offset;
-        while end < bytes.len() && is_word_char(bytes[end]) {
-            end += 1;
+        let mut end = anchor;
+        for (relative, character) in self.text[anchor..].char_indices() {
+            if !is_word_char(character) {
+                break;
+            }
+            end = anchor + relative + character.len_utf8();
         }
-
-        if start <= end {
-            Some(&self.text[start..end])
-        } else {
-            None
-        }
+        (start < end).then(|| &self.text[start..end])
     }
 
     /// Update document with new text.
@@ -285,8 +308,50 @@ impl Document {
     }
 }
 
-fn is_word_char(c: u8) -> bool {
-    c.is_ascii_alphanumeric() || c == b'_'
+fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+fn file_uri_to_path(uri: &str) -> Option<PathBuf> {
+    let encoded = uri.strip_prefix("file://")?;
+    let encoded = if let Some(path) = encoded.strip_prefix("localhost/") {
+        format!("/{path}")
+    } else if encoded.starts_with('/') {
+        encoded.to_string()
+    } else {
+        // Remote file authorities do not identify a local importer graph.
+        return None;
+    };
+    let bytes = encoded.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            let high = *bytes.get(index + 1)?;
+            let low = *bytes.get(index + 2)?;
+            decoded.push(hex_nibble(high)?.checked_mul(16)? + hex_nibble(low)?);
+            index += 3;
+        } else {
+            decoded.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8(decoded).ok().map(PathBuf::from)
+}
+
+fn hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn child_locations(location: Option<&StmtLocations>, index: usize) -> Option<&[StmtLocations]> {
+    location
+        .and_then(|location| location.child_blocks.get(index))
+        .map(Vec::as_slice)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -300,6 +365,13 @@ pub struct LanguageAnalyzer {
     documents: HashMap<String, Document>,
     /// Known procedure definitions across all documents.
     procedure_locations: HashMap<String, Location>,
+    /// Canonical fallible-lexer tokens, kept privately for API compatibility.
+    located_tokens: HashMap<String, Vec<LocatedToken>>,
+    /// Recursive source sidecars retained for exact tooling ranges.
+    program_locations: HashMap<String, ProgramLocations>,
+    /// Root source identity for filtering a linked graph to this document's
+    /// own diagnostic and symbol surface.
+    primary_sources: HashMap<String, crate::source::SourceId>,
 }
 
 impl LanguageAnalyzer {
@@ -310,8 +382,31 @@ impl LanguageAnalyzer {
 
     /// Open a document.
     pub fn open_document(&mut self, uri: &str, text: &str, version: i32) -> Vec<Diagnostic> {
+        if !self.documents.contains_key(uri) && self.documents.len() >= MAX_LSP_DOCUMENTS {
+            return vec![lsp_resource_diagnostic(format!(
+                "open document count exceeds limit {MAX_LSP_DOCUMENTS}"
+            ))];
+        }
+        if let Some(diagnostic) = source_size_diagnostic(text.len()) {
+            self.close_document(uri);
+            let mut doc = Document::new(uri.to_string(), String::new(), version);
+            doc.diagnostics.push(diagnostic.clone());
+            self.documents.insert(uri.to_string(), doc);
+            return vec![diagnostic];
+        }
+        if let Some(diagnostic) = self.aggregate_admission_diagnostic(uri, text.len()) {
+            return vec![diagnostic];
+        }
+        self.close_document(uri);
         let mut doc = Document::new(uri.to_string(), text.to_string(), version);
         self.analyze_document(&mut doc);
+        if let Some(diagnostic) = self.analysis_admission_diagnostic(uri, &doc) {
+            self.close_document(uri);
+            let mut rejected = Document::new(uri.to_string(), String::new(), version);
+            rejected.diagnostics.push(diagnostic.clone());
+            self.documents.insert(uri.to_string(), rejected);
+            return vec![diagnostic];
+        }
         let diagnostics = doc.diagnostics.clone();
         self.documents.insert(uri.to_string(), doc);
         diagnostics
@@ -319,21 +414,39 @@ impl LanguageAnalyzer {
 
     /// Update a document.
     pub fn update_document(&mut self, uri: &str, text: &str, version: i32) -> Vec<Diagnostic> {
-        // Remove document, update it, analyze, and re-insert
-        if let Some(mut doc) = self.documents.remove(uri) {
-            doc.update(text.to_string(), version);
-            self.analyze_document(&mut doc);
-            let diagnostics = doc.diagnostics.clone();
+        if let Some(diagnostic) = source_size_diagnostic(text.len()) {
+            self.close_document(uri);
+            let mut doc = Document::new(uri.to_string(), String::new(), version);
+            doc.diagnostics.push(diagnostic.clone());
             self.documents.insert(uri.to_string(), doc);
-            diagnostics
-        } else {
-            self.open_document(uri, text, version)
+            return vec![diagnostic];
         }
+        if let Some(diagnostic) = self.aggregate_admission_diagnostic(uri, text.len()) {
+            return vec![diagnostic];
+        }
+        self.close_document(uri);
+        let mut doc = Document::new(uri.to_string(), text.to_string(), version);
+        self.analyze_document(&mut doc);
+        if let Some(diagnostic) = self.analysis_admission_diagnostic(uri, &doc) {
+            self.close_document(uri);
+            let mut rejected = Document::new(uri.to_string(), String::new(), version);
+            rejected.diagnostics.push(diagnostic.clone());
+            self.documents.insert(uri.to_string(), rejected);
+            return vec![diagnostic];
+        }
+        let diagnostics = doc.diagnostics.clone();
+        self.documents.insert(uri.to_string(), doc);
+        diagnostics
     }
 
     /// Close a document.
     pub fn close_document(&mut self, uri: &str) {
         self.documents.remove(uri);
+        self.located_tokens.remove(uri);
+        self.program_locations.remove(uri);
+        self.primary_sources.remove(uri);
+        self.procedure_locations
+            .retain(|_, location| location.uri != uri);
     }
 
     /// Get document.
@@ -341,102 +454,173 @@ impl LanguageAnalyzer {
         self.documents.get(uri)
     }
 
+    fn aggregate_admission_diagnostic(
+        &self,
+        uri: &str,
+        incoming_bytes: usize,
+    ) -> Option<Diagnostic> {
+        if !self.documents.contains_key(uri) && self.documents.len() >= MAX_LSP_DOCUMENTS {
+            return Some(lsp_resource_diagnostic(format!(
+                "open document count exceeds limit {MAX_LSP_DOCUMENTS}"
+            )));
+        }
+        let retained = self
+            .documents
+            .iter()
+            .filter(|(open_uri, _)| open_uri.as_str() != uri)
+            .fold(0usize, |total, (_, document)| {
+                total.saturating_add(document.text.len())
+            });
+        let aggregate = retained.saturating_add(incoming_bytes);
+        (aggregate > MAX_LSP_SOURCE_BYTES).then(|| {
+            lsp_resource_diagnostic(format!(
+                "open document source bytes {aggregate} exceed aggregate limit {MAX_LSP_SOURCE_BYTES}"
+            ))
+        })
+    }
+
+    fn analysis_admission_diagnostic(&self, uri: &str, incoming: &Document) -> Option<Diagnostic> {
+        let retained = self
+            .documents
+            .iter()
+            .filter(|(open_uri, _)| open_uri.as_str() != uri)
+            .fold(0usize, |total, (_, document)| {
+                total.saturating_add(document_analysis_units(document))
+            });
+        let aggregate = retained.saturating_add(document_analysis_units(incoming));
+        (aggregate > MAX_LSP_ANALYSIS_UNITS).then(|| {
+            lsp_resource_diagnostic(format!(
+                "open document analysis units {aggregate} exceed aggregate limit {MAX_LSP_ANALYSIS_UNITS}"
+            ))
+        })
+    }
+
     /// Analyze a document and populate diagnostics.
     fn analyze_document(&mut self, doc: &mut Document) {
         doc.diagnostics.clear();
-
-        // Tokenize
-        doc.tokens = tokenize(&doc.text);
-
-        // Parse
-        let mut parser = Parser::new(&doc.tokens);
-        parser.register_procedures(crate::StdLib::procedures());
-
-        match parser.parse_program() {
-            Ok(program) => {
-                // Check temporal safety
-                doc.diagnostics.extend(self.check_temporal_safety(&program, doc));
-
-                // Type check
-                let type_result = type_check(&program);
-
-                // Add type errors as diagnostics
-                for error in &type_result.errors {
-                    let line = error.location.unwrap_or(0);
-                    doc.diagnostics.push(Diagnostic {
-                        line,
-                        column: 0,
-                        end_line: line,
-                        end_column: 100,
-                        message: error.message.clone(),
-                        severity: Severity::Error,
-                        code: Some("T001".to_string()),
-                        related: Vec::new(),
-                    });
-                }
-
-                // Add type warnings (filter out stdlib warnings by checking statement number)
-                let line_count = doc.text.lines().count();
-                for warning in &type_result.warnings {
-                    // Extract statement number from warning like "at stmt 66"
-                    let is_from_stdlib = if let Some(idx) = warning.find("at stmt ") {
-                        let rest = &warning[idx + 8..];
-                        if let Some(end) = rest.find(|c: char| !c.is_ascii_digit()) {
-                            rest[..end].parse::<usize>().map(|n| n > line_count * 3).unwrap_or(false)
-                        } else {
-                            rest.parse::<usize>().map(|n| n > line_count * 3).unwrap_or(false)
-                        }
-                    } else {
-                        false
-                    };
-
-                    // Only add warnings from user code
-                    if !is_from_stdlib {
-                        doc.diagnostics.push(Diagnostic {
-                            line: 0,
-                            column: 0,
-                            end_line: 0,
-                            end_column: 100,
-                            message: warning.clone(),
-                            severity: Severity::Warning,
-                            code: Some("T002".to_string()),
-                            related: Vec::new(),
-                        });
-                    }
-                }
-
-                // Register procedures
-                for (i, proc) in program.procedures.iter().enumerate() {
-                    self.procedure_locations.insert(
-                        proc.name.clone(),
-                        Location {
-                            uri: doc.uri.clone(),
-                            line: self.find_procedure_line(doc, &proc.name).unwrap_or(i),
-                            column: 0,
-                            end_line: self.find_procedure_line(doc, &proc.name).unwrap_or(i),
-                            end_column: proc.name.len(),
-                        },
-                    );
-                }
-
-                doc.type_result = Some(type_result);
-                doc.program = Some(program);
-            }
-            Err(e) => {
-                // Parse error - try to extract location
-                let (line, col) = self.parse_error_location(&e);
-                doc.diagnostics.push(Diagnostic {
-                    line,
-                    column: col,
-                    end_line: line,
-                    end_column: col + 10,
-                    message: format!("Parse error: {}", e),
-                    severity: Severity::Error,
-                    code: Some("P001".to_string()),
-                    related: Vec::new(),
-                });
-            }
+        self.procedure_locations
+            .retain(|_, location| location.uri != doc.uri);
+        let analysis = file_uri_to_path(&doc.uri)
+            .filter(|path| path.is_file())
+            .map(|path| analyze_file_source(&path, Some(&doc.text), crate::core::MEMORY_SIZE))
+            .unwrap_or_else(|| {
+                analyze_virtual_source(&doc.uri, &doc.text, crate::core::MEMORY_SIZE)
+            });
+        let primary_source = analysis.primary_source;
+        if let Some(source) = primary_source {
+            self.primary_sources.insert(doc.uri.clone(), source);
+        } else {
+            self.primary_sources.remove(&doc.uri);
         }
+        self.located_tokens
+            .insert(doc.uri.clone(), analysis.tokens.clone());
+        doc.tokens = analysis
+            .tokens
+            .iter()
+            .map(|token| token.token.clone())
+            .collect();
+        let compiler_diagnostics = analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| self.compiler_diagnostic(doc, diagnostic, primary_source))
+            .collect::<Vec<_>>();
+        doc.diagnostics.extend(compiler_diagnostics);
+
+        if let Some(located) = &analysis.located {
+            doc.diagnostics.extend(self.check_temporal_safety(
+                &located.program,
+                &located.locations,
+                doc,
+                primary_source,
+            ));
+
+            for (procedure, locations) in located
+                .program
+                .procedures
+                .iter()
+                .zip(&located.locations.procedures)
+            {
+                let Some(locations) = locations else {
+                    continue;
+                };
+                if primary_source.is_some_and(|source| locations.declaration.source != source) {
+                    continue;
+                }
+                let (line, column, end_line, end_column) = self
+                    .name_range(doc, locations.declaration, &procedure.name)
+                    .unwrap_or_else(|| self.span_range(doc, locations.declaration));
+                self.procedure_locations.insert(
+                    procedure.name.clone(),
+                    Location {
+                        uri: doc.uri.clone(),
+                        line,
+                        column,
+                        end_line,
+                        end_column,
+                    },
+                );
+            }
+
+            doc.program = Some(located.program.clone());
+            self.program_locations
+                .insert(doc.uri.clone(), located.locations.clone());
+        } else {
+            self.program_locations.remove(&doc.uri);
+        }
+        doc.type_result = analysis.types;
+    }
+
+    fn compiler_diagnostic(
+        &self,
+        doc: &Document,
+        diagnostic: &ToolingDiagnostic,
+        primary_source: Option<crate::source::SourceId>,
+    ) -> Diagnostic {
+        let (line, column, end_line, end_column) = diagnostic
+            .span
+            .filter(|span| primary_source.is_none_or(|source| span.source == source))
+            .map(|span| self.span_range(doc, span))
+            .unwrap_or((0, 0, 0, 1));
+        Diagnostic {
+            line,
+            column,
+            end_line,
+            end_column,
+            message: format!(
+                "{} error: {}",
+                phase_name(diagnostic.phase),
+                diagnostic.message
+            ),
+            severity: Severity::Error,
+            code: Some(diagnostic.phase.code().to_string()),
+            related: Vec::new(),
+        }
+    }
+
+    fn span_range(&self, doc: &Document, span: SourceSpan) -> (usize, usize, usize, usize) {
+        let (line, column) = doc.offset_to_position(span.range.start);
+        let (end_line, mut end_column) = doc.offset_to_position(span.range.end);
+        if end_line == line && end_column == column {
+            end_column = end_column.saturating_add(1);
+        }
+        (line, column, end_line, end_column)
+    }
+
+    fn name_range(
+        &self,
+        doc: &Document,
+        declaration: SourceSpan,
+        name: &str,
+    ) -> Option<(usize, usize, usize, usize)> {
+        self.located_tokens.get(&doc.uri)?.iter().find_map(|token| {
+            let Token::Word(word) = &token.token else {
+                return None;
+            };
+            (word.eq_ignore_ascii_case(name)
+                && declaration.range.start <= token.span.range.start
+                && token.span.range.end <= declaration.range.end)
+                .then(|| self.span_range(doc, token.span))
+        })
     }
 
     /// Find the line where a procedure is defined.
@@ -450,57 +634,68 @@ impl LanguageAnalyzer {
         None
     }
 
-    /// Try to extract location from parse error message.
-    fn parse_error_location(&self, error: &str) -> (usize, usize) {
-        // Try to parse "at line X" or "line X, column Y" patterns
-        if let Some(idx) = error.find("line ") {
-            let rest = &error[idx + 5..];
-            if let Some(end) = rest.find(|c: char| !c.is_ascii_digit()) {
-                if let Ok(line) = rest[..end].parse::<usize>() {
-                    return (line.saturating_sub(1), 0);
-                }
-            }
-        }
-        (0, 0)
-    }
-
     /// Check for temporal safety issues.
-    fn check_temporal_safety(&self, program: &Program, doc: &Document) -> Vec<Diagnostic> {
+    fn check_temporal_safety(
+        &self,
+        program: &Program,
+        locations: &ProgramLocations,
+        doc: &Document,
+        primary_source: Option<crate::source::SourceId>,
+    ) -> Vec<Diagnostic> {
         let mut diagnostics = Vec::new();
-        let mut context = CheckContext::new();
+        let mut context = CheckContext::new(primary_source);
 
         // Collect procedure names from the program itself
-        let program_procs: std::collections::HashSet<_> = program.procedures.iter()
-            .map(|p| p.name.clone())
-            .collect();
+        let program_procs: std::collections::HashSet<_> =
+            program.procedures.iter().map(|p| p.name.clone()).collect();
 
         // Check main body
-        self.check_stmts_temporal(&program.body, &mut context, &mut diagnostics, &program_procs);
+        self.check_stmts_temporal(
+            &program.body,
+            Some(&locations.body),
+            &mut context,
+            &mut diagnostics,
+            &program_procs,
+            doc,
+        );
 
         // Check procedures
-        for proc in &program.procedures {
+        for (proc, proc_locations) in program.procedures.iter().zip(&locations.procedures) {
+            // The standard prelude is compiled and checked by every mandatory
+            // phase, but it is not part of this document's diagnostic surface.
+            let Some(proc_locations) = proc_locations.as_ref() else {
+                continue;
+            };
+            if primary_source.is_some_and(|source| proc_locations.declaration.source != source) {
+                continue;
+            }
             // Check for effect violations
             let body_effects = self.compute_effects(&proc.body);
-            if proc.effects.iter().any(|e| matches!(e, AstEffect::Pure)) && !body_effects.is_pure() {
-                if let Some(line) = self.find_procedure_line(doc, &proc.name) {
-                    diagnostics.push(Diagnostic {
-                        line,
-                        column: 0,
-                        end_line: line,
-                        end_column: proc.name.len() + 10,
-                        message: format!(
-                            "Procedure '{}' is declared PURE but has effects: {}",
-                            proc.name,
-                            body_effects.describe()
-                        ),
-                        severity: Severity::Error,
-                        code: Some("E001".to_string()),
-                        related: Vec::new(),
-                    });
-                }
+            if proc.effects.iter().any(|e| matches!(e, AstEffect::Pure)) && !body_effects.is_pure()
+            {
+                let fallback = self.find_procedure_line(doc, &proc.name).unwrap_or(0);
+                diagnostics.push(self.source_diagnostic(
+                    doc,
+                    Some(proc_locations.declaration),
+                    (fallback, proc.name.len() + 10),
+                    format!(
+                        "Procedure '{}' is declared PURE but has effects: {}",
+                        proc.name,
+                        body_effects.describe()
+                    ),
+                    Severity::Error,
+                    "E001",
+                ));
             }
 
-            self.check_stmts_temporal(&proc.body, &mut context, &mut diagnostics, &program_procs);
+            self.check_stmts_temporal(
+                &proc.body,
+                Some(proc_locations.body.as_slice()),
+                &mut context,
+                &mut diagnostics,
+                &program_procs,
+                doc,
+            );
         }
 
         diagnostics
@@ -509,12 +704,21 @@ impl LanguageAnalyzer {
     fn check_stmts_temporal(
         &self,
         stmts: &[Stmt],
+        locations: Option<&[StmtLocations]>,
         ctx: &mut CheckContext,
         diagnostics: &mut Vec<Diagnostic>,
         program_procs: &std::collections::HashSet<String>,
+        doc: &Document,
     ) {
-        for stmt in stmts {
-            self.check_stmt_temporal(stmt, ctx, diagnostics, program_procs);
+        for (index, stmt) in stmts.iter().enumerate() {
+            let location = locations.and_then(|locations| locations.get(index));
+            if location.is_some_and(|location| {
+                ctx.primary_source
+                    .is_some_and(|source| location.span.source != source)
+            }) {
+                continue;
+            }
+            self.check_stmt_temporal(stmt, location, ctx, diagnostics, program_procs, doc);
             ctx.advance_line();
         }
     }
@@ -522,74 +726,113 @@ impl LanguageAnalyzer {
     fn check_stmt_temporal(
         &self,
         stmt: &Stmt,
+        location: Option<&StmtLocations>,
         ctx: &mut CheckContext,
         diagnostics: &mut Vec<Diagnostic>,
         program_procs: &std::collections::HashSet<String>,
+        doc: &Document,
     ) {
         match stmt {
             Stmt::Op(OpCode::Paradox) => {
-                diagnostics.push(Diagnostic {
-                    line: ctx.line,
-                    column: 0,
-                    end_line: ctx.line,
-                    end_column: 7,
-                    message: "PARADOX will abort execution - is this intentional?".to_string(),
-                    severity: Severity::Warning,
-                    code: Some("W001".to_string()),
-                    related: Vec::new(),
-                });
+                diagnostics.push(self.source_diagnostic(
+                    doc,
+                    location.map(|location| location.span),
+                    (ctx.line, 7),
+                    "PARADOX will abort execution - is this intentional?".to_string(),
+                    Severity::Warning,
+                    "W001",
+                ));
             }
             Stmt::Op(OpCode::Oracle) => {
                 ctx.oracle_count += 1;
                 if ctx.in_loop {
-                    diagnostics.push(Diagnostic {
-                        line: ctx.line,
-                        column: 0,
-                        end_line: ctx.line,
-                        end_column: 6,
-                        message: "ORACLE inside loop may cause convergence issues".to_string(),
-                        severity: Severity::Info,
-                        code: Some("I001".to_string()),
-                        related: Vec::new(),
-                    });
+                    diagnostics.push(self.source_diagnostic(
+                        doc,
+                        location.map(|location| location.span),
+                        (ctx.line, 6),
+                        "ORACLE inside loop may cause convergence issues".to_string(),
+                        Severity::Info,
+                        "I001",
+                    ));
                 }
             }
             Stmt::Op(OpCode::Prophecy) => {
                 ctx.prophecy_count += 1;
             }
             Stmt::Block(stmts) => {
-                self.check_stmts_temporal(stmts, ctx, diagnostics, program_procs);
+                self.check_stmts_temporal(
+                    stmts,
+                    child_locations(location, 0),
+                    ctx,
+                    diagnostics,
+                    program_procs,
+                    doc,
+                );
             }
             Stmt::If { then_branch, else_branch } => {
-                self.check_stmts_temporal(then_branch, ctx, diagnostics, program_procs);
+                self.check_stmts_temporal(
+                    then_branch,
+                    child_locations(location, 0),
+                    ctx,
+                    diagnostics,
+                    program_procs,
+                    doc,
+                );
                 if let Some(eb) = else_branch {
-                    self.check_stmts_temporal(eb, ctx, diagnostics, program_procs);
+                    self.check_stmts_temporal(
+                        eb,
+                        child_locations(location, 1),
+                        ctx,
+                        diagnostics,
+                        program_procs,
+                        doc,
+                    );
                 }
             }
             Stmt::While { cond, body } => {
                 let was_in_loop = ctx.in_loop;
                 ctx.in_loop = true;
-                self.check_stmts_temporal(cond, ctx, diagnostics, program_procs);
-                self.check_stmts_temporal(body, ctx, diagnostics, program_procs);
+                self.check_stmts_temporal(
+                    cond,
+                    child_locations(location, 0),
+                    ctx,
+                    diagnostics,
+                    program_procs,
+                    doc,
+                );
+                self.check_stmts_temporal(
+                    body,
+                    child_locations(location, 1),
+                    ctx,
+                    diagnostics,
+                    program_procs,
+                    doc,
+                );
                 ctx.in_loop = was_in_loop;
             }
             Stmt::TemporalScope { body, .. } => {
                 let prev_oracle = ctx.oracle_count;
                 let prev_prophecy = ctx.prophecy_count;
-                self.check_stmts_temporal(body, ctx, diagnostics, program_procs);
+                self.check_stmts_temporal(
+                    body,
+                    child_locations(location, 0),
+                    ctx,
+                    diagnostics,
+                    program_procs,
+                    doc,
+                );
 
                 // Check for unbalanced temporal operations in scope
                 if ctx.oracle_count > prev_oracle && ctx.prophecy_count == prev_prophecy {
-                    diagnostics.push(Diagnostic {
-                        line: ctx.line,
-                        column: 0,
-                        end_line: ctx.line,
-                        end_column: 15,
-                        message: "TEMPORAL scope reads from oracle but never writes - possible causality issue".to_string(),
-                        severity: Severity::Hint,
-                        code: Some("H001".to_string()),
-                        related: Vec::new(),
-                    });
+                    diagnostics.push(self.source_diagnostic(
+                        doc,
+                        location.map(|location| location.span),
+                        (ctx.line, 15),
+                        "TEMPORAL scope reads from oracle but never writes - possible causality issue"
+                            .to_string(),
+                        Severity::Hint,
+                        "H001",
+                    ));
                 }
             }
             Stmt::Call { name }
@@ -598,18 +841,40 @@ impl LanguageAnalyzer {
                     && !self.procedure_locations.contains_key(name)
                     && !crate::StdLib::procedures().iter().any(|p| p.name == *name)
                 => {
-                    diagnostics.push(Diagnostic {
-                        line: ctx.line,
-                        column: 0,
-                        end_line: ctx.line,
-                        end_column: name.len(),
-                        message: format!("Unknown procedure: '{}'", name),
-                        severity: Severity::Error,
-                        code: Some("E002".to_string()),
-                        related: Vec::new(),
-                    });
+                    diagnostics.push(self.source_diagnostic(
+                        doc,
+                        location.map(|location| location.span),
+                        (ctx.line, name.len()),
+                        format!("Unknown procedure: '{}'", name),
+                        Severity::Error,
+                        "E002",
+                    ));
                 }
             _ => {}
+        }
+    }
+
+    fn source_diagnostic(
+        &self,
+        doc: &Document,
+        span: Option<SourceSpan>,
+        fallback: (usize, usize),
+        message: String,
+        severity: Severity,
+        code: &str,
+    ) -> Diagnostic {
+        let (line, column, end_line, end_column) = span
+            .map(|span| self.span_range(doc, span))
+            .unwrap_or((fallback.0, 0, fallback.0, fallback.1));
+        Diagnostic {
+            line,
+            column,
+            end_line,
+            end_column,
+            message,
+            severity,
+            code: Some(code.to_string()),
+            related: Vec::new(),
         }
     }
 
@@ -624,15 +889,33 @@ impl LanguageAnalyzer {
 
     fn compute_stmt_effects(&self, stmt: &Stmt) -> EffectInfo {
         match stmt {
-            Stmt::Op(OpCode::Oracle) => EffectInfo { oracle: true, ..Default::default() },
-            Stmt::Op(OpCode::Prophecy) => EffectInfo { prophecy: true, ..Default::default() },
-            Stmt::Op(OpCode::PresentRead) => EffectInfo { reads: true, ..Default::default() },
-            Stmt::Op(OpCode::Store) => EffectInfo { writes: true, ..Default::default() },
+            Stmt::Op(OpCode::Oracle) => EffectInfo {
+                oracle: true,
+                ..Default::default()
+            },
+            Stmt::Op(OpCode::Prophecy) => EffectInfo {
+                prophecy: true,
+                ..Default::default()
+            },
+            Stmt::Op(OpCode::PresentRead) => EffectInfo {
+                reads: true,
+                ..Default::default()
+            },
+            Stmt::Op(OpCode::Store) => EffectInfo {
+                writes: true,
+                ..Default::default()
+            },
             Stmt::Op(OpCode::Input) | Stmt::Op(OpCode::Output) | Stmt::Op(OpCode::Emit) => {
-                EffectInfo { io: true, ..Default::default() }
+                EffectInfo {
+                    io: true,
+                    ..Default::default()
+                }
             }
             Stmt::Block(stmts) => self.compute_effects(stmts),
-            Stmt::If { then_branch, else_branch } => {
+            Stmt::If {
+                then_branch,
+                else_branch,
+            } => {
                 let mut info = self.compute_effects(then_branch);
                 if let Some(eb) = else_branch {
                     info = info.join(&self.compute_effects(eb));
@@ -653,21 +936,43 @@ impl LanguageAnalyzer {
         let doc = self.documents.get(uri);
 
         // Context-aware completion prefix
-        let prefix = doc.and_then(|d| d.word_at_position(line, column)).unwrap_or("");
+        let prefix = doc
+            .and_then(|d| d.word_at_position(line, column))
+            .unwrap_or("");
         let prefix_upper = prefix.to_uppercase();
 
         // Keywords with snippets
         let keywords = [
             ("IF", "IF { $1 }", "Conditional branch"),
-            ("IF...ELSE", "IF { $1 } ELSE { $2 }", "Conditional with else branch"),
-            ("WHILE", "WHILE { $1 } { $2 }", "Loop while condition is true"),
-            ("PROCEDURE", "PROCEDURE $1 {\n    $2\n}", "Define a procedure"),
-            ("PROCEDURE PURE", "PROCEDURE $1 PURE {\n    $2\n}", "Define a pure procedure"),
+            (
+                "IF...ELSE",
+                "IF { $1 } ELSE { $2 }",
+                "Conditional with else branch",
+            ),
+            (
+                "WHILE",
+                "WHILE { $1 } { $2 }",
+                "Loop while condition is true",
+            ),
+            (
+                "PROCEDURE",
+                "PROCEDURE $1 {\n    $2\n}",
+                "Define a procedure",
+            ),
+            (
+                "PROCEDURE PURE",
+                "PROCEDURE $1 PURE {\n    $2\n}",
+                "Define a pure procedure",
+            ),
             ("LET", "LET $1 = $2;", "Bind a value to a name"),
             ("MODULE", "MODULE $1 {\n    $2\n}", "Define a module"),
             ("IMPORT", "IMPORT $1;", "Import a module"),
             ("EXPORT", "EXPORT $1;", "Export a symbol"),
-            ("TEMPORAL", "TEMPORAL $1 $2 {\n    $3\n}", "Temporal isolation scope"),
+            (
+                "TEMPORAL",
+                "TEMPORAL $1 $2 {\n    $3\n}",
+                "Temporal isolation scope",
+            ),
         ];
 
         for (kw, snippet, doc) in keywords {
@@ -807,7 +1112,9 @@ impl LanguageAnalyzer {
             return Some(HoverInfo {
                 contents: format!(
                     "**{}** (user procedure)\n\nDefined at {}:{}",
-                    word, loc.uri, loc.line + 1
+                    word,
+                    loc.uri,
+                    loc.line + 1
                 ),
                 range: Some((line, column, line, column + word.len())),
             });
@@ -855,12 +1162,24 @@ impl LanguageAnalyzer {
             None => return symbols,
         };
 
-        if let Some(program) = &doc.program {
-            // Add procedures
-            for proc in &program.procedures {
-                let line = self.find_procedure_line(doc, &proc.name).unwrap_or(0);
-                let end_line = line + self.count_procedure_lines(&proc.body);
-
+        if let (Some(program), Some(locations)) = (&doc.program, self.program_locations.get(uri)) {
+            // Prelude definitions deliberately have no source sidecar and do
+            // not masquerade as symbols in the user's document.
+            for (proc, locations) in program.procedures.iter().zip(&locations.procedures) {
+                let Some(locations) = locations else {
+                    continue;
+                };
+                if self
+                    .primary_sources
+                    .get(uri)
+                    .is_some_and(|source| locations.declaration.source != *source)
+                {
+                    continue;
+                }
+                let range = self.span_range(doc, locations.declaration);
+                let selection_range = self
+                    .name_range(doc, locations.declaration, &proc.name)
+                    .unwrap_or(range);
                 symbols.push(DocumentSymbol {
                     name: proc.name.clone(),
                     kind: SymbolKind::Function,
@@ -868,24 +1187,20 @@ impl LanguageAnalyzer {
                         "({}) -> {} [{}]",
                         proc.params.join(", "),
                         proc.returns,
-                        proc.effects.iter()
+                        proc.effects
+                            .iter()
                             .map(|e| format!("{:?}", e))
                             .collect::<Vec<_>>()
                             .join(", ")
                     )),
-                    range: (line, 0, end_line, 1),
-                    selection_range: (line, 10, line, 10 + proc.name.len()),
+                    range,
+                    selection_range,
                     children: Vec::new(),
                 });
             }
         }
 
         symbols
-    }
-
-    fn count_procedure_lines(&self, stmts: &[Stmt]) -> usize {
-        // Rough estimate
-        stmts.len().max(3)
     }
 
     /// Get semantic tokens for syntax highlighting.
@@ -897,40 +1212,46 @@ impl LanguageAnalyzer {
             None => return tokens_out,
         };
 
-        for (i, line) in doc.text.lines().enumerate() {
-            let mut col = 0;
-            for word in line.split_whitespace() {
-                let word_start = line[col..].find(word).map(|p| col + p).unwrap_or(col);
-                let word_upper = word.to_uppercase();
-
-                let token_type = if KEYWORDS.contains(&word_upper.as_str()) {
-                    Some(SemanticTokenType::Keyword)
-                } else if OPCODE_DOCS.iter().any(|(op, _, _, _)| *op == word_upper) {
-                    Some(SemanticTokenType::Operator)
-                } else if word.parse::<u64>().is_ok() || word.starts_with("0x") {
-                    Some(SemanticTokenType::Number)
-                } else if word.starts_with('"') || word.starts_with('\'') {
-                    Some(SemanticTokenType::String)
-                } else if word.starts_with("//") || word.starts_with('#') {
-                    Some(SemanticTokenType::Comment)
-                } else if self.procedure_locations.contains_key(word) || self.procedure_locations.contains_key(&word.to_lowercase()) {
-                    Some(SemanticTokenType::Function)
-                } else {
-                    None
-                };
-
-                if let Some(tt) = token_type {
-                    tokens_out.push(SemanticToken {
-                        line: i,
-                        start_char: word_start,
-                        length: word.len(),
-                        token_type: tt,
-                        modifiers: 0,
-                    });
+        let Some(located_tokens) = self.located_tokens.get(uri) else {
+            return tokens_out;
+        };
+        for located in located_tokens {
+            let token_type = match &located.token {
+                Token::Word(word) => {
+                    let upper = word.to_uppercase();
+                    if KEYWORDS.contains(&upper.as_str()) {
+                        Some(SemanticTokenType::Keyword)
+                    } else if OPCODE_DOCS.iter().any(|(op, _, _, _)| *op == upper) {
+                        Some(SemanticTokenType::Operator)
+                    } else if self.procedure_locations.contains_key(word)
+                        || self.procedure_locations.contains_key(&word.to_lowercase())
+                    {
+                        Some(SemanticTokenType::Function)
+                    } else {
+                        None
+                    }
                 }
-
-                col = word_start + word.len();
+                Token::Number(_) => Some(SemanticTokenType::Number),
+                Token::StringLit(_) | Token::CharLit(_) => Some(SemanticTokenType::String),
+                _ => None,
+            };
+            let Some(token_type) = token_type else {
+                continue;
+            };
+            let (line, start_char) = doc.offset_to_position(located.span.range.start);
+            let (end_line, end_char) = doc.offset_to_position(located.span.range.end);
+            // LSP semantic tokens cannot cross lines. Multiline literals are
+            // rare and remain covered by ordinary syntax diagnostics.
+            if line != end_line {
+                continue;
             }
+            tokens_out.push(SemanticToken {
+                line,
+                start_char,
+                length: end_char.saturating_sub(start_char),
+                token_type,
+                modifiers: 0,
+            });
         }
 
         tokens_out
@@ -942,21 +1263,96 @@ impl LanguageAnalyzer {
     }
 }
 
+fn source_size_diagnostic(observed: usize) -> Option<Diagnostic> {
+    (observed > crate::source::MAX_SOURCE_FILE_BYTES).then(|| Diagnostic {
+        line: 0,
+        column: 0,
+        end_line: 0,
+        end_column: 1,
+        message: format!(
+            "source is {observed} bytes; limit is {}",
+            crate::source::MAX_SOURCE_FILE_BYTES
+        ),
+        severity: Severity::Error,
+        code: Some("P001".to_string()),
+        related: Vec::new(),
+    })
+}
+
+fn lsp_resource_diagnostic(message: String) -> Diagnostic {
+    Diagnostic {
+        line: 0,
+        column: 0,
+        end_line: 0,
+        end_column: 1,
+        message,
+        severity: Severity::Error,
+        code: Some("P002".to_string()),
+        related: Vec::new(),
+    }
+}
+
+fn document_analysis_units(document: &Document) -> usize {
+    let statements = document.program.as_ref().map_or(0, |program| {
+        let main = statement_units(&program.body);
+        let procedures = program.procedures.iter().fold(0usize, |total, procedure| {
+            total.saturating_add(statement_units(&procedure.body))
+        });
+        program
+            .quotes
+            .iter()
+            .fold(main.saturating_add(procedures), |total, quotation| {
+                total.saturating_add(statement_units(quotation))
+            })
+    });
+    document
+        .tokens
+        .len()
+        .saturating_mul(2)
+        .saturating_add(statements.saturating_mul(3))
+}
+
+fn statement_units(statements: &[Stmt]) -> usize {
+    statements.iter().fold(0usize, |total, statement| {
+        statement
+            .child_blocks()
+            .into_iter()
+            .fold(total.saturating_add(1), |subtotal, child| {
+                subtotal.saturating_add(statement_units(child))
+            })
+    })
+}
+
+fn phase_name(phase: ToolingPhase) -> &'static str {
+    match phase {
+        ToolingPhase::Lex => "Lexical",
+        ToolingPhase::Parse => "Parse",
+        ToolingPhase::Resolve => "Resolution",
+        ToolingPhase::Semantics => "Semantic",
+        ToolingPhase::Types => "Type",
+        ToolingPhase::Regions => "Temporal region",
+        ToolingPhase::Bytecode => "Bytecode lowering",
+        ToolingPhase::Verify => "Bytecode verification",
+    }
+}
+
 /// Context for temporal checking.
 struct CheckContext {
     line: usize,
     in_loop: bool,
     oracle_count: usize,
     prophecy_count: usize,
+    primary_source: Option<crate::source::SourceId>,
 }
 
 impl CheckContext {
-    fn new() -> Self {
+    fn new(primary_source: Option<crate::source::SourceId>) -> Self {
         Self {
             line: 0,
             in_loop: false,
             oracle_count: 0,
             prophecy_count: 0,
+            primary_source,
         }
     }
 
@@ -992,11 +1388,21 @@ impl EffectInfo {
 
     fn describe(&self) -> String {
         let mut parts = Vec::new();
-        if self.oracle { parts.push("oracle"); }
-        if self.prophecy { parts.push("prophecy"); }
-        if self.reads { parts.push("reads"); }
-        if self.writes { parts.push("writes"); }
-        if self.io { parts.push("io"); }
+        if self.oracle {
+            parts.push("oracle");
+        }
+        if self.prophecy {
+            parts.push("prophecy");
+        }
+        if self.reads {
+            parts.push("reads");
+        }
+        if self.writes {
+            parts.push("writes");
+        }
+        if self.io {
+            parts.push("io");
+        }
         if parts.is_empty() {
             "pure".to_string()
         } else {
@@ -1010,8 +1416,18 @@ impl EffectInfo {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 const KEYWORDS: &[&str] = &[
-    "IF", "ELSE", "WHILE", "PROCEDURE", "LET", "MODULE",
-    "IMPORT", "EXPORT", "TEMPORAL", "PURE", "ALLOC", "IO"
+    "IF",
+    "ELSE",
+    "WHILE",
+    "PROCEDURE",
+    "LET",
+    "MODULE",
+    "IMPORT",
+    "EXPORT",
+    "TEMPORAL",
+    "PURE",
+    "ALLOC",
+    "IO",
 ];
 
 /// Opcode documentation: (name, stack_effect, description, effect)
@@ -1134,8 +1550,20 @@ const STDLIB_DOCS: &[(&str, &str, &str, &str, &str)] = &[
     ("dec", "x", "1", "pure", "Decrement: x - 1"),
     ("negate", "x", "1", "pure", "Negate: -x"),
     ("is_zero", "x", "1", "pure", "Check if zero (1 if true)"),
-    ("is_positive", "x", "1", "pure", "Check if positive (signed)"),
-    ("is_negative", "x", "1", "pure", "Check if negative (signed)"),
+    (
+        "is_positive",
+        "x",
+        "1",
+        "pure",
+        "Check if positive (signed)",
+    ),
+    (
+        "is_negative",
+        "x",
+        "1",
+        "pure",
+        "Check if negative (signed)",
+    ),
 ];
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1146,26 +1574,27 @@ const STDLIB_DOCS: &[(&str, &str, &str, &str, &str)] = &[
 pub mod server {
     //! LSP wire protocol implementation using lsp-server crate.
 
+    use super::{
+        CompletionKind, Diagnostic, DocumentSymbol, LanguageAnalyzer, SemanticTokenType, Severity,
+        SymbolKind,
+    };
     use lsp_server::{Connection, Message, Notification, Request, Response};
     use lsp_types::{
-        self, CompletionOptions, CompletionParams, CompletionItemKind, DidChangeTextDocumentParams,
+        self, CompletionItemKind, CompletionOptions, CompletionParams,
+        DiagnosticRelatedInformation, DiagnosticSeverity, DidChangeTextDocumentParams,
         DidCloseTextDocumentParams, DidOpenTextDocumentParams, DidSaveTextDocumentParams,
-        DocumentSymbolParams, DocumentSymbolResponse, GotoDefinitionParams, GotoDefinitionResponse,
-        Hover, HoverContents, HoverParams, HoverProviderCapability, InitializeResult,
-        InsertTextFormat, MarkupContent, MarkupKind, NumberOrString, OneOf, Position,
-        PublishDiagnosticsParams, Range, SaveOptions, SemanticTokens, SemanticTokensFullOptions,
+        DocumentSymbolParams, DocumentSymbolResponse, Documentation, GotoDefinitionParams,
+        GotoDefinitionResponse, Hover, HoverContents, HoverParams, HoverProviderCapability,
+        InitializeResult, InsertTextFormat, MarkupContent, MarkupKind, NumberOrString, OneOf,
+        Position, PublishDiagnosticsParams, Range, SaveOptions,
+        SemanticTokenType as LspSemanticTokenType, SemanticTokens, SemanticTokensFullOptions,
         SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams, SemanticTokensResult,
-        SemanticTokensServerCapabilities, SemanticTokenType as LspSemanticTokenType, ServerCapabilities,
-        ServerInfo, TextDocumentSyncCapability, TextDocumentSyncKind, TextDocumentSyncOptions,
-        TextDocumentSyncSaveOptions, Url, DiagnosticSeverity, DiagnosticRelatedInformation,
-        Documentation,
+        SemanticTokensServerCapabilities, ServerCapabilities, ServerInfo,
+        TextDocumentSyncCapability, TextDocumentSyncKind, TextDocumentSyncOptions,
+        TextDocumentSyncSaveOptions, Url,
     };
     use serde::de::DeserializeOwned;
     use serde_json::Value;
-    use super::{
-        LanguageAnalyzer, Diagnostic, Severity, CompletionKind,
-        DocumentSymbol, SymbolKind, SemanticTokenType,
-    };
 
     /// Run the LSP server (main entry point).
     pub fn run_server() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -1184,7 +1613,7 @@ pub mod server {
                     save: Some(TextDocumentSyncSaveOptions::SaveOptions(SaveOptions {
                         include_text: Some(true),
                     })),
-                }
+                },
             )),
             completion_provider: Some(CompletionOptions {
                 resolve_provider: Some(false),
@@ -1197,28 +1626,26 @@ pub mod server {
             definition_provider: Some(OneOf::Left(true)),
             document_symbol_provider: Some(OneOf::Left(true)),
             semantic_tokens_provider: Some(
-                SemanticTokensServerCapabilities::SemanticTokensOptions(
-                    SemanticTokensOptions {
-                        work_done_progress_options: Default::default(),
-                        legend: SemanticTokensLegend {
-                            token_types: vec![
-                                LspSemanticTokenType::KEYWORD,
-                                LspSemanticTokenType::OPERATOR,
-                                LspSemanticTokenType::NUMBER,
-                                LspSemanticTokenType::STRING,
-                                LspSemanticTokenType::COMMENT,
-                                LspSemanticTokenType::FUNCTION,
-                                LspSemanticTokenType::VARIABLE,
-                                LspSemanticTokenType::PARAMETER,
-                                LspSemanticTokenType::TYPE,
-                                LspSemanticTokenType::MACRO,
-                            ],
-                            token_modifiers: vec![],
-                        },
-                        range: Some(false),
-                        full: Some(SemanticTokensFullOptions::Bool(true)),
-                    }
-                )
+                SemanticTokensServerCapabilities::SemanticTokensOptions(SemanticTokensOptions {
+                    work_done_progress_options: Default::default(),
+                    legend: SemanticTokensLegend {
+                        token_types: vec![
+                            LspSemanticTokenType::KEYWORD,
+                            LspSemanticTokenType::OPERATOR,
+                            LspSemanticTokenType::NUMBER,
+                            LspSemanticTokenType::STRING,
+                            LspSemanticTokenType::COMMENT,
+                            LspSemanticTokenType::FUNCTION,
+                            LspSemanticTokenType::VARIABLE,
+                            LspSemanticTokenType::PARAMETER,
+                            LspSemanticTokenType::TYPE,
+                            LspSemanticTokenType::MACRO,
+                        ],
+                        token_modifiers: vec![],
+                    },
+                    range: Some(false),
+                    full: Some(SemanticTokensFullOptions::Bool(true)),
+                }),
             ),
             ..Default::default()
         };
@@ -1273,21 +1700,11 @@ pub mod server {
         let method = req.method.as_str();
 
         let result: Result<Value, String> = match method {
-            "textDocument/completion" => {
-                handle_completion(analyzer, &req)
-            }
-            "textDocument/hover" => {
-                handle_hover(analyzer, &req)
-            }
-            "textDocument/definition" => {
-                handle_definition(analyzer, &req)
-            }
-            "textDocument/documentSymbol" => {
-                handle_document_symbol(analyzer, &req)
-            }
-            "textDocument/semanticTokens/full" => {
-                handle_semantic_tokens(analyzer, &req)
-            }
+            "textDocument/completion" => handle_completion(analyzer, &req),
+            "textDocument/hover" => handle_hover(analyzer, &req),
+            "textDocument/definition" => handle_definition(analyzer, &req),
+            "textDocument/documentSymbol" => handle_document_symbol(analyzer, &req),
+            "textDocument/semanticTokens/full" => handle_semantic_tokens(analyzer, &req),
             _ => {
                 eprintln!("Unhandled request: {}", method);
                 Err(format!("Method not supported: {}", method))
@@ -1296,11 +1713,7 @@ pub mod server {
 
         let response = match result {
             Ok(value) => Response::new_ok(id, value),
-            Err(msg) => Response::new_err(
-                id,
-                lsp_server::ErrorCode::MethodNotFound as i32,
-                msg,
-            ),
+            Err(msg) => Response::new_err(id, lsp_server::ErrorCode::MethodNotFound as i32, msg),
         };
 
         conn.sender.send(Message::Response(response))?;
@@ -1364,7 +1777,9 @@ pub mod server {
     }
 
     /// Extract typed parameters from JSON.
-    fn extract_params<T: DeserializeOwned>(params: Value) -> Result<T, Box<dyn std::error::Error + Send + Sync>> {
+    fn extract_params<T: DeserializeOwned>(
+        params: Value,
+    ) -> Result<T, Box<dyn std::error::Error + Send + Sync>> {
         Ok(serde_json::from_value(params)?)
     }
 
@@ -1401,16 +1816,30 @@ pub mod server {
                 related_information: if d.related.is_empty() {
                     None
                 } else {
-                    Some(d.related.into_iter().map(|r| DiagnosticRelatedInformation {
-                        location: lsp_types::Location {
-                            uri: r.uri.parse().unwrap_or_else(|_| Url::parse("file:///").unwrap()),
-                            range: Range {
-                                start: Position { line: r.line as u32, character: r.column as u32 },
-                                end: Position { line: r.line as u32, character: r.column as u32 + 10 },
-                            },
-                        },
-                        message: r.message,
-                    }).collect())
+                    Some(
+                        d.related
+                            .into_iter()
+                            .map(|r| DiagnosticRelatedInformation {
+                                location: lsp_types::Location {
+                                    uri: r
+                                        .uri
+                                        .parse()
+                                        .unwrap_or_else(|_| Url::parse("file:///").unwrap()),
+                                    range: Range {
+                                        start: Position {
+                                            line: r.line as u32,
+                                            character: r.column as u32,
+                                        },
+                                        end: Position {
+                                            line: r.line as u32,
+                                            character: r.column as u32 + 10,
+                                        },
+                                    },
+                                },
+                                message: r.message,
+                            })
+                            .collect(),
+                    )
                 },
                 tags: None,
                 data: None,
@@ -1433,12 +1862,9 @@ pub mod server {
     }
 
     /// Handle textDocument/completion request.
-    fn handle_completion(
-        analyzer: &LanguageAnalyzer,
-        req: &Request,
-    ) -> Result<Value, String> {
-        let params: CompletionParams = serde_json::from_value(req.params.clone())
-            .map_err(|e| e.to_string())?;
+    fn handle_completion(analyzer: &LanguageAnalyzer, req: &Request) -> Result<Value, String> {
+        let params: CompletionParams =
+            serde_json::from_value(req.params.clone()).map_err(|e| e.to_string())?;
 
         let uri = params.text_document_position.text_document.uri.to_string();
         let line = params.text_document_position.position.line as usize;
@@ -1477,14 +1903,15 @@ pub mod server {
     }
 
     /// Handle textDocument/hover request.
-    fn handle_hover(
-        analyzer: &LanguageAnalyzer,
-        req: &Request,
-    ) -> Result<Value, String> {
-        let params: HoverParams = serde_json::from_value(req.params.clone())
-            .map_err(|e| e.to_string())?;
+    fn handle_hover(analyzer: &LanguageAnalyzer, req: &Request) -> Result<Value, String> {
+        let params: HoverParams =
+            serde_json::from_value(req.params.clone()).map_err(|e| e.to_string())?;
 
-        let uri = params.text_document_position_params.text_document.uri.to_string();
+        let uri = params
+            .text_document_position_params
+            .text_document
+            .uri
+            .to_string();
         let line = params.text_document_position_params.position.line as usize;
         let column = params.text_document_position_params.position.character as usize;
 
@@ -1496,8 +1923,14 @@ pub mod server {
                 value: h.contents,
             }),
             range: h.range.map(|(sl, sc, el, ec)| Range {
-                start: Position { line: sl as u32, character: sc as u32 },
-                end: Position { line: el as u32, character: ec as u32 },
+                start: Position {
+                    line: sl as u32,
+                    character: sc as u32,
+                },
+                end: Position {
+                    line: el as u32,
+                    character: ec as u32,
+                },
             }),
         });
 
@@ -1505,14 +1938,15 @@ pub mod server {
     }
 
     /// Handle textDocument/definition request.
-    fn handle_definition(
-        analyzer: &LanguageAnalyzer,
-        req: &Request,
-    ) -> Result<Value, String> {
-        let params: GotoDefinitionParams = serde_json::from_value(req.params.clone())
-            .map_err(|e| e.to_string())?;
+    fn handle_definition(analyzer: &LanguageAnalyzer, req: &Request) -> Result<Value, String> {
+        let params: GotoDefinitionParams =
+            serde_json::from_value(req.params.clone()).map_err(|e| e.to_string())?;
 
-        let uri = params.text_document_position_params.text_document.uri.to_string();
+        let uri = params
+            .text_document_position_params
+            .text_document
+            .uri
+            .to_string();
         let line = params.text_document_position_params.position.line as usize;
         let column = params.text_document_position_params.position.character as usize;
 
@@ -1520,10 +1954,19 @@ pub mod server {
 
         let lsp_location = location.map(|loc| {
             GotoDefinitionResponse::Scalar(lsp_types::Location {
-                uri: loc.uri.parse().unwrap_or_else(|_| Url::parse("file:///").unwrap()),
+                uri: loc
+                    .uri
+                    .parse()
+                    .unwrap_or_else(|_| Url::parse("file:///").unwrap()),
                 range: Range {
-                    start: Position { line: loc.line as u32, character: loc.column as u32 },
-                    end: Position { line: loc.end_line as u32, character: loc.end_column as u32 },
+                    start: Position {
+                        line: loc.line as u32,
+                        character: loc.column as u32,
+                    },
+                    end: Position {
+                        line: loc.end_line as u32,
+                        character: loc.end_column as u32,
+                    },
                 },
             })
         });
@@ -1532,23 +1975,17 @@ pub mod server {
     }
 
     /// Handle textDocument/documentSymbol request.
-    fn handle_document_symbol(
-        analyzer: &LanguageAnalyzer,
-        req: &Request,
-    ) -> Result<Value, String> {
-        let params: DocumentSymbolParams = serde_json::from_value(req.params.clone())
-            .map_err(|e| e.to_string())?;
+    fn handle_document_symbol(analyzer: &LanguageAnalyzer, req: &Request) -> Result<Value, String> {
+        let params: DocumentSymbolParams =
+            serde_json::from_value(req.params.clone()).map_err(|e| e.to_string())?;
 
         let uri = params.text_document.uri.to_string();
         let symbols = analyzer.get_document_symbols(&uri);
 
-        let lsp_symbols: Vec<lsp_types::DocumentSymbol> = symbols
-            .into_iter()
-            .map(convert_document_symbol)
-            .collect();
+        let lsp_symbols: Vec<lsp_types::DocumentSymbol> =
+            symbols.into_iter().map(convert_document_symbol).collect();
 
-        serde_json::to_value(DocumentSymbolResponse::Nested(lsp_symbols))
-            .map_err(|e| e.to_string())
+        serde_json::to_value(DocumentSymbolResponse::Nested(lsp_symbols)).map_err(|e| e.to_string())
     }
 
     fn convert_document_symbol(sym: DocumentSymbol) -> lsp_types::DocumentSymbol {
@@ -1566,28 +2003,42 @@ pub mod server {
             tags: None,
             deprecated: None,
             range: Range {
-                start: Position { line: sym.range.0 as u32, character: sym.range.1 as u32 },
-                end: Position { line: sym.range.2 as u32, character: sym.range.3 as u32 },
+                start: Position {
+                    line: sym.range.0 as u32,
+                    character: sym.range.1 as u32,
+                },
+                end: Position {
+                    line: sym.range.2 as u32,
+                    character: sym.range.3 as u32,
+                },
             },
             selection_range: Range {
-                start: Position { line: sym.selection_range.0 as u32, character: sym.selection_range.1 as u32 },
-                end: Position { line: sym.selection_range.2 as u32, character: sym.selection_range.3 as u32 },
+                start: Position {
+                    line: sym.selection_range.0 as u32,
+                    character: sym.selection_range.1 as u32,
+                },
+                end: Position {
+                    line: sym.selection_range.2 as u32,
+                    character: sym.selection_range.3 as u32,
+                },
             },
             children: if sym.children.is_empty() {
                 None
             } else {
-                Some(sym.children.into_iter().map(convert_document_symbol).collect())
+                Some(
+                    sym.children
+                        .into_iter()
+                        .map(convert_document_symbol)
+                        .collect(),
+                )
             },
         }
     }
 
     /// Handle textDocument/semanticTokens/full request.
-    fn handle_semantic_tokens(
-        analyzer: &LanguageAnalyzer,
-        req: &Request,
-    ) -> Result<Value, String> {
-        let params: SemanticTokensParams = serde_json::from_value(req.params.clone())
-            .map_err(|e| e.to_string())?;
+    fn handle_semantic_tokens(analyzer: &LanguageAnalyzer, req: &Request) -> Result<Value, String> {
+        let params: SemanticTokensParams =
+            serde_json::from_value(req.params.clone()).map_err(|e| e.to_string())?;
 
         let uri = params.text_document.uri.to_string();
         let tokens = analyzer.get_semantic_tokens(&uri);
@@ -1602,7 +2053,11 @@ pub mod server {
             let char = token.start_char as u32;
 
             let delta_line = line - prev_line;
-            let delta_start = if delta_line == 0 { char - prev_char } else { char };
+            let delta_start = if delta_line == 0 {
+                char - prev_char
+            } else {
+                char
+            };
 
             data.push(lsp_types::SemanticToken {
                 delta_line,
@@ -1647,11 +2102,70 @@ pub mod server {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static NEXT_TEMP_DIR: AtomicUsize = AtomicUsize::new(0);
+
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new() -> Self {
+            let sequence = NEXT_TEMP_DIR.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "ourochronos-lsp-tests-{}-{sequence}",
+                std::process::id()
+            ));
+            fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+
+        fn write(&self, relative: &str, contents: &str) -> PathBuf {
+            let path = self.0.join(relative);
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).unwrap();
+            }
+            fs::write(&path, contents).unwrap();
+            path
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
 
     #[test]
     fn test_analyzer_creation() {
         let analyzer = LanguageAnalyzer::new();
         assert!(analyzer.documents.is_empty());
+    }
+
+    #[test]
+    fn lsp_document_size_guard_rejects_before_document_cloning() {
+        assert!(source_size_diagnostic(crate::source::MAX_SOURCE_FILE_BYTES).is_none());
+        let diagnostic = source_size_diagnostic(crate::source::MAX_SOURCE_FILE_BYTES + 1).unwrap();
+        assert_eq!(diagnostic.severity, Severity::Error);
+        assert_eq!(diagnostic.code.as_deref(), Some("P001"));
+        assert!(diagnostic.message.contains("limit"));
+    }
+
+    #[test]
+    fn lsp_document_count_guard_rejects_without_retaining_another_document() {
+        let mut analyzer = LanguageAnalyzer::new();
+        for index in 0..MAX_LSP_DOCUMENTS {
+            let uri = format!("memory://bounded-{index}");
+            analyzer
+                .documents
+                .insert(uri.clone(), Document::new(uri, String::new(), 0));
+        }
+        let diagnostics = analyzer.open_document("memory://overflow", "1", 0);
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].code.as_deref(), Some("P002"));
+        assert_eq!(analyzer.documents.len(), MAX_LSP_DOCUMENTS);
+        assert!(analyzer.get_document("memory://overflow").is_none());
     }
 
     #[test]
@@ -1670,6 +2184,30 @@ mod tests {
         // Close
         analyzer.close_document("test://file.ouro");
         assert!(analyzer.get_document("test://file.ouro").is_none());
+    }
+
+    #[test]
+    fn file_document_overlay_uses_importer_relative_module_graph() {
+        let temp = TempDir::new();
+        temp.write("library/dependency.ouro", "PROCEDURE imported { 9 }");
+        let root = temp.write("application/root.ouro", "this disk text is overlaid");
+        let uri = format!("file://{}", root.display());
+        let overlay = "IMPORT \"../library/dependency.ouro\"\nimported OUTPUT";
+
+        let mut analyzer = LanguageAnalyzer::new();
+        let diagnostics = analyzer.open_document(&uri, overlay, 1);
+        assert!(
+            diagnostics.is_empty(),
+            "imported interfaces must resolve in the canonical graph: {diagnostics:?}"
+        );
+        let program = analyzer
+            .get_document(&uri)
+            .and_then(|document| document.program.as_ref())
+            .expect("successful graph analysis retains the linked program");
+        assert!(program
+            .procedures
+            .iter()
+            .any(|procedure| procedure.name == "imported"));
     }
 
     #[test]
@@ -1749,7 +2287,11 @@ mod tests {
         let mut analyzer = LanguageAnalyzer::new();
         // Use correct Ourochronos syntax: procedure calls don't use parentheses
         let diags = analyzer.open_document("test://file.ouro", "PROCEDURE myproc { 1 }\nmyproc", 1);
-        assert!(diags.is_empty(), "Unexpected diagnostics: {:?}", diags.iter().map(|d| &d.message).collect::<Vec<_>>());
+        assert!(
+            diags.is_empty(),
+            "Unexpected diagnostics: {:?}",
+            diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
 
         let loc = analyzer.get_definition("test://file.ouro", 1, 0);
         assert!(loc.is_some());
@@ -1783,12 +2325,62 @@ mod tests {
     }
 
     #[test]
-    fn test_word_at_position() {
-        let doc = Document::new(
-            "test://file.ouro".to_string(),
-            "ADD SUB MUL".to_string(),
-            1,
+    fn document_positions_use_lsp_utf16_columns() {
+        let doc = Document::new("test://utf8.ouro".to_string(), "\"😀\" ADD".to_string(), 1);
+        assert_eq!(doc.offset_to_position(6), (0, 4));
+        assert_eq!(doc.position_to_offset(0, 4), 6);
+        assert_eq!(doc.word_at_position(0, 7), Some("ADD"));
+    }
+
+    #[test]
+    fn lexical_diagnostic_after_utf8_has_exact_lsp_range() {
+        let mut analyzer = LanguageAnalyzer::new();
+        let diagnostics = analyzer.open_document("test://utf8.ouro", "\"😀\" ?", 1);
+        let diagnostic = diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code.as_deref() == Some("L001"))
+            .unwrap();
+        assert_eq!(
+            (diagnostic.line, diagnostic.column, diagnostic.end_column),
+            (0, 5, 6)
         );
+    }
+
+    #[test]
+    fn mandatory_hir_semantics_are_lsp_errors_with_source_ranges() {
+        let mut analyzer = LanguageAnalyzer::new();
+        let diagnostics = analyzer.open_document("test://underflow.ouro", "ADD", 1);
+        let diagnostic = diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code.as_deref() == Some("S001"))
+            .expect("mandatory HIR semantic check must reject main underflow");
+        assert_eq!(
+            (
+                diagnostic.line,
+                diagnostic.column,
+                diagnostic.end_line,
+                diagnostic.end_column,
+            ),
+            (0, 0, 0, 3)
+        );
+    }
+
+    #[test]
+    fn mandatory_temporal_region_errors_use_scope_span() {
+        let mut analyzer = LanguageAnalyzer::new();
+        let diagnostics =
+            analyzer.open_document("test://region.ouro", "TEMPORAL 0 1 BITS 2 { CLOCK POP }", 1);
+        let diagnostic = diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code.as_deref() == Some("G001"))
+            .expect("unsupported region effect must be rejected");
+        assert_eq!((diagnostic.line, diagnostic.column), (0, 0));
+        assert!(diagnostic.end_column > diagnostic.column);
+    }
+
+    #[test]
+    fn test_word_at_position() {
+        let doc = Document::new("test://file.ouro".to_string(), "ADD SUB MUL".to_string(), 1);
 
         assert_eq!(doc.word_at_position(0, 0), Some("ADD"));
         assert_eq!(doc.word_at_position(0, 4), Some("SUB"));
@@ -1799,12 +2391,11 @@ mod tests {
     fn test_effect_checking() {
         let mut analyzer = LanguageAnalyzer::new();
         // Pure procedure with temporal operation should error
-        let diags = analyzer.open_document(
-            "test://file.ouro",
-            "PROCEDURE test PURE { 0 ORACLE }",
-            1,
-        );
-        assert!(diags.iter().any(|d| d.message.contains("PURE") && d.message.contains("effects")));
+        let diags =
+            analyzer.open_document("test://file.ouro", "PROCEDURE test PURE { 0 ORACLE }", 1);
+        assert!(diags
+            .iter()
+            .any(|d| d.message.contains("PURE") && d.message.contains("effects")));
     }
 
     #[test]
@@ -1814,20 +2405,26 @@ mod tests {
         // When an unknown word is used, it should produce a parse error
         let diags = analyzer.open_document("test://file.ouro", "undefined_proc", 1);
         // Should produce some kind of error (parse error for unknown identifier)
-        assert!(!diags.is_empty(), "Expected diagnostics for unknown procedure");
-        assert!(diags.iter().any(|d| d.message.contains("Unknown") || d.message.contains("Parse error")),
-            "Expected unknown/parse error diagnostic, got: {:?}", diags.iter().map(|d| &d.message).collect::<Vec<_>>());
+        assert!(
+            !diags.is_empty(),
+            "Expected diagnostics for unknown procedure"
+        );
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.message.contains("Unknown") || d.message.contains("Parse error")),
+            "Expected unknown/parse error diagnostic, got: {:?}",
+            diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
     }
 
     #[test]
     fn test_oracle_in_loop_warning() {
         let mut analyzer = LanguageAnalyzer::new();
-        let diags = analyzer.open_document(
-            "test://file.ouro",
-            "WHILE { 1 } { 0 ORACLE POP }",
-            1,
-        );
-        assert!(diags.iter().any(|d| d.message.contains("ORACLE inside loop")));
+        let diags = analyzer.open_document("test://file.ouro", "WHILE { 1 } { 0 ORACLE POP }", 1);
+        assert!(diags
+            .iter()
+            .any(|d| d.message.contains("ORACLE inside loop")));
     }
 
     #[test]

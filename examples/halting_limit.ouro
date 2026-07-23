@@ -1,0 +1,9 @@
+# Deliberately nonhalting classical program.
+#
+# Run with, for example:
+#   ourochronos examples/halting_limit.ouro --max-inst 1000
+#
+# Reaching the instruction limit proves only "not halted within this budget."
+# It is an UNKNOWN result for unbounded halting, not a proof of nonhalting.
+
+WHILE { 1 } { NOP }

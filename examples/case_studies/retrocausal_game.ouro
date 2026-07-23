@@ -1,0 +1,14 @@
+# Retrocausal finite-state rule engine.
+#
+# Future rule-state 0 chases 1 and 1 chases 0, forming a period-two history.
+# States 2 and 3 are stable equilibria. Complete recurrent analysis therefore
+# finds one non-classical history and two point histories, including every
+# basin rather than only the orbit reached from zero.
+
+TEMPORAL 0 1 BITS 2 {
+    0 ORACLE
+    DUP 2 LT
+    IF { NOT } ELSE { }
+    DUP 0 PROPHECY
+    OUTPUT
+}

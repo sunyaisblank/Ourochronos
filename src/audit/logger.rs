@@ -18,7 +18,7 @@ use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use super::entry::{AuditEntry, Severity, Outcome};
+use super::entry::{AuditEntry, Outcome, Severity};
 
 // =============================================================================
 // Configuration
@@ -113,7 +113,9 @@ impl AuditLogger {
             return Ok(());
         }
 
-        let seq = self.sequence.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let seq = self
+            .sequence
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
         let line = match self.config.format {
             AuditFormat::Text => format!("{:08} | {}\n", seq, entry.format_line()),
@@ -214,7 +216,8 @@ impl AuditLogger {
         }
 
         // Update sequence counter
-        self.sequence.store(seq, std::sync::atomic::Ordering::SeqCst);
+        self.sequence
+            .store(seq, std::sync::atomic::Ordering::SeqCst);
 
         // Write all lines at once
         if let Ok(mut guard) = self.writer.lock() {
@@ -417,7 +420,12 @@ impl EpochLogger {
     }
 
     /// Log an ORACLE read operation.
-    pub fn log_oracle(&mut self, address: u16, value: u64, is_temporal: bool) -> std::io::Result<()> {
+    pub fn log_oracle(
+        &mut self,
+        address: crate::core::Address,
+        value: u64,
+        is_temporal: bool,
+    ) -> std::io::Result<()> {
         self.oracle_count += 1;
         let entry = AuditEntry::oracle_read(address, value, self.epoch, is_temporal)
             .with_correlation(&self.correlation_id);
@@ -425,7 +433,12 @@ impl EpochLogger {
     }
 
     /// Log a PROPHECY write operation.
-    pub fn log_prophecy(&mut self, address: u16, value: u64, previous: u64) -> std::io::Result<()> {
+    pub fn log_prophecy(
+        &mut self,
+        address: crate::core::Address,
+        value: u64,
+        previous: u64,
+    ) -> std::io::Result<()> {
         self.prophecy_count += 1;
         let entry = AuditEntry::prophecy_write(address, value, previous, self.epoch)
             .with_correlation(&self.correlation_id);
@@ -439,10 +452,11 @@ impl EpochLogger {
         instructions: u64,
         changed_cells: usize,
     ) -> std::io::Result<()> {
-        let entry = AuditEntry::epoch_iteration(self.epoch, duration_us, instructions, changed_cells)
-            .with_correlation(&self.correlation_id)
-            .with_meta("oracle_ops", self.oracle_count.to_string())
-            .with_meta("prophecy_ops", self.prophecy_count.to_string());
+        let entry =
+            AuditEntry::epoch_iteration(self.epoch, duration_us, instructions, changed_cells)
+                .with_correlation(&self.correlation_id)
+                .with_meta("oracle_ops", self.oracle_count.to_string())
+                .with_meta("prophecy_ops", self.prophecy_count.to_string());
         self.batch.push(entry)?;
 
         // Reset counters for next epoch
@@ -476,8 +490,8 @@ impl EpochLogger {
 ///
 /// Format: `{prefix}-{timestamp_ms}-{counter}`
 pub fn generate_correlation_id(prefix: &str) -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);
 

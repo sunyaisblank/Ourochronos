@@ -1,23 +1,53 @@
 //! Memory type for the OUROCHRONOS virtual machine.
 //!
-//! Memory consists of MEMORY_SIZE (65536) cells, each holding a Value.
-//! Initially all cells are zero with no provenance.
+//! Memory has a configurable positive number of cells, each holding a Value.
+//! `MEMORY_SIZE` (65,536) is the backwards-compatible default.
 
-use std::fmt;
 use super::address::{Address, MEMORY_SIZE};
-use super::value::Value;
+use super::error::{BoundsPolicy, MemoryOperation, OuroError, OuroResult, SourceLocation};
 use super::provenance::Provenance;
-use super::error::{OuroError, OuroResult, BoundsPolicy, MemoryOperation, SourceLocation};
+use super::value::Value;
+
+/// Largest dense memory returned by public convergence and solver APIs.
+/// Execution itself may use a wider sparse [`PagedMemory`](super::PagedMemory),
+/// but materializing larger dense snapshots would make a small program able
+/// to force disproportionate host allocation.
+pub const MAX_DENSE_MEMORY_CELLS: usize = 1_048_576;
+use std::fmt;
+
+/// Canonical sparse identity of a [`Memory`] snapshot.
+///
+/// Width, numeric values, and provenance are all retained. Pure zero cells are
+/// omitted, while zero-valued cells with provenance remain present. Temporal
+/// hash tables use this value to verify hash-bucket candidates exactly.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ExactMemoryState {
+    width: usize,
+    cells: Vec<(Address, Value)>,
+}
+
+impl ExactMemoryState {
+    /// Width of the source memory snapshot.
+    pub fn width(&self) -> usize {
+        self.width
+    }
+
+    /// Exact non-default cells in increasing address order.
+    pub fn cells(&self) -> &[(Address, Value)] {
+        &self.cells
+    }
+}
 
 /// A snapshot of the memory state.
 ///
-/// Memory consists of MEMORY_SIZE (65536) cells, each holding a Value.
+/// Memory contains a run-configured number of cells (65,536 by default).
 /// Initially all cells are zero with no provenance.
 ///
 /// Memory states are ordered lexicographically by cell values (address 0 first).
 /// This ordering enables deterministic selection among equal-action fixed points.
 ///
-/// The hash is maintained incrementally for O(1) state_hash() lookups.
+/// The numeric hash is maintained incrementally for O(1) bucket lookups.
+/// Exact state users must verify candidates with [`Memory::exact_sparse_state`].
 #[derive(Clone, PartialEq, Eq)]
 pub struct Memory {
     cells: Vec<Value>,
@@ -33,19 +63,23 @@ impl PartialOrd for Memory {
 }
 
 impl Ord for Memory {
-    /// Lexicographic comparison of memory states by cell values.
+    /// Exact lexicographic comparison of memory states by cell values.
     ///
-    /// Compares cells from address 0 upward, returning on first difference.
-    /// This provides a total ordering for deterministic fixed-point selection.
+    /// Numeric words are the primary key; [`Value::cmp`] uses complete
+    /// provenance as the deterministic tie-break. Consequently `cmp == Equal`
+    /// exactly when `Eq` is true, as required by the `Ord` contract.
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        // Compare only values, not provenance (for determinism)
-        for (a, b) in self.cells.iter().zip(other.cells.iter()) {
-            match a.val.cmp(&b.val) {
-                std::cmp::Ordering::Equal => continue,
-                other => return other,
+        for (left, right) in self.cells.iter().zip(&other.cells) {
+            let ordering = left.val.cmp(&right.val);
+            if ordering != std::cmp::Ordering::Equal {
+                return ordering;
             }
         }
-        std::cmp::Ordering::Equal
+        let width = self.cells.len().cmp(&other.cells.len());
+        if width != std::cmp::Ordering::Equal {
+            return width;
+        }
+        self.cells.cmp(&other.cells)
     }
 }
 
@@ -58,7 +92,9 @@ impl Default for Memory {
 impl fmt::Debug for Memory {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Only show non-zero cells
-        let nonzero: Vec<_> = self.cells.iter()
+        let nonzero: Vec<_> = self
+            .cells
+            .iter()
             .enumerate()
             .filter(|(_, v)| v.val != 0)
             .collect();
@@ -68,7 +104,9 @@ impl fmt::Debug for Memory {
         } else {
             write!(f, "Memory{{")?;
             for (i, (addr, val)) in nonzero.iter().enumerate() {
-                if i > 0 { write!(f, ", ")?; }
+                if i > 0 {
+                    write!(f, ", ")?;
+                }
                 write!(f, "[{}]={}", addr, val.val)?;
             }
             write!(f, "}}")
@@ -89,7 +127,7 @@ impl Memory {
             return 0; // Zero values contribute nothing to hash
         }
         // Combine address and value with multiplicative mixing for better distribution
-        let combined = (addr as u64).wrapping_mul(0x9e3779b97f4a7c15).wrapping_add(val);
+        let combined = addr.wrapping_mul(0x9e3779b97f4a7c15).wrapping_add(val);
         // Apply finalization mixing (MurmurHash3-style)
         let mut h = combined.wrapping_mul(0x517cc1b727220a95);
         h ^= h >> 33;
@@ -100,8 +138,17 @@ impl Memory {
 
     /// Create a new memory state with all cells set to zero.
     pub fn new() -> Self {
+        Self::with_size(MEMORY_SIZE)
+    }
+
+    /// Create an all-zero memory state with an explicit finite width.
+    ///
+    /// The language-level family semantics permits any positive finite width;
+    /// a concrete allocation remains limited by the host process.
+    pub fn with_size(memory_cells: usize) -> Self {
+        assert!(memory_cells > 0, "memory must contain at least one cell");
         Self {
-            cells: vec![Value::ZERO; MEMORY_SIZE],
+            cells: vec![Value::ZERO; memory_cells],
             cached_hash: 0, // All zeros contribute 0 to hash
         }
     }
@@ -149,43 +196,63 @@ impl Memory {
         hash
     }
 
-    /// Check if two memory states are equal (by value, ignoring provenance).
+    /// Check if two memory states are numerically equal, ignoring provenance.
     /// This is the fixed-point check: P_final = A_initial.
     ///
     /// Uses cached hash for O(1) early rejection when states differ (common case).
     /// Falls back to O(N) cell-by-cell comparison only when hashes match.
-    pub fn values_equal(&self, other: &Memory) -> bool {
+    pub fn numeric_values_equal(&self, other: &Memory) -> bool {
+        if self.cells.len() != other.cells.len() {
+            return false;
+        }
         // Fast path: different hashes guarantee different content
         if self.cached_hash != other.cached_hash {
             return false;
         }
         // Same hash: verify cell-by-cell (hash collision possible but rare)
-        self.cells.iter()
+        self.cells
+            .iter()
             .zip(other.cells.iter())
             .all(|(v1, v2)| v1.val == v2.val)
     }
 
+    /// Backwards-compatible alias for [`Self::numeric_values_equal`].
+    ///
+    /// Temporal cache and cycle identity must use [`Self::exact_sparse_state`]
+    /// instead. Keeping the numeric operation explicitly named prevents the
+    /// language's fixed-point rule from being confused with state-key equality.
+    pub fn values_equal(&self, other: &Memory) -> bool {
+        self.numeric_values_equal(other)
+    }
+
     /// Find addresses where values differ between two memory states.
     pub fn diff(&self, other: &Memory) -> Vec<Address> {
-        self.cells.iter()
-            .zip(other.cells.iter())
+        let common = self.cells.len().min(other.cells.len());
+        let mut result: Vec<Address> = self.cells[..common]
+            .iter()
+            .zip(other.cells[..common].iter())
             .enumerate()
             .filter(|(_, (v1, v2))| v1.val != v2.val)
             .map(|(i, _)| i as Address)
-            .collect()
+            .collect();
+        result.extend((common..self.cells.len().max(other.cells.len())).map(|i| i as Address));
+        result
     }
 
     /// Find all non-zero cells.
     pub fn non_zero_cells(&self) -> Vec<(Address, &Value)> {
-        self.cells.iter()
+        self.cells
+            .iter()
             .enumerate()
             .filter(|(_, v)| v.val != 0)
             .map(|(i, v)| (i as Address, v))
             .collect()
     }
 
-    /// Get a hash of the memory state (for cycle detection).
+    /// Get a numeric-state hash for cycle-detection buckets.
     ///
+    /// Provenance is intentionally not part of this backwards-compatible hash,
+    /// so exact users must compare [`Self::exact_sparse_state`] on every match.
     /// O(1) retrieval of the incrementally maintained hash.
     #[inline]
     pub fn state_hash(&self) -> u64 {
@@ -218,18 +285,35 @@ impl Memory {
 
     /// Iterate over non-zero cells, yielding (address, value) pairs.
     pub fn iter_nonzero(&self) -> impl Iterator<Item = (Address, &Value)> {
-        self.cells.iter()
+        self.cells
+            .iter()
             .enumerate()
             .filter(|(_, v)| v.val != 0)
             .map(|(i, v)| (i as Address, v))
     }
 
-    /// The sparse form of this state: its non-zero (address, value) pairs
-    /// in address order. Absent cells are zero, so two states are equal
-    /// exactly when their sparse forms are. This is the single projection
-    /// used to verify hash matches in the search journal and epoch cache.
+    /// Numeric-only sparse projection in address order.
+    ///
+    /// This intentionally discards provenance and must not be used for cache,
+    /// journal, or other exact state identity.
     pub fn sparse_state(&self) -> Vec<(Address, u64)> {
-        self.iter_nonzero().map(|(addr, value)| (addr, value.val)).collect()
+        self.iter_nonzero()
+            .map(|(addr, value)| (addr, value.val))
+            .collect()
+    }
+
+    /// Canonical exact sparse identity for temporal caches and journals.
+    pub fn exact_sparse_state(&self) -> ExactMemoryState {
+        ExactMemoryState {
+            width: self.cells.len(),
+            cells: self
+                .cells
+                .iter()
+                .enumerate()
+                .filter(|(_, value)| **value != Value::ZERO)
+                .map(|(index, value)| (index as Address, value.clone()))
+                .collect(),
+        }
     }
 
     /// Get the total number of memory cells.
@@ -252,7 +336,8 @@ impl Memory {
 
     /// Iterate over all cells, yielding (address, value) pairs.
     pub fn iter(&self) -> impl Iterator<Item = (Address, &Value)> {
-        self.cells.iter()
+        self.cells
+            .iter()
             .enumerate()
             .map(|(i, v)| (i as Address, v))
     }
@@ -261,7 +346,7 @@ impl Memory {
     // Bounds-Checked Operations
     // ═══════════════════════════════════════════════════════════════════
 
-    /// Validate an address against memory bounds.
+    /// Validate an address against the default memory bounds.
     ///
     /// Returns `Ok(addr as Address)` if within bounds, or handles according to policy.
     #[inline]
@@ -271,24 +356,40 @@ impl Memory {
         operation: MemoryOperation,
         location: SourceLocation,
     ) -> OuroResult<Address> {
-        if addr < MEMORY_SIZE as u64 {
-            Ok(addr as Address)
+        Self::validate_address_for_len(addr, MEMORY_SIZE, policy, operation, location)
+    }
+
+    /// Validate an address against this memory snapshot's configured width.
+    pub fn validate_address_in(
+        &self,
+        addr: u64,
+        policy: BoundsPolicy,
+        operation: MemoryOperation,
+        location: SourceLocation,
+    ) -> OuroResult<Address> {
+        Self::validate_address_for_len(addr, self.cells.len(), policy, operation, location)
+    }
+
+    fn validate_address_for_len(
+        addr: u64,
+        memory_cells: usize,
+        policy: BoundsPolicy,
+        operation: MemoryOperation,
+        location: SourceLocation,
+    ) -> OuroResult<Address> {
+        let width = memory_cells as u64;
+        if addr < width {
+            Ok(addr)
         } else {
             match policy {
-                BoundsPolicy::Wrap => {
-                    Ok((addr % MEMORY_SIZE as u64) as Address)
-                }
-                BoundsPolicy::Clamp => {
-                    Ok((MEMORY_SIZE - 1) as Address)
-                }
-                BoundsPolicy::Error => {
-                    Err(OuroError::MemoryBoundsViolation {
-                        address: addr,
-                        max_address: (MEMORY_SIZE - 1) as Address,
-                        operation,
-                        location,
-                    })
-                }
+                BoundsPolicy::Wrap => Ok(addr % width),
+                BoundsPolicy::Clamp => Ok(width - 1),
+                BoundsPolicy::Error => Err(OuroError::MemoryBoundsViolation {
+                    address: addr,
+                    max_address: width - 1,
+                    operation,
+                    location,
+                }),
             }
         }
     }
@@ -305,7 +406,7 @@ impl Memory {
         policy: BoundsPolicy,
         location: SourceLocation,
     ) -> OuroResult<Value> {
-        let validated = Self::validate_address(addr, policy, MemoryOperation::Read, location)?;
+        let validated = self.validate_address_in(addr, policy, MemoryOperation::Read, location)?;
         Ok(self.cells[validated as usize].clone())
     }
 
@@ -323,7 +424,7 @@ impl Memory {
         policy: BoundsPolicy,
         location: SourceLocation,
     ) -> OuroResult<()> {
-        let validated = Self::validate_address(addr, policy, MemoryOperation::Write, location)?;
+        let validated = self.validate_address_in(addr, policy, MemoryOperation::Write, location)?;
 
         // Update incremental hash
         let old_val = self.cells[validated as usize].val;
@@ -369,7 +470,8 @@ impl Memory {
         policy: BoundsPolicy,
         location: SourceLocation,
     ) -> OuroResult<Value> {
-        let validated = Self::validate_address(addr, policy, MemoryOperation::Oracle, location)?;
+        let validated =
+            self.validate_address_in(addr, policy, MemoryOperation::Oracle, location)?;
         Ok(self.cells[validated as usize].clone())
     }
 
@@ -381,7 +483,8 @@ impl Memory {
         policy: BoundsPolicy,
         location: SourceLocation,
     ) -> OuroResult<()> {
-        let validated = Self::validate_address(addr, policy, MemoryOperation::Prophecy, location)?;
+        let validated =
+            self.validate_address_in(addr, policy, MemoryOperation::Prophecy, location)?;
 
         // Update incremental hash
         let old_val = self.cells[validated as usize].val;
@@ -405,7 +508,8 @@ impl Memory {
     ) -> OuroResult<()> {
         for (i, val) in values.iter().enumerate() {
             let addr = base.wrapping_add(i as u64);
-            let validated = Self::validate_address(addr, policy, MemoryOperation::Pack, location.clone())?;
+            let validated =
+                self.validate_address_in(addr, policy, MemoryOperation::Pack, location.clone())?;
 
             let old_val = self.cells[validated as usize].val;
             let new_val = val.val;
@@ -430,7 +534,8 @@ impl Memory {
         let mut result = Vec::with_capacity(count);
         for i in 0..count {
             let addr = base.wrapping_add(i as u64);
-            let validated = Self::validate_address(addr, policy, MemoryOperation::Unpack, location.clone())?;
+            let validated =
+                self.validate_address_in(addr, policy, MemoryOperation::Unpack, location.clone())?;
             result.push(self.cells[validated as usize].clone());
         }
         Ok(result)
@@ -439,6 +544,8 @@ impl Memory {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
 
     #[test]
@@ -453,6 +560,62 @@ mod tests {
 
         m2.write(100, Value::new(42));
         assert!(m1.values_equal(&m2));
+    }
+
+    #[test]
+    fn configured_width_controls_bounds_and_state_identity() {
+        let mut wide = Memory::with_size(70_000);
+        let narrow = Memory::new();
+        let loc = SourceLocation::default();
+
+        wide.write_checked(65_536, Value::new(42), BoundsPolicy::Error, loc.clone())
+            .expect("address is valid in wide memory");
+        assert_eq!(wide.read(65_536).val, 42);
+        assert!(narrow
+            .read_checked(65_536, BoundsPolicy::Error, loc)
+            .is_err());
+        assert!(!wide.values_equal(&narrow));
+        assert_ne!(wide.exact_sparse_state(), narrow.exact_sparse_state());
+    }
+
+    #[test]
+    fn ordering_uses_provenance_to_break_numeric_ties() {
+        let mut pure = Memory::with_size(4);
+        pure.write(1, Value::new(7));
+        let mut temporal = Memory::with_size(4);
+        temporal.write(1, Value::with_provenance(7, Provenance::single(2)));
+
+        assert!(pure.numeric_values_equal(&temporal));
+        assert_ne!(pure, temporal);
+        assert_ne!(pure.cmp(&temporal), std::cmp::Ordering::Equal);
+        let ordered = BTreeSet::from([pure, temporal]);
+        assert_eq!(ordered.len(), 2);
+    }
+
+    #[test]
+    fn ordering_keeps_the_complete_numeric_state_as_the_primary_key() {
+        let mut lower_numeric = Memory::with_size(2);
+        lower_numeric.write(0, Value::with_provenance(0, Provenance::single(9)));
+        lower_numeric.write(1, Value::new(1));
+        let mut higher_numeric = Memory::with_size(2);
+        higher_numeric.write(1, Value::new(2));
+
+        assert!(lower_numeric < higher_numeric);
+    }
+
+    #[test]
+    fn exact_sparse_state_retains_zero_value_provenance_and_width() {
+        let pure = Memory::with_size(4);
+        let mut temporal = pure.clone();
+        temporal.write(2, Value::with_provenance(0, Provenance::single(3)));
+
+        assert!(temporal.sparse_state().is_empty());
+        assert_eq!(temporal.exact_sparse_state().cells().len(), 1);
+        assert_ne!(pure.exact_sparse_state(), temporal.exact_sparse_state());
+        assert_ne!(
+            Memory::with_size(4).exact_sparse_state(),
+            Memory::with_size(5).exact_sparse_state()
+        );
     }
 
     #[test]
@@ -490,7 +653,7 @@ mod tests {
 
         // Multiple addresses
         for i in 0..20 {
-            mem.write(i, Value::new(i as u64 * 7));
+            mem.write(i, Value::new(i * 7));
         }
         assert_eq!(mem.state_hash(), mem.recompute_hash());
     }
@@ -594,16 +757,23 @@ mod tests {
         let loc = SourceLocation::default();
 
         // Valid address
-        let result = Memory::validate_address(100, BoundsPolicy::Error, MemoryOperation::Read, loc.clone());
+        let result =
+            Memory::validate_address(100, BoundsPolicy::Error, MemoryOperation::Read, loc.clone());
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), 100);
 
         // Max valid address
-        let result = Memory::validate_address(65535, BoundsPolicy::Error, MemoryOperation::Read, loc.clone());
+        let result = Memory::validate_address(
+            65535,
+            BoundsPolicy::Error,
+            MemoryOperation::Read,
+            loc.clone(),
+        );
         assert!(result.is_ok());
 
         // First invalid address
-        let result = Memory::validate_address(65536, BoundsPolicy::Error, MemoryOperation::Read, loc);
+        let result =
+            Memory::validate_address(65536, BoundsPolicy::Error, MemoryOperation::Read, loc);
         assert!(result.is_err());
     }
 }

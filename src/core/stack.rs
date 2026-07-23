@@ -2,9 +2,9 @@
 //!
 //! Provides safe stack operations with configurable limits and error handling.
 
-use std::fmt;
-use super::value::Value;
 use super::error::{OuroError, OuroResult, SourceLocation};
+use super::value::Value;
+use std::fmt;
 
 /// A bounds-checked stack for the OUROCHRONOS virtual machine.
 ///
@@ -64,12 +64,14 @@ impl Stack {
 
     /// Pop a value with underflow checking.
     pub fn pop_checked(&mut self, operation: &str, location: SourceLocation) -> OuroResult<Value> {
-        self.elements.pop().ok_or_else(|| OuroError::StackUnderflow {
-            operation: operation.to_string(),
-            required: 1,
-            available: 0,
-            location,
-        })
+        self.elements
+            .pop()
+            .ok_or_else(|| OuroError::StackUnderflow {
+                operation: operation.to_string(),
+                required: 1,
+                available: 0,
+                location,
+            })
     }
 
     /// Pop a value, returning zero if empty (permissive mode).
@@ -86,12 +88,15 @@ impl Stack {
 
     /// Peek at the top value with underflow checking.
     pub fn peek_checked(&self, operation: &str, location: SourceLocation) -> OuroResult<Value> {
-        self.elements.last().cloned().ok_or_else(|| OuroError::StackUnderflow {
-            operation: operation.to_string(),
-            required: 1,
-            available: 0,
-            location,
-        })
+        self.elements
+            .last()
+            .cloned()
+            .ok_or_else(|| OuroError::StackUnderflow {
+                operation: operation.to_string(),
+                required: 1,
+                available: 0,
+                location,
+            })
     }
 
     /// Peek at the top value, returning None if empty.
@@ -194,7 +199,12 @@ impl Stack {
     }
 
     /// Pop n values and return them as a vector.
-    pub fn pop_n(&mut self, n: usize, operation: &str, location: SourceLocation) -> OuroResult<Vec<Value>> {
+    pub fn pop_n(
+        &mut self,
+        n: usize,
+        operation: &str,
+        location: SourceLocation,
+    ) -> OuroResult<Vec<Value>> {
         if n > self.elements.len() {
             return Err(OuroError::StackUnderflow {
                 operation: operation.to_string(),

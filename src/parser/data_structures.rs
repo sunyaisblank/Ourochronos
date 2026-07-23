@@ -2,8 +2,8 @@
 //!
 //! Handles vector, hash table, and set operations.
 
-use crate::ast::{OpCode, Stmt};
 use super::domain::{DomainParser, ParseContext};
+use crate::ast::{OpCode, Stmt};
 
 /// Parser for data structure operations (Vec, Hash, Set).
 pub struct DataStructuresParser;
@@ -24,7 +24,7 @@ impl DomainParser for DataStructuresParser {
         Self::KEYWORDS
     }
 
-    fn parse<'a>(&self, keyword: &str, ctx: &mut ParseContext<'a>) -> Result<Stmt, String> {
+    fn parse(&self, keyword: &str, ctx: &mut ParseContext<'_>) -> Result<Stmt, String> {
         match keyword {
             // Vector operations
             "VEC_NEW" => ctx.emit_op(OpCode::VecNew),

@@ -12,7 +12,7 @@ pub trait DomainParser {
 
     /// Parse the keyword and return the appropriate statement.
     /// The parser context provides access to tokens, stack depth, etc.
-    fn parse<'a>(&self, keyword: &str, ctx: &mut ParseContext<'a>) -> Result<Stmt, String>;
+    fn parse(&self, keyword: &str, ctx: &mut ParseContext<'_>) -> Result<Stmt, String>;
 }
 
 /// Context passed to domain parsers for accessing parser state.

@@ -1,13 +1,14 @@
 # Temporal Variables
 #
-# TEMPORAL variables are syntactic sugar for oracle-backed cells. Declaring
+# TEMPORAL variables are retained typed declarations for oracle-backed cells.
+# Declaring
 #
 #   TEMPORAL name @ address DEFAULT value;
 #
-# lets every later reference to `name` expand to `address ORACLE`: a read of
-# that cell from the anamnesis. Writing back is ordinary PROPHECY to the
-# same address. (The DEFAULT clause is part of the declaration syntax; the
-# initial anamnesis is all zeros, so a search starts from 0 regardless.)
+# makes every later reference to `name` lower to `address ORACLE`: a read of
+# that cell from the anamnesis. Writing back is ordinary PROPHECY to the same
+# address. DEFAULT is retained in HIR/object schema metadata, but does not seed
+# present: the initial anamnesis and present are all zeros.
 #
 # The demonstration is the factor-of-15 witness: read the candidate, verify
 # it, stabilise when correct, otherwise try the next value. The programme

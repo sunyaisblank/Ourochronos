@@ -45,26 +45,24 @@
 //! ```
 
 mod entry;
-mod logger;
 mod global;
+mod logger;
 
 // Core entry types
 pub use entry::{
-    AuditEntry, Severity, Outcome, ActionCategory,
-    ConvergenceOutcome, ProvenanceSummary,
+    ActionCategory, AuditEntry, ConvergenceOutcome, Outcome, ProvenanceSummary, Severity,
 };
 
 // Logger types
 pub use logger::{
-    AuditLogger, AuditConfig, AuditFormat,
-    BatchLogger, BatchLoggerStats, EpochLogger,
-    generate_correlation_id,
+    generate_correlation_id, AuditConfig, AuditFormat, AuditLogger, BatchLogger, BatchLoggerStats,
+    EpochLogger,
 };
 
 // Global logger functions
 pub use global::{
-    init_global_logger, init_stdout_logger, global_logger,
-    audit, audit_info, audit_warn, audit_error,
+    audit, audit_error, audit_info, audit_warn, global_logger, init_global_logger,
+    init_stdout_logger,
 };
 
 /// Escape a string for JSON.
@@ -203,7 +201,8 @@ macro_rules! audit_convergence {
             $crate::audit::ConvergenceOutcome::$outcome,
             $epochs,
             $dur,
-        ).with_correlation($cid);
+        )
+        .with_correlation($cid);
         $crate::audit::audit(entry);
     }};
 }

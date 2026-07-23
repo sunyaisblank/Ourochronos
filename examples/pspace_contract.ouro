@@ -1,0 +1,16 @@
+# Source-level declaration of an input-indexed Deutschian CTC family.
+# POLY c d a means c*n^d + a. These are explicit proof obligations, not
+# assertions the finite runtime can establish merely by executing one input.
+
+FAMILY identity_family {
+    CTC_CELLS POLY 2 1 1;
+    CHRONOLOGY_BITS POLY 1 1 0;
+    TRANSITION_STEPS POLY 4 2 1;
+    UNIFORM;
+    TOTAL;
+    READOUT_INVARIANT;
+    IDEAL_DEUTSCH;
+    EFFECTS_FROZEN;
+}
+
+0 ORACLE DUP 0 PROPHECY OUTPUT

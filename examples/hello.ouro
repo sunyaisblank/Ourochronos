@@ -58,8 +58,8 @@ PROCEDURE stabilize_string {
     0 PROPHECY
 }
 
-# Pure: Output the string using EMIT
-PROCEDURE output_string PURE {
+# Reads present memory and performs character I/O
+PROCEDURE output_string READS(0) READS(1) READS(2) READS(3) READS(4) READS(5) READS(6) READS(7) READS(8) READS(9) READS(10) READS(11) IO {
     # Read from PRESENT and emit each character
     0 PRESENT EMIT
     1 PRESENT EMIT

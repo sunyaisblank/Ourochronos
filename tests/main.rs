@@ -36,9 +36,9 @@
 //! cargo test --test main -- --nocapture
 //! ```
 
+mod benchmark;
 mod common;
 mod integration;
-mod benchmark;
 mod stress;
 
 // Re-export test modules for test organisation

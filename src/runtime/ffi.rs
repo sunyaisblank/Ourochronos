@@ -19,16 +19,170 @@
 //! }
 //! ```
 
-use crate::core::{Value, Handle};
-use crate::vm::VmState;
 use crate::core::error::{OuroError, OuroResult, SourceLocation};
+use crate::core::{Handle, Value};
+use crate::vm::VmState;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::path::PathBuf;
 
 #[cfg(feature = "dynamic-ffi")]
 use libloading::{Library, Symbol};
+
+use crate::bytecode::{BytecodeProgram, ForeignEntry};
+use crate::hir::ForeignId;
+
+/// Checked failure while binding or invoking the bytecode scalar host ABI.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ForeignHostError {
+    /// A table identity was registered more than once.
+    DuplicateTarget { id: ForeignId },
+    /// No process-host implementation was registered for a linked target.
+    UnknownTarget { id: ForeignId },
+    /// The process binding does not exactly match the artifact descriptor.
+    SignatureMismatch { id: ForeignId },
+    /// A callback returned a value for `void`, or omitted a declared result.
+    ReturnMismatch { id: ForeignId, expected_value: bool },
+    /// The trusted host callback declined or failed the call.
+    CallbackFailed { id: ForeignId, message: String },
+}
+
+impl std::fmt::Display for ForeignHostError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::DuplicateTarget { id } => {
+                write!(formatter, "foreign target {id} is already bound")
+            }
+            Self::UnknownTarget { id } => write!(formatter, "foreign target {id} is not bound"),
+            Self::SignatureMismatch { id } => {
+                write!(
+                    formatter,
+                    "foreign target {id} has a different host signature"
+                )
+            }
+            Self::ReturnMismatch { id, expected_value } => write!(
+                formatter,
+                "foreign target {id} {} a scalar result",
+                if *expected_value {
+                    "did not return"
+                } else {
+                    "unexpectedly returned"
+                }
+            ),
+            Self::CallbackFailed { id, message } => {
+                write!(formatter, "foreign target {id} failed: {message}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ForeignHostError {}
+
+/// Safe process-host implementation for one linked scalar foreign function.
+///
+/// Arguments and results are exact 64-bit representations. An `i64` value is
+/// transported in two's-complement form; callbacks may convert with `as i64`
+/// and return the result with `as u64`.
+pub type ForeignHostFn = Arc<dyn Fn(&[u64]) -> Result<Option<u64>, String> + Send + Sync + 'static>;
+
+#[derive(Clone)]
+struct ForeignHostBinding {
+    descriptor: ForeignEntry,
+    callback: ForeignHostFn,
+}
+
+/// Explicit, lifetime-safe host table for linked bytecode foreign calls.
+///
+/// This is the supported default ABI: host applications bind safe Rust
+/// callbacks to the complete descriptor retained in bytecode. The table never
+/// guesses a C signature and never accepts pointer, handle, string, 32-bit, or
+/// multi-result declarations. One call consumes one ordinary VM instruction,
+/// so the bytecode gas limit also bounds the number of host invocations. Host
+/// callbacks are trusted and are not preempted by the VM.
+#[derive(Clone, Default)]
+pub struct ForeignHostTable {
+    bindings: HashMap<ForeignId, ForeignHostBinding>,
+}
+
+impl ForeignHostTable {
+    /// Construct an empty host table.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Bind one exact artifact descriptor to a process-local implementation.
+    pub fn bind<F>(&mut self, descriptor: ForeignEntry, callback: F) -> Result<(), ForeignHostError>
+    where
+        F: Fn(&[u64]) -> Result<Option<u64>, String> + Send + Sync + 'static,
+    {
+        let id = descriptor.id;
+        if self.bindings.contains_key(&id) {
+            return Err(ForeignHostError::DuplicateTarget { id });
+        }
+        self.bindings.insert(
+            id,
+            ForeignHostBinding {
+                descriptor,
+                callback: Arc::new(callback),
+            },
+        );
+        Ok(())
+    }
+
+    /// Prove that every artifact foreign target has an exact host binding.
+    pub fn validate_program(&self, program: &BytecodeProgram) -> Result<(), ForeignHostError> {
+        for descriptor in &program.foreigns {
+            let binding = self
+                .bindings
+                .get(&descriptor.id)
+                .ok_or(ForeignHostError::UnknownTarget { id: descriptor.id })?;
+            if binding.descriptor != *descriptor {
+                return Err(ForeignHostError::SignatureMismatch { id: descriptor.id });
+            }
+        }
+        Ok(())
+    }
+
+    /// Invoke one already linked target after checking its exact descriptor.
+    pub fn call(
+        &self,
+        descriptor: &ForeignEntry,
+        arguments: &[u64],
+    ) -> Result<Option<u64>, ForeignHostError> {
+        let binding = self
+            .bindings
+            .get(&descriptor.id)
+            .ok_or(ForeignHostError::UnknownTarget { id: descriptor.id })?;
+        if binding.descriptor != *descriptor {
+            return Err(ForeignHostError::SignatureMismatch { id: descriptor.id });
+        }
+        debug_assert_eq!(arguments.len(), descriptor.parameters.len());
+        let result =
+            (binding.callback)(arguments).map_err(|message| ForeignHostError::CallbackFailed {
+                id: descriptor.id,
+                message,
+            })?;
+        if result.is_some() != descriptor.result.is_some() {
+            return Err(ForeignHostError::ReturnMismatch {
+                id: descriptor.id,
+                expected_value: descriptor.result.is_some(),
+            });
+        }
+        Ok(result)
+    }
+}
+
+impl std::fmt::Debug for ForeignHostTable {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut ids = self.bindings.keys().copied().collect::<Vec<_>>();
+        ids.sort_by_key(|id| id.as_u32());
+        formatter
+            .debug_struct("ForeignHostTable")
+            .field("targets", &ids)
+            .finish()
+    }
+}
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // FFI Effect Types
@@ -130,7 +284,13 @@ impl FFIType {
     /// Convert a value to this FFI type.
     pub fn from_value(&self, val: &Value) -> u64 {
         match self {
-            FFIType::Bool => if val.val != 0 { 1 } else { 0 },
+            FFIType::Bool => {
+                if val.val != 0 {
+                    1
+                } else {
+                    0
+                }
+            }
             FFIType::U32 => val.val as u32 as u64,
             FFIType::I32 => val.val as i32 as i64 as u64,
             FFIType::I64 => val.val,
@@ -181,7 +341,10 @@ impl FFISignature {
 
     /// Add an input parameter.
     pub fn param(mut self, name: impl Into<String>, typ: FFIType) -> Self {
-        self.params.push(FFIParam { name: name.into(), typ });
+        self.params.push(FFIParam {
+            name: name.into(),
+            typ,
+        });
         self
     }
 
@@ -361,7 +524,10 @@ impl FFIRegistry {
 
     /// List all registered function names.
     pub fn list_functions(&self) -> Vec<&str> {
-        self.functions.iter().map(|f| f.signature.name.as_str()).collect()
+        self.functions
+            .iter()
+            .map(|f| f.signature.name.as_str())
+            .collect()
     }
 }
 
@@ -454,33 +620,6 @@ impl FFIContext {
 
     /// Register standard library FFI functions.
     fn register_stdlib(&mut self) {
-        // Buffer operations
-        self.registry.register(
-            FFISignature::new("buffer_alloc", "core")
-                .param("size", FFIType::U64)
-                .returns_type(FFIType::BufferHandle)
-                .effects(vec![FFIEffect::Alloc]),
-            |_state, args| {
-                let size = args.first().map(|v| v.val as usize).unwrap_or(0);
-                // Note: Actual allocation happens via FFIContext, not here
-                // This is a placeholder - actual implementation in VM
-                Ok(vec![Value::new(size as u64)])
-            },
-        );
-
-        // String length (pure)
-        self.registry.register(
-            FFISignature::new("str_len", "core")
-                .param("handle", FFIType::BufferHandle)
-                .returns_type(FFIType::U64)
-                .pure(),
-            |_state, args| {
-                let _handle = args.first().map(|v| v.val).unwrap_or(0);
-                // Placeholder - actual implementation accesses buffer
-                Ok(vec![Value::new(0)])
-            },
-        );
-
         // Clock/time (IO effect)
         self.registry.register(
             FFISignature::new("clock", "core")
@@ -523,18 +662,8 @@ impl FFIContext {
             },
         );
 
-        // Environment variable (IO effect)
-        self.registry.register(
-            FFISignature::new("getenv", "core")
-                .param("name_ptr", FFIType::Ptr)
-                .param("name_len", FFIType::U64)
-                .returns_type(FFIType::U64) // Returns 0 if not found, or value handle
-                .effects(vec![FFIEffect::IO, FFIEffect::Reads]),
-            |_state, _args| {
-                // Placeholder - needs string handling
-                Ok(vec![Value::new(0)])
-            },
-        );
+        // Pointer/handle helpers are intentionally absent: the supported
+        // linked ABI never fabricates process pointers or opaque resources.
     }
 }
 
@@ -568,7 +697,11 @@ pub enum FFIError {
     /// Invalid handle.
     InvalidHandle { handle: Handle },
     /// Buffer overflow.
-    BufferOverflow { handle: Handle, requested: usize, available: usize },
+    BufferOverflow {
+        handle: Handle,
+        requested: usize,
+        available: usize,
+    },
     /// External call failed.
     ExternalCallFailed { function: String, message: String },
 }
@@ -580,23 +713,42 @@ impl std::fmt::Display for FFIError {
                 write!(f, "FFI function not found: '{}'", name)
             }
             FFIError::ArgumentMismatch { expected, got } => {
-                write!(f, "FFI argument mismatch: expected {} arguments, got {}", expected, got)
+                write!(
+                    f,
+                    "FFI argument mismatch: expected {} arguments, got {}",
+                    expected, got
+                )
             }
             FFIError::TypeConversion { expected, got } => {
-                write!(f, "FFI type conversion failed: expected {:?}, got {}", expected, got)
+                write!(
+                    f,
+                    "FFI type conversion failed: expected {:?}, got {}",
+                    expected, got
+                )
             }
             FFIError::LibraryNotLoaded { name } => {
                 write!(f, "FFI library not loaded: '{}'", name)
             }
             FFIError::EffectViolation { function, effect } => {
-                write!(f, "FFI effect violation: function '{}' has {:?} effect", function, effect)
+                write!(
+                    f,
+                    "FFI effect violation: function '{}' has {:?} effect",
+                    function, effect
+                )
             }
             FFIError::InvalidHandle { handle } => {
                 write!(f, "FFI invalid handle: {}", handle)
             }
-            FFIError::BufferOverflow { handle, requested, available } => {
-                write!(f, "FFI buffer overflow: handle {}, requested {} bytes, available {}",
-                       handle, requested, available)
+            FFIError::BufferOverflow {
+                handle,
+                requested,
+                available,
+            } => {
+                write!(
+                    f,
+                    "FFI buffer overflow: handle {}, requested {} bytes, available {}",
+                    handle, requested, available
+                )
             }
             FFIError::ExternalCallFailed { function, message } => {
                 write!(f, "FFI external call failed: '{}': {}", function, message)
@@ -631,10 +783,14 @@ impl FFICaller {
         id: u32,
         location: SourceLocation,
     ) -> OuroResult<()> {
-        let function = ctx.registry.get(id).ok_or_else(|| OuroError::FFI {
-            message: format!("FFI function ID {} not found", id),
-            location: location.clone(),
-        })?.clone();
+        let function = ctx
+            .registry
+            .get(id)
+            .ok_or_else(|| OuroError::FFI {
+                message: format!("FFI function ID {} not found", id),
+                location: location.clone(),
+            })?
+            .clone();
 
         let signature = function.signature.clone();
         let input_size = signature.input_stack_size();
@@ -676,7 +832,10 @@ impl FFICaller {
         name: &str,
         location: SourceLocation,
     ) -> OuroResult<()> {
-        let id = ctx.registry.name_map.get(&name.to_lowercase())
+        let id = ctx
+            .registry
+            .name_map
+            .get(&name.to_lowercase())
             .copied()
             .ok_or_else(|| OuroError::FFI {
                 message: format!("FFI function '{}' not found", name),
@@ -731,7 +890,9 @@ impl DynamicLibraryManager {
         #[cfg(target_os = "windows")]
         {
             if let Ok(sys_root) = std::env::var("SYSTEMROOT") {
-                manager.search_paths.push(PathBuf::from(format!("{}\\System32", sys_root)));
+                manager
+                    .search_paths
+                    .push(PathBuf::from(format!("{}\\System32", sys_root)));
             }
         }
 
@@ -812,7 +973,7 @@ impl DynamicLibraryManager {
         Ok(())
     }
 
-    /// Load a library (stub for when dynamic-ffi feature is disabled).
+    /// Report that dynamic loading is unavailable in this build.
     #[cfg(not(feature = "dynamic-ffi"))]
     pub fn load(&mut self, name: &str) -> OuroResult<()> {
         Err(OuroError::FFI {
@@ -838,6 +999,17 @@ impl DynamicLibraryManager {
     /// Get list of loaded libraries.
     pub fn loaded_libraries(&self) -> Vec<&str> {
         self.libraries.keys().map(|s| s.as_str()).collect()
+    }
+
+    #[cfg(feature = "dynamic-ffi")]
+    fn library(&self, name: &str) -> OuroResult<Arc<Library>> {
+        self.libraries
+            .get(name)
+            .cloned()
+            .ok_or_else(|| OuroError::FFI {
+                message: format!("Library not loaded: {name}"),
+                location: SourceLocation::default(),
+            })
     }
 
     /// Call a function from a loaded library.
@@ -870,7 +1042,10 @@ impl DynamicLibraryManager {
 impl std::fmt::Debug for DynamicLibraryManager {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DynamicLibraryManager")
-            .field("loaded_libraries", &self.libraries.keys().collect::<Vec<_>>())
+            .field(
+                "loaded_libraries",
+                &self.libraries.keys().collect::<Vec<_>>(),
+            )
             .field("search_paths", &self.search_paths)
             .finish()
     }
@@ -902,15 +1077,25 @@ impl ExtendedFFIContext {
         self.library_manager.load(name)
     }
 
-    /// Register an FFI function from a declaration.
+    /// Register a dynamically loaded scalar function from a declaration.
     ///
-    /// This creates a wrapper that will call the external function when invoked.
-    pub fn register_from_declaration(
+    /// Only zero through six `u64` arguments and zero or one `u64` return are
+    /// accepted. The safe process-host table also supports signed bit patterns,
+    /// but this loader does not guess whether a C symbol uses signed types.
+    ///
+    /// # Safety
+    ///
+    /// A shared library does not expose machine-checkable C signatures. The
+    /// caller must guarantee that the selected symbol has the declared C ABI.
+    /// Prefer [`ForeignHostTable`] when a safe process-local binding is
+    /// available.
+    pub unsafe fn register_from_declaration(
         &mut self,
         decl: &crate::parser::FFIDeclaration,
     ) -> OuroResult<u32> {
         let sig = decl.signature.clone();
-        let _symbol = decl.symbol_name.clone().unwrap_or_else(|| sig.name.clone());
+        validate_dynamic_signature(&sig)?;
+        let symbol = decl.symbol_name.clone().unwrap_or_else(|| sig.name.clone());
         let library = sig.library.clone();
 
         // Ensure library is loaded
@@ -918,23 +1103,136 @@ impl ExtendedFFIContext {
             self.library_manager.load(&library)?;
         }
 
-        // Create a stub implementation that returns placeholder values
-        // Real FFI calls require unsafe and platform-specific code
-        let id = self.base.registry.register(sig, move |_state, _args| {
-            // This is a stub - actual implementation would use libffi or similar
-            // to call the external function with proper argument marshalling
+        #[cfg(feature = "dynamic-ffi")]
+        {
+            let loaded = self.library_manager.library(&library)?;
+            let has_result = !sig.returns.is_empty() && sig.returns != [FFIType::Void];
+            let id = self.base.registry.register(sig, move |_state, args| {
+                // SAFETY: registration is itself unsafe and documents that the
+                // caller vouches for the selected symbol's exact C signature.
+                unsafe { call_dynamic_scalar(&loaded, &symbol, args, has_result) }
+            });
+            Ok(id)
+        }
+        #[cfg(not(feature = "dynamic-ffi"))]
+        {
+            let _ = (symbol, library);
             Err(OuroError::FFI {
-                message: format!(
-                    "Dynamic FFI call not implemented. Use built-in functions or \
-                     implement native bridge for library '{}'",
-                    library
-                ),
+                message: "dynamic FFI is disabled; rebuild with feature dynamic-ffi".into(),
                 location: SourceLocation::default(),
             })
-        });
-
-        Ok(id)
+        }
     }
+}
+
+fn validate_dynamic_signature(signature: &FFISignature) -> OuroResult<()> {
+    let scalar = |typ: FFIType| typ == FFIType::U64;
+    if signature.params.len() > 6
+        || signature.params.iter().any(|param| !scalar(param.typ))
+        || signature.returns.len() > 1
+        || signature
+            .returns
+            .first()
+            .is_some_and(|typ| *typ != FFIType::Void && !scalar(*typ))
+    {
+        return Err(OuroError::FFI {
+            message: format!(
+                "dynamic foreign {} is outside the 0..=6 argument u64-only ABI",
+                signature.name
+            ),
+            location: SourceLocation::default(),
+        });
+    }
+    Ok(())
+}
+
+#[cfg(feature = "dynamic-ffi")]
+unsafe fn call_dynamic_scalar(
+    library: &Library,
+    symbol: &str,
+    args: &[Value],
+    has_result: bool,
+) -> OuroResult<Vec<Value>> {
+    macro_rules! invoke {
+        ($function:ty $(, $index:expr)*) => {{
+            let function: Symbol<'_, $function> = library.get(symbol.as_bytes()).map_err(|error| {
+                OuroError::FFI {
+                    message: format!("Symbol {symbol:?} not found: {error}"),
+                    location: SourceLocation::default(),
+                }
+            })?;
+            function($(args[$index].val),*)
+        }};
+    }
+
+    let result = match (args.len(), has_result) {
+        (0, false) => {
+            invoke!(unsafe extern "C" fn());
+            None
+        }
+        (1, false) => {
+            invoke!(unsafe extern "C" fn(u64), 0);
+            None
+        }
+        (2, false) => {
+            invoke!(unsafe extern "C" fn(u64, u64), 0, 1);
+            None
+        }
+        (3, false) => {
+            invoke!(unsafe extern "C" fn(u64, u64, u64), 0, 1, 2);
+            None
+        }
+        (4, false) => {
+            invoke!(unsafe extern "C" fn(u64, u64, u64, u64), 0, 1, 2, 3);
+            None
+        }
+        (5, false) => {
+            invoke!(unsafe extern "C" fn(u64, u64, u64, u64, u64), 0, 1, 2, 3, 4);
+            None
+        }
+        (6, false) => {
+            invoke!(
+                unsafe extern "C" fn(u64, u64, u64, u64, u64, u64),
+                0,
+                1,
+                2,
+                3,
+                4,
+                5
+            );
+            None
+        }
+        (0, true) => Some(invoke!(unsafe extern "C" fn() -> u64)),
+        (1, true) => Some(invoke!(unsafe extern "C" fn(u64) -> u64, 0)),
+        (2, true) => Some(invoke!(unsafe extern "C" fn(u64, u64) -> u64, 0, 1)),
+        (3, true) => Some(invoke!(unsafe extern "C" fn(u64, u64, u64) -> u64, 0, 1, 2)),
+        (4, true) => Some(invoke!(
+            unsafe extern "C" fn(u64, u64, u64, u64) -> u64,
+            0,
+            1,
+            2,
+            3
+        )),
+        (5, true) => Some(invoke!(
+            unsafe extern "C" fn(u64, u64, u64, u64, u64) -> u64,
+            0,
+            1,
+            2,
+            3,
+            4
+        )),
+        (6, true) => Some(invoke!(
+            unsafe extern "C" fn(u64, u64, u64, u64, u64, u64) -> u64,
+            0,
+            1,
+            2,
+            3,
+            4,
+            5
+        )),
+        _ => unreachable!("signature was validated before callback registration"),
+    };
+    Ok(result.into_iter().map(Value::new).collect())
 }
 
 impl Default for ExtendedFFIContext {
@@ -1033,6 +1331,22 @@ mod tests {
         assert!(FFIEffect::Pure.is_pure());
         assert!(!FFIEffect::IO.is_pure());
         assert!(!FFIEffect::Reads.is_pure());
+    }
+
+    #[test]
+    fn dynamic_adapter_is_narrower_than_the_safe_process_host_abi() {
+        assert!(validate_dynamic_signature(
+            &FFISignature::new("word", "test")
+                .param("value", FFIType::U64)
+                .returns_type(FFIType::U64)
+        )
+        .is_ok());
+        assert!(validate_dynamic_signature(
+            &FFISignature::new("signed", "test")
+                .param("value", FFIType::I64)
+                .returns_type(FFIType::I64)
+        )
+        .is_err());
     }
 
     #[test]

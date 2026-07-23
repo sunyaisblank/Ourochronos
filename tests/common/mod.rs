@@ -13,8 +13,8 @@
 //! - Act: Execute the operation under test
 //! - Assert: Verify the expected outcome
 
-use ourochronos::*;
 use ourochronos::temporal::timeloop::ConvergenceStatus;
+use ourochronos::*;
 
 // =============================================================================
 // Program Parsing Utilities
@@ -79,7 +79,6 @@ pub fn action_config() -> Config {
         ..Default::default()
     }
 }
-
 
 /// Create a configuration for diagnostic mode.
 pub fn diagnostic_config() -> Config {
@@ -173,7 +172,7 @@ pub fn extract_output(result: &ConvergenceStatus) -> &Vec<OutputItem> {
 }
 
 /// Assert that a specific memory address has a given value.
-pub fn assert_memory_value(result: &ConvergenceStatus, address: u16, expected: u64) {
+pub fn assert_memory_value(result: &ConvergenceStatus, address: Address, expected: u64) {
     let memory = extract_memory(result);
     let actual = memory.read(address).val;
     assert_eq!(
@@ -186,9 +185,16 @@ pub fn assert_memory_value(result: &ConvergenceStatus, address: u16, expected: u
 /// Assert that output contains a specific value.
 pub fn assert_output_contains(result: &ConvergenceStatus, expected: u64) {
     let output = extract_output(result);
-    let values: Vec<u64> = output.iter().filter_map(|o| {
-        if let OutputItem::Val(v) = o { Some(v.val) } else { None }
-    }).collect();
+    let values: Vec<u64> = output
+        .iter()
+        .filter_map(|o| {
+            if let OutputItem::Val(v) = o {
+                Some(v.val)
+            } else {
+                None
+            }
+        })
+        .collect();
     assert!(
         values.contains(&expected),
         "Output {:?} does not contain {}",
@@ -197,8 +203,6 @@ pub fn assert_output_contains(result: &ConvergenceStatus, expected: u64) {
     );
 }
 
-
-
 // =============================================================================
 // Program Execution Helpers
 // =============================================================================
@@ -206,25 +210,33 @@ pub fn assert_output_contains(result: &ConvergenceStatus, expected: u64) {
 /// Execute a program with default configuration.
 pub fn run(code: &str) -> ConvergenceStatus {
     let program = parse(code);
-    TimeLoop::new(default_config()).expect("valid configuration").run(&program)
+    TimeLoop::new(default_config())
+        .expect("valid configuration")
+        .run(&program)
 }
 
 /// Execute a program with a specific configuration.
 pub fn run_with_config(code: &str, config: Config) -> ConvergenceStatus {
     let program = parse(code);
-    TimeLoop::new(config).expect("valid configuration").run(&program)
+    TimeLoop::new(config)
+        .expect("valid configuration")
+        .run(&program)
 }
 
 /// Execute a program in action-guided mode.
 pub fn run_action_guided(code: &str) -> ConvergenceStatus {
     let program = parse(code);
-    TimeLoop::new(action_config()).expect("valid configuration").run(&program)
+    TimeLoop::new(action_config())
+        .expect("valid configuration")
+        .run(&program)
 }
 
 /// Execute a program in diagnostic mode.
 pub fn run_diagnostic(code: &str) -> ConvergenceStatus {
     let program = parse(code);
-    TimeLoop::new(diagnostic_config()).expect("valid configuration").run(&program)
+    TimeLoop::new(diagnostic_config())
+        .expect("valid configuration")
+        .run(&program)
 }
 
 // =============================================================================
@@ -239,12 +251,12 @@ pub fn verify_determinism(code: &str, runs: usize) -> bool {
     let mut results: Vec<Vec<u64>> = Vec::new();
 
     for _ in 0..runs {
-        let result = TimeLoop::new(config.clone()).expect("valid configuration").run(&program);
+        let result = TimeLoop::new(config.clone())
+            .expect("valid configuration")
+            .run(&program);
         if let ConvergenceStatus::Consistent { memory, .. } = result {
             // Collect all non-zero memory values
-            let values: Vec<u64> = (0..256u16)
-                .map(|addr| memory.read(addr).val)
-                .collect();
+            let values: Vec<u64> = (0..256u64).map(|addr| memory.read(addr).val).collect();
             results.push(values);
         } else {
             return false;
@@ -274,7 +286,7 @@ pub mod programs {
     pub const DIVERGENCE: &str = "0 ORACLE 1 ADD 0 PROPHECY";
 
     /// Conditional convergence.
-    pub const CONDITIONAL: &str = "0 ORACLE DUP 3 EQ IF { DUP 0 PROPHECY } ELSE { POP 3 0 PROPHECY }";
+    pub const CONDITIONAL: &str = "0 ORACLE DUP 3 EQ IF { DUP 0 PROPHECY } ELSE { 3 0 PROPHECY }";
 
     /// Factor finder (for action-guided testing).
     pub const FACTOR_WITNESS: &str = r#"

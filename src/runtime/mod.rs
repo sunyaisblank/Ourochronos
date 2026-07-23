@@ -10,10 +10,11 @@ pub mod io;
 
 // Re-export from ffi
 pub use ffi::{
-    FFIRegistry, FFIContext, FFISignature, FFIFunction, FFIEffect, FFIType, FFICaller,
-    FFIParam, FFIError, FFIFn, DynamicLibraryManager, ExtendedFFIContext,
+    DynamicLibraryManager, ExtendedFFIContext, FFICaller, FFIContext, FFIEffect, FFIError, FFIFn,
+    FFIFunction, FFIParam, FFIRegistry, FFISignature, FFIType,
 };
 
 // Re-export from io
-pub use io::{IOContext, FileMode, SeekOrigin, Buffer, IOStats, FileHandle, SocketHandle, IOLogEntry};
-
+pub use io::{
+    Buffer, FileHandle, FileMode, IOContext, IOLogEntry, IOStats, SeekOrigin, SocketHandle,
+};
