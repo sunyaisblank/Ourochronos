@@ -39,6 +39,73 @@ A value is a pair (n, π): the numeric value n and its *provenance* π ⊆ Addr,
 
 At the start of each epoch the stack and output are empty, the present is all zeros, the status is Running, and the anamnesis is the previous epoch's present (or the seed for the first epoch).
 
+### 2.4 Small-step numeric core and conformance
+
+The numeric core's configuration is `⟨K, S, A, P, I, i, O, d⟩`: pending
+continuations, operand stack (top on the right), immutable anamnesis, present,
+frozen input tape and cursor, typed observations, and active call depth. Both
+stores have the same positive width `N`. An initial configuration contains
+the main sequence, empty stack/output, zero present, cursor/call depth zero,
+and the supplied anamnesis and input tape. Scratch and tapes are recreated or
+replayed as described in §3; an epoch cannot alter `A` or obtain a new input
+value after exhausting `I`.
+
+One source transition consumes the next continuation. A sequence schedules
+its next statement and remaining sequence. A literal pushes its word. For a
+binary operator `f`, `S·a·b` becomes `S·f(a,b)`; arithmetic uses
+`Z/(2^64)`, division/remainder by zero yield zero, and shifts reduce the count
+modulo 64. Comparisons yield 0 or 1; signed operations reinterpret words in
+two's-complement. `NOT` yields 1 exactly for zero. These rules and the stack
+permutations in Appendix A preserve every other configuration component.
+
+Let `B(r)` be `r` for an in-range address. An out-of-range address either
+fails under Error, becomes `r mod N` under Wrap, or becomes `N−1` under Clamp.
+`ORACLE` pops `r` and pushes `A[B(r)]`; `PRESENT` reads `P` instead.
+`PROPHECY` transforms `S·v·r` into `S` and `P[B(r)] := v`.
+`INDEX`/`STORE` compute `base + offset` as a wrapping word before applying
+`B`; only STORE changes the present. These are numeric projections of the
+value/provenance rules in §8; ORACLE values remain duplicable.
+
+`INPUT` pushes `I[i]` and advances `i`. `OUTPUT` pops a word and appends
+`Number(v)`; `EMIT` appends `Byte(v mod 256)`. `IF` consumes its condition
+and schedules the chosen branch, using zero for false. `WHILE` schedules
+its condition, a decision continuation, and, for nonzero, its body followed
+by repetition. A zero condition exits without executing the body. Named
+calls and quotation execution schedule explicit return continuations;
+`EXEC` consumes a code quotation, `DIP` additionally hides and later restores
+the preceding value, and `KEEP` executes with that value still present and
+restores a saved copy afterward. IF and loop continuations do not consume
+call-depth budget. An empty continuation stack finishes; HALT and PARADOX
+stop immediately with distinct terminal statuses.
+
+Missing operands, invalid code, exhausted input, invalid addresses, or an
+exceeded operand/call/output limit produce the corresponding terminal
+failure. Failure cannot certify consistency or authorize host effects.
+Source malformation and static admission failures are separate from dynamic
+failures, even when the numeric evaluator can execute one particular branch.
+Output buffered before a failed epoch does not authorize its publication.
+
+`tests/oracle/mod.rs` implements these rules with its own decimal-text parser,
+tagged word/code syntax, explicit continuations, plain stores, and no imports
+from the production crate. `tests/conformance.rs` compares full successful
+numeric stacks, stores, typed observations, consumed tapes and stop statuses
+through admitted/prepared execution and the supported artifact paths.
+Dynamic failure checks compare fault kinds and associated bounds, rather
+than claiming equality of unavailable partial runtime snapshots. The declared
+fragment includes named procedures and code quotations used through
+EXEC/DIP/KEEP; it excludes imports from its parser, escaped numeric quotation
+identities, provenance, explicit TEMPORAL regions, heaps, host operations,
+and selection/proof policies. Module composition is checked separately with
+an independently specified declaration-only dependency.
+
+Oracle fuel counts source continuation transitions. Public runtime gas counts
+fetched bytecode instructions, including control markers and Return; these
+units must not be equated. The conformance target derives the five-fetch
+bound for `5 2 ADD OUTPUT` (four literal/primitive fetches plus main Return),
+tests adjacent gas budgets, and classifies infinite-loop exhaustion separately.
+This finite evidence supports the declared core and does not prove the entire
+compiler, every optimization, or unbounded termination.
+
 ---
 
 ## 3. The state boundary
@@ -115,25 +182,91 @@ the source compiler remains a differential-test oracle, not a verifier input.
 Deterministic step, expression-arena, observation, CFG, and call-graph limits
 fail closed.
 
-The public raw source-AST `SmtEncoder` is retained solely as a
-backwards-compatible parity oracle for differential testing. `--smt`, global
-solving, all-fixed enumeration, and property proof use the linked-bytecode
-lowerer above; output from the compatibility encoder is not a production proof
-authority.
+The public `SmtEncoder`, `--smt`, global solving, all-fixed enumeration, and
+property proof all use canonical source admission followed by the
+linked-bytecode lowerer above. The raw source-AST compiler exists only in test
+builds as a differential oracle and is not part of the public API.
 
-An IR with no reachable bytecode `WHILE` is `Complete`. An IR containing loops is
-`BoundedLoops(k)`: paths whose next condition remains true after `k`
-iterations are excluded. Consequently:
+An IR is `Complete` when every reachable loop is absent or exactly summarized.
+The native lowerer admits a literal incoming counter `k`, condition `DUP` or
+`DUP 0 GT`, and body `1 SUB` or
+`SWAP delta ADD SWAP 1 SUB` with literal `delta` and the canonical backedge.
+The counter decreases naturally to zero; an accumulator becomes
+`acc + k * delta` modulo 2^64. The stack prefix, present memory, observations,
+and effect eligibility are framed. Acyclic procedure inlining propagates
+literal entry values; general symbolic procedure transfer summaries are absent.
+The fetched-record bound counts both the final condition and every backedge,
+call, return, and scope marker. Arithmetic overflow in that bound or insufficient
+configured gas prevents a complete proof. Branch costs can conservatively
+overestimate the actual path. CFG readiness alone remains conservative about
+loops; native value analysis establishes this refined completeness.
+
+Other loops produce `BoundedLoops(k)`: paths whose next condition remains true
+after `k` iterations are excluded. Consequently:
 
 - SAT is accepted only after decoding `A`, running the linked-bytecode VM from that
   exact memory, finishing normally, and checking the replayed `P=A`;
-- UNSAT is a global nonexistence/property proof only for `Complete` IR;
+- UNSAT is a global nonexistence/property proof only for `Complete` IR and only
+  when Z3 supplies a nonempty proof term within the evidence-size ceiling;
 - bounded-loop UNSAT and solver timeout are `UNKNOWN`;
 - an unsupported, effectful, recursive, or ill-typed construct is an explicit
   error, never silently omitted.
 
+`prove-finite` and `check-finite` additionally provide an independent finite
+no-point-fixed-state certificate. The profile requires a whole-main base-zero
+scope of at most 12 total state bits (4,096 states), masked stores and fresh
+present memory, numeric operations, forward IFs, and acyclic procedures.
+Loops, quotations, foreign calls, external inputs/effects and heap operations
+are excluded. Every row must finish normally within the exact resource profile;
+the checker independently recomputes scoped present memory, final numeric stack,
+numeric output, terminal status and fetched-record count. Outside-scope present
+cells remain zero, so any full-word fixed state belongs to the enumerated domain.
+SHA-256 code identity, versions, query, scope and all resource bounds are checked
+against the caller's expectations; a checksum alone grants no proof authority.
+CLI arguments specify memory and gas; the other limits use `FiniteProofConfig`
+defaults, independently of ordinary VM defaults. The trusted base includes the
+finite Rust interpreter/admission rules and the conservative numeric output-byte
+assumption. This is not a compiler, provenance or physical allocator theorem.
+Other solver evidence retains its stated Z3 trust.
+
+The public affine contract checker covers coupled GF(2) transitions on up to
+64 Boolean cells, including cycles. Assumptions are parity equations on the
+initial state; guarantees are parity relations between the initial and final
+states; protected bits must retain their values. Unsatisfiable assumptions have
+a separate result, never a positive nonvacuous certificate. An independent
+dense-elimination checker verifies a particular solution and nullspace basis
+against every relation. Composition is a successive-epoch pipeline `G(F(x))`,
+not concatenation of two bodies sharing one fresh present store. It verifies
+both actual handoff and implication from the left guarantees/frame to the right
+assumptions. A real handoff counterexample is distinguished from an abstract
+intermediate allowed by an insufficient guarantee. The composed contract
+preserves the intersection of protected bits; a left final-state relation is
+retained only when all of its referenced bits are framed by the right component.
+Optional source/config identities require trusted extraction rechecking against
+external program bytes; model certificates do not prove the compiler or full-word
+outside-scope semantics.
+
+The public affine recurrence checker covers coupled GF(2) transitions on at
+most 64 Boolean cells. It requires `F^(n+1)=F^n`, checks the stabilized affine
+image and its rank independently, and therefore classifies exactly `2^rank`
+singleton recurrent classes without enumerating them. A parity readout is
+either uniform over that image or has two concrete fixed states with opposite
+readout. Genuine periodic systems are outside this class. A conservative
+bytecode adapter extracts a whole-main one-bit scope with constant addresses,
+numeric stacks, XOR, ORACLE, PRESENT and PROPHECY; extraction/production admission
+remain trusted, while the recurrence checker uses no VM, IR or solver. These
+claims concern recurrent numeric memory and an explicit Boolean readout, not
+arbitrary OUTPUT, provenance or full-word transient behavior.
+
 This is the executable refinement relation between the solver and VM. The
-constraint digest in every artifact identifies the exact SMT query used.
+constraint digest in every artifact identifies the exact declarations and
+assertions passed to the in-process solver. Complete-UNSAT artifacts also retain
+that full query and Z3 proof term. `UnsatCertificate::verify_with_z3` checks the
+digest, replays the query in a fresh context, and requires the same proof term;
+the solver performs this replay before it emits a complete-UNSAT result. This is
+backend replay, not validation by an independent proof kernel. The combined
+retained query and proof are limited to 64 MiB; an otherwise complete UNSAT
+result exceeding that limit is `UNKNOWN` rather than an uncheckable proof.
 
 ---
 
@@ -184,7 +317,7 @@ FAMILY name {                       asymptotic PSPACE-family contract
   TRANSITION_STEPS POLY c d a;
   UNIFORM; TOTAL; READOUT_INVARIANT;
   IDEAL_DEUTSCH; EFFECTS_FROZEN;
-}
+}                                   each field may appear at most once
 MARKOV name {                       finite exact stochastic Deutsch model
   STATES n;
   ROW i { p/q ... p/q };            n probabilities per row
@@ -323,11 +456,29 @@ truncation, and trailing bytes. Linking preserves relocated source manifests,
 properties, effects, and exact foreign descriptors, rebuilds code-derived
 metadata, and invalidates pre-link verification payloads after rewriting code.
 The public `compile_objects` API emits these independently serializable
-per-source objects, and the `link` command emits validated `OUROBC` from one
+per-source objects, and the `link` command emits a validated bytecode envelope from one
 or more objects. `--emit-object` writes only the real entry-source object and
 therefore retains typed imports; `--emit-objects` writes the complete
 source/prelude set into an empty directory. Requiring an empty directory keeps
 removed modules from surviving a rebuild as stale link inputs.
+
+CLI linked bytecode, packages, and native launchers retain an `OUROPA` v1
+envelope around the existing `OUROBC` v2 or `OUROPK` v3 payload. Its source
+manifest retains names, byte lengths, and legacy FNV-1a source-digest claims
+for relocated SourceIds even when the original files are unavailable.
+It does not embed source text or authenticate those claims. SHA-256 binds the
+manifest and optional opaque evidence to the final executable bytes and detects
+corruption; evidence requires its own semantic checker. Pre-link evidence is
+discarded. Decoding checks versions, lengths, source identities/ranges, checksum,
+bytecode, and package policies before execution or witness replay.
+
+`PortableArtifact::from_bytes` also accepts legacy bytecode/packages, reporting
+unavailable source provenance. Legacy `BytecodeProgram::from_bytes` and
+`PortablePackage::from_bytes` retain their original formats and reject the new
+magic; callers consuming CLI output must migrate to `PortableArtifact`.
+`legacy_bytes` explicitly exports the payload without its portable provenance.
+`run-package` and launcher APIs accepting envelopes require a package payload;
+bare bytecode has no runtime/resolution manifest and cannot use that entry point.
 
 Standard point-orbit execution uses the iterative bytecode VM. Procedure,
 quotation, and loop
@@ -349,7 +500,8 @@ reachable quotation, foreign, dynamic-stack, mutable-runtime, external-effect,
 recursive-call, or nested-scope boundary with a bytecode/source site. SAT
 witnesses replay through the same bytecode machine. Complete UNSAT additionally
 requires a conservative reachable bytecode instruction bound within configured
-gas; loops, recursion, or arithmetic overflow cannot become a proof.
+gas and bounded exact-query/proof evidence; loops, recursion, arithmetic
+overflow, or missing/oversized proof evidence cannot become a proof.
 
 Explicit recurrent-graph analysis enumerates every declared-domain transition
 through the linked bytecode VM. Source-facing library entry points first
@@ -415,6 +567,15 @@ not a distributed atomicity claim. A missing target is atomically created only
 when its first file intent is reached, so an earlier failed effect cannot create
 a later target; once a file intent is reached, that file can legitimately
 remain changed if a subsequent heterogeneous effect fails.
+
+The transaction log distinguishes a recorded batch from host application:
+`NotAttempted`, `Applying` (unacknowledged/unresolved), `Applied`, or
+`Failed(message)`. Recording without an adapter permits one later dispatch.
+Adapter failures replay the same failure, including across transactions using
+the same log; successful replay never calls the adapter again. A callback
+unwind leaves `Applying` and returns an unresolved error on subsequent requests
+instead of repeating a possibly applied prefix. This evidence is in memory;
+process-crash recovery still requires a durable adapter protocol.
 
 ---
 
@@ -557,17 +718,18 @@ ourochronos run-package <file.ouropkg>
 | `--check` | Run every mandatory compiler and verifier gate without executing |
 | `--emit-object <file>` | Emit the entry source's relocatable `OUROOBJ`; dependencies remain typed imports |
 | `--emit-objects <directory>` | Emit every source/prelude object into a required-empty directory |
-| `--emit-bytecode <file>` | Emit deterministic linked `OUROBC` bytecode |
-| `--build <file>` | Emit a deterministic portable `OUROPK` package |
-| `--build-executable <file>` | Emit a platform-native runtime launcher containing one validated `OUROPK` package |
+| `--emit-bytecode <file>` | Emit deterministic linked bytecode with an `OUROPA` source envelope |
+| `--build <file>` | Emit a deterministic portable package with an `OUROPA` source envelope |
+| `--build-executable <file>` | Emit a platform-native runtime launcher containing one validated package envelope |
 | `--embed-global-witness` | With `--build`/`--build-executable`, globally solve and embed an independently replayed initial point state |
 | `--runtime-global-package` | With a build action, declare the exact versioned Z3 global-point runtime dependency |
 | `--global` | Solve `F(s)=s` over the typed finite IR and replay the witness |
 | `--all-fixed` | Prove zero/unique/multiple point fixed states globally |
 | `--verify` | Check every source PROPERTY over all point fixed states |
+| `--verify-family <bitstring>` | Prove restricted uniform generation and exhaustively verify that exact nonempty Boolean FAMILY input |
 | `--recurrent` | Exhaustively classify a bounded closed transition graph |
-| `--state-bits <n>` | Bits per cell in the recurrent domain (default 1) |
-| `--state-limit <n>` | Maximum explicit states (default 65,536) |
+| `--state-bits <n>` | Bits per cell in the recurrent/family domain (default 1) |
+| `--state-limit <n>` | Maximum explicit recurrent/family states (default 65,536) |
 | `--solver-timeout <ms>` | In-process solver timeout (default 30,000) |
 | `--loop-unroll <n>` | Loop depth represented by symbolic lowering (default 10) |
 | `--artifact <file>` | Versioned JSON proof/witness/counterexample artifact |
@@ -589,7 +751,7 @@ ourochronos run-package <file.ouropkg>
 | `--audit [file]`, `--audit-json` | Structured logging of parse, startup, and run outcome |
 | `--lsp` | Language server (build with `--features lsp`) |
 
-Exit codes: 0 consistent/proven/decided (or bounded-halting positive), 1 usage/parse/runtime/unsupported-analysis error, 2 paradox, nonexistence, ambiguity, refuted property, or vacuous property, 3 resource-bounded unknown (including bounded-loop UNSAT and solver timeout).
+Exit codes: 0 consistent/proven/decided (or bounded-halting positive), 1 usage/parse/runtime/unsupported-analysis error, 2 paradox, nonexistence, ambiguity, refuted property/family instance, or vacuous property, 3 resource-bounded unknown (including bounded-loop UNSAT, family enumeration limits, and solver timeout).
 
 The six source compiler actions are mutually exclusive and cannot be combined with
 an execution or search mode. A portable package contains a UTF-8 identity,
@@ -660,13 +822,129 @@ Linked `FOREIGN` declarations use a deliberately narrow scalar ABI: zero to sixt
 
 `ConcreteResourceProfile` reports exact resources for one run: `m`, `64m` temporal state bits, required address bits, temporal-op count, epoch gas, epoch-search bound, and consistency semantics. It always labels itself a finite instance rather than a PSPACE-family proof.
 
-The top-level `FAMILY` declaration records polynomial bounds for CTC cells, chronology-respecting bits, and transition steps, plus explicit declarations of polynomial-time uniformity, transition totality, all-fixed-point readout agreement, ideal Deutsch selection, and frozen/modeled effects. It is preserved in `Program.family_declaration` and converts to `PspaceFamilyContract`. `missing_obligations()` exposes absent assumptions. `declared_eligible()` means all obligations were declared; it is not a machine-checked proof of those semantic facts. At most one FAMILY declaration is permitted; all three polynomial fields are required. `POLY c d a` denotes `c*n^d+a`.
+The top-level `FAMILY` declaration records polynomial bounds for CTC cells,
+chronology-respecting bits, and transition steps, plus explicit declarations of
+polynomial-time uniformity, transition totality, all-fixed-point readout
+agreement, ideal Deutsch selection, and frozen/modeled effects. It is preserved
+in `Program.family_declaration` and converts to `PspaceFamilyContract`.
+`missing_obligations()` exposes absent assumptions. `declared_eligible()` means
+all obligations were declared; it is not a proof. At most one FAMILY and one of
+each field are permitted; all three polynomial fields are required. `POLY c d
+a` denotes `c*n^d+a` with checked `u128` evaluation.
+
+`PspaceFamilyVerifier` adds a machine-checked finite specialization judgment.
+It retains an exact Boolean input `x`, sets `n=|x|`, replays the same immutable
+`INPUT` tape for every source state, and enumerates all
+`2^(memory_cells*state_bits)` states. Every transition must terminate and
+remain closed without any observation other than that retained input or any
+staged effect. The verifier measures maximum transition instructions and
+conservative chronology workspace, then checks the three polynomials at `n`.
+Chronology workspace includes the input, Boolean decision, program counter,
+peak operand/dynamic state, call frames, and conservative temporal rollback
+state. Resource exhaustion yields `UNKNOWN`, never refutation.
+
+Every state in every recurrent class must emit exactly one numeric `0` or `1`,
+and all must agree. This is sufficient for every stationary distribution of
+the finite deterministic transition to have the same decision. A versioned
+certificate retains the exact input, contract, evaluated bounds, decision, and the
+ordered successor, instruction-count, per-transition workspace-peak, and
+readout-classification table. `check_structure` recomputes exact domain size,
+closure, recurrent classes, workspace maxima, resource inequalities, and the
+unanimous decision without invoking the VM;
+`recheck_bytecode` then reruns complete execution to bind the table to bytecode.
+Digests identify evidence but are not equality authority. The certificate
+proves only this exact input specialization.
+
+`PspaceUniformFamilyGenerator` supplies a separate restricted uniformity proof.
+It retains one exact canonically admitted linked bytecode template, requires a
+complete acyclic reachable control-flow graph (with frozen `INPUT` as the only
+allowed unsupported lowering boundary), and retains an exact nonnegative
+polynomial width rule. Its checker proves for every `n>=1` that the
+width is positive and no greater than `CTC_CELLS(n)`, that explicit temporal
+regions fit the minimum generated width, and that specialization work and
+descriptor size are canonical linear polynomials. `recheck_bytecode` binds the
+proof back to an expected contract and linked artifact. Specialization copies
+the exact input and produces the `PspaceInstanceConfig` consumed by the finite
+verifier. Loops, recursive calls, dynamic runtime-state primitives, foreign
+calls, and unmodeled external operations remain executable elsewhere but are
+ineligible for this restricted uniform-program certificate. General direct
+Boolean-circuit lowering remains a separate obligation; the recognized
+projection subclass below implements it exactly. In the CLI, explicit
+`--memory-cells m` denotes the constant width
+rule `m`; if omitted, `CTC_CELLS` itself is the width rule.
+
+`--verify-family x` composes the uniform-generation and exact-input proofs. Its
+aggregate JSON contains the exact template bytes, generator certificate, and
+finite transition proof as distinct objects. This establishes uniform
+generation for the restricted constant-template random-access family, but not
+family-wide totality, resource sufficiency, or recurrent readout invariance.
+Nature's ideal Deutsch selector remains an external model assumption.
+
+`ProjectionFamilyCertificate` recognizes a fixed straight-line sparse-routing
+main unit. It accepts one or more assignments that copy an in-domain anamnesis
+cell to a present cell, write a fitting word constant, or apply width-preserving
+bitwise `AND`, `OR`, or `XOR` to two anamnesis cells, followed by either a
+Boolean-constant or retained-first-input readout. A fitting constant may replace
+the right operand; constant-bit simplification emits identity, zero, one, or
+`NOT` nodes exactly. Constant `SHR` is also admitted and lowers to shifted
+routing plus zero-fill using the VM's modulo-64 shift count. Assignments are ordered,
+later writes to the same cell win, and unwritten present cells are zero. The
+checker derives exact transition steps, peak stack depth, full-artifact program-
+counter width, and the chronology polynomial `n + constant`; proves those
+polynomials below the declaration for every `n>=1`; and rechecks all addresses
+and constants at the minimum width. Since the readout is independent of
+temporal state, every recurrent class agrees on the decision. The canonical
+one-cell self-projection remains the smallest accepted template.
+It also derives the exact polynomial count `temporal_width(n) * cell_bits + 1`
+for next-state and decision output wires. `ProjectionCircuit` materializes
+those nodes directly: routed prior-state wires, constant bits, one-bit Boolean
+gates, zero on unwritten cells, and a constant or first-input decision wire. Its structural
+checker regenerates the whole topology without VM execution. The aggregate CLI
+artifact nests the all-input theorem, exact circuit, and finite transition
+proof separately. When finite evidence exists, every circuit edge and decision
+is differentially checked against it; disagreement is an internal alignment
+failure.
 
 ### 14.2 Exact stochastic backend
 
 `RationalMarkovChain` implements finite classical Deutsch semantics beyond deterministic maps. It accepts an exact rational row-stochastic matrix, rejects negative or non-normalized rows, computes every closed recurrent class, and solves one extremal stationary distribution per class using exact rational Gaussian elimination. `StationaryFamily` represents their convex hull and computes exact acceptance probabilities for a caller-supplied decision predicate. The implementation uses checked `i128` rational arithmetic and reports overflow; it is intended for finite research instances, not arbitrary-precision production solving.
 
 The top-level `MARKOV` declaration exposes this backend in Ourochronos source. Every row is required exactly once and must contain `STATES` probabilities. `ACCEPTING` defines the chronology-respecting decision predicate. Analysis classifies ACCEPT only if every extremal stationary distribution meets `ACCEPT_AT_LEAST`, REJECT only if every one meets `REJECT_AT_MOST`, and AMBIGUOUS otherwise. Since every stationary distribution is a convex combination of the extremal distributions, checking the extremal recurrent classes is sufficient. Ambiguity exits 2 and names every class and exact acceptance probability; the runtime never chooses a favorable fixed point.
+
+`temporal::sparse_markov::SparseMarkovChain` is a separate Rust embedding
+profile using arbitrary-precision `BigRational` and canonical sparse rows.
+Duplicate destinations and explicit zeros are checked before coalescing;
+nonnegative rows must normalize exactly. Iterative SCC traversal identifies
+every closed class, including unreachable ones. Sparse rational elimination
+produces positive normalized extremals and independently evaluated exact
+stationary residuals. Their convex hull supplies exact readout extrema and
+class witnesses; ACCEPT requires the minimum to reach the acceptance threshold,
+REJECT requires the maximum to meet the rejection threshold, otherwise the
+result is AMBIGUOUS. Thresholds remain exact rationals.
+
+Absolute admission ceilings are 16384 states, 262144 raw edges, 4096 rational
+bits, 1000000 retained matrix entries and 25000000 charged operations;
+caller limits may be stricter. Conservative unreduced arithmetic-size checks
+precede large operations. These logical charges are not an allocator-success
+or wall-clock theorem; use a supervised worker for physical resource bounds.
+No silent approximate fallback exists. Source MARKOV remains on its legacy
+checked-width format.
+
+`temporal::vm_stochastic::extract_vm_markov` separately admits a whole-main,
+base-zero temporal scope of at most twelve Boolean state bits, 4096 memory
+cells and 4096 enumerated states. A finite joint law of at most 64 frozen
+RANDOM tapes is selected before each epoch, with the same law at every kernel
+step; ordinary INPUT is also frozen and reset per run. Acyclic procedures and
+supported numeric/control/observation operations execute the actual VM.
+Every state/scenario must finish with the paired scope exit and main return;
+one failing, paradoxical or tape-exhausted evaluation rejects the whole model.
+Outside-scope scratch starts at zero each time, store masks apply normally,
+and unused random suffixes retain their scenario's entire probability mass.
+Full typed stack/output, provenance, consumed prefixes and fetched gas are
+retained separately from coalesced edges. Work/evidence/tape/VM/backend caps
+are explicit in `VmStochasticConfig`; no ordinary admission gate or opcode is
+changed. This restricted frozen adapter makes no extraction claim for arbitrary
+stateful VM code.
 
 ### 14.3 Bounded halting analyzer
 
@@ -678,11 +956,113 @@ The top-level `MARKOV` declaration exposes this backend in Ourochronos source. E
 
 `fixed_point` begins with the maximally mixed density operator and forms Cesaro averages of successive channel iterates. It returns only when the Frobenius residual `||Phi(rho)-rho||_F` is within tolerance and unit trace is retained; otherwise it returns a nonconvergence error with the final residual. This remains a one-point numerical exploration API.
 
-The top-level `QCHANNEL` form provides the stronger qubit decision semantics. Each Kraus operator has four row-major complex entries; `C re im` gives signed rational real and imaginary parts. The analyzer recovers the affine Bloch map `r -> Ar+c`, solves the entire fixed affine space `(I-A)r=c`, intersects it with the Bloch ball, and analytically minimizes/maximizes the selected computational-basis acceptance probability over that complete intersection. ACCEPT and REJECT require the respective threshold on every fixed density; otherwise the result is AMBIGUOUS and exits 2. `quantum_reset.ouro` has a singleton accepting fixed density, whereas `quantum_identity.ouro` fixes the whole Bloch ball and correctly reports acceptance range `[0,1]`.
+The top-level `QCHANNEL` form analyzes qubit fixed spaces and computational-basis
+readout numerically. Each Kraus operator has four row-major complex entries;
+`C re im` gives signed rational real and imaginary parts. The analyzer recovers
+the affine Bloch map `r -> Ar+c`, solves `(I-A)r=c` using a tolerance-dependent
+rank, intersects the resulting affine space with the Bloch ball, and estimates
+the minimum/maximum acceptance probability over that intersection.
+`quantum_reset.ouro` has a singleton accepting fixed density; identity fixes
+the whole Bloch ball and has range `[0,1]`. Higher-dimensional all-fixed
+readout analysis is not implemented.
 
-This complete fixed-space verifier is specific to qubits and computational-basis readout. Floating-point tolerances remain explicit. Higher dimensions require semidefinite optimization or an equivalent exact characterization and are not implemented.
+Qubit rank, fixed space and extrema are numerical estimates. Arithmetic that
+produces a nonfinite intermediate or residual is an analysis error. Readout
+classification requires the estimated minimum minus the analysis tolerance to
+reach the acceptance threshold, or the estimated maximum plus that tolerance
+to lie below the rejection threshold; tolerance never relaxes the thresholds.
+The guard endpoints round outward even for sub-ulp tolerances. Source rational
+thresholds are enclosed with outward rounding of both integer conversions and
+division; acceptance uses the upper threshold, rejection the lower threshold.
+A range within the tolerance guard of either threshold is separately reported
+as `NUMERICALLY UNCERTAIN` (exit 3), rather than all-class ambiguity (exit 2).
+The API retains `numerical_uncertainty` and `analysis_tolerance` with the range.
+These guards do not establish a certified conditioning/rank error bound;
+nominal ACCEPT/REJECT remain explicitly numerical results.
+
+### 14.5 Bounded higher-dimensional quantum prototype
+
+`examples/quantum_fixed_space.py` is an isolated numerical investigation,
+outside the Rust quantum/runtime and source grammar. For dimensions 2–4,
+1–16 Kraus operators and 1–8 complete POVM effects, its mathematical target is
+
+```text
+D_d = {rho = rho*, rho >= 0, Tr(rho) = 1}
+Phi(rho) = sum_j K_j rho K_j*,  sum_j K_j* K_j = I
+M_a >= 0, sum_a M_a = I;  E = sum_{a in selected outcomes} M_a
+p_min / p_max = min / max Tr(E rho), rho in D_d, Phi(rho) = rho
+```
+
+For exact CPTP data the feasible fixed-density set is nonempty, closed, convex
+and compact. General POVM semantics require validating every effect and the
+sum, not only the selected E; the empty subset has E=0. These channel and
+measurement definitions follow [Watrous, chapter 2](https://cs.uwaterloo.ca/~watrous/TQI/TQI.double.2.pdf).
+For minimization a mathematical weak dual is maximize lambda subject to
+`E-lambda I+(Phi*-I)Y >= 0`, Y Hermitian; maximum is minus minimum of -E.
+Rank-deficient feasible sets need not satisfy strict feasibility, so dual
+attainment and exact strong-duality certificates are not assumed.
+
+The implementation uses complex Hermitian SDPs in
+[CVXPY](https://www.cvxpy.org/tutorial/constraints/index.html), solved numerically
+by SCS with at most 20000 iterations and three seconds per direction. JSON is
+capped at 256 KiB before matrix conversion; dimensions, counts, finite entries,
+Hermiticity, approximate positivity, trace preservation and full-POVM
+normalization are checked. The report binds exact serialized IEEE matrices,
+configuration, selected outcomes, runtime versions and prototype SHA-256.
+That identity is not authenticity or an exact CPTP certificate.
+
+Results retain raw solver status/objective and candidate PSD eigenvalue,
+Hermiticity, trace, fixed residual and objective imaginary part, plus numerical
+primal/dual residual, signed gap and dual-slack evidence. No state is clipped
+or repaired into exact feasibility. The solver's
+[stopping criteria](https://www.cvxgrp.org/scs/algorithm/index.html) provide
+numerical termination evidence, not a uniform exact fixed-space error bound.
+Invalid data, unsupported input, exhausted solving and numerical uncertainty
+remain distinct. Tiny nonzero fixed constraints trigger a conservative
+conditioning guard. Near-threshold labels use an explicit margin, but all
+usable results are still `numeric_only_no_global_certificate` estimates.
+The near-identity reset counterexample and finite independent references are
+recorded in [case studies](case_studies.md#higher-dimensional-numerical-quantum-investigation).
+
+This research stage implements no exact algebraic amplitude/rank/PSD checker,
+unrestricted dimension, maximum-entropy selector or rigorous all-fixed
+threshold decision. Production promotion of such claims requires separately
+justified interval/exact evidence and a checked error/certificate contract.
 
 ---
+
+### 14.6 Passive portable host snapshots
+
+`runtime::host_manifest` defines the bounded `OUROHM` version-1 envelope.
+Its contents are the SHA256 of canonical linked bytecode, every foreign
+descriptor in exact ID order, frozen INPUT, and sorted unique scalar PURE
+observations `(ForeignId, arguments, optional result)`. Limits are 64 foreign
+dependencies, 16 scalar `u64`/`i64` arguments, zero or one result, 4096 INPUT
+words, 4096 observations, 256 bytes per name and 1 MiB encoded data. Program
+preflight additionally bounds code records, units and canonical encoding.
+
+Decoding checks structure, lengths, types, order, version and checksum.
+`check` additionally requires the exact expected program and an independently
+approved digest of the complete manifest. An intact checksum alone does not
+approve the observations or prove how they were captured. Namespace/library
+strings are passive claims: decoding never loads a library, grants a capability
+or invokes a callback. An effectful dependency may be described, but cannot
+have a frozen observation or produce a frozen host table.
+
+The checked table answers only exact declared PURE scalar observations and
+returns an error for missing arguments/results. The embedder must execute the
+checked program, explicitly configure its returned INPUT and apply resource
+limits. The table itself does not authenticate every subsequent embedding
+call. Default Debug output omits INPUT and observation scalar values; serialized
+snapshots retain those values and require the caller's access policy. Portable
+packages continue to reject foreign and effect dependencies.
+
+Linked host calls reject arity mismatch before callback entry. Dynamic native
+registration captures immutable validated arity before selecting a C ABI
+signature. Native library loading and registration require explicit unsafe
+trust obligations, including initializers/destructors, scalar arguments,
+concurrent calls and library lifetime. Gas cannot preempt a native callback;
+resource or effect confinement requires a suitable separate host process.
 
 ## Appendix A: Opcode reference
 

@@ -1,8 +1,8 @@
 //! Benchmark Tests for Ourochronos VM.
 //!
-//! This module provides performance comparison tests between:
-//! - Standard VM (with provenance tracking)
-//! - Fast VM (register-cached, no provenance)
+//! This module compares the standard and pure execution facades. Both execute
+//! validated bytecode, so these timings include admission and facade overhead.
+//! Every measured run must complete with independently expected output.
 //!
 //! ## Benchmark Categories
 //!
@@ -47,8 +47,6 @@ pub struct BenchmarkResult {
     pub iterations: u32,
     /// Total instructions executed.
     pub total_instructions: u64,
-    /// Whether execution succeeded.
-    pub success: bool,
 }
 
 impl BenchmarkResult {
@@ -101,7 +99,12 @@ fn parse(code: &str) -> Program {
 // =============================================================================
 
 /// Benchmark standard VM execution.
-fn benchmark_vm(name: &str, program: &Program, max_instructions: u64) -> BenchmarkResult {
+fn benchmark_vm(
+    name: &str,
+    program: &Program,
+    max_instructions: u64,
+    expected_output: &[OutputItem],
+) -> BenchmarkResult {
     let config = ExecutorConfig {
         max_instructions,
         immediate_output: false,
@@ -112,7 +115,6 @@ fn benchmark_vm(name: &str, program: &Program, max_instructions: u64) -> Benchma
     let start = Instant::now();
     let mut iterations = 0u32;
     let mut total_instructions = 0u64;
-    let mut success = true;
 
     // Run until we hit target duration or minimum iterations
     while iterations < MIN_ITERATIONS || start.elapsed().as_millis() < TARGET_DURATION_MS as u128 {
@@ -120,13 +122,12 @@ fn benchmark_vm(name: &str, program: &Program, max_instructions: u64) -> Benchma
         let anamnesis = Memory::new();
         let result = executor.run_epoch(program, &anamnesis);
 
-        match result.status {
-            EpochStatus::Finished => {}
-            EpochStatus::Error(ref e) if !e.contains("requires standard") => {
-                success = false;
-            }
-            _ => {}
-        }
+        assert_eq!(result.status, EpochStatus::Finished, "VM failed for {name}");
+        assert_eq!(
+            result.output.as_slice(),
+            expected_output,
+            "VM output for {name}"
+        );
 
         total_instructions += result.instructions_executed;
         iterations += 1;
@@ -142,37 +143,40 @@ fn benchmark_vm(name: &str, program: &Program, max_instructions: u64) -> Benchma
         total_time: start.elapsed(),
         iterations,
         total_instructions,
-        success,
     }
 }
 
 /// Benchmark fast VM execution.
-fn benchmark_fast_vm(name: &str, program: &Program, max_instructions: u64) -> BenchmarkResult {
+fn benchmark_fast_vm(
+    name: &str,
+    program: &Program,
+    max_instructions: u64,
+    expected_output: &[OutputItem],
+) -> BenchmarkResult {
     let start = Instant::now();
     let mut iterations = 0u32;
     let mut total_instructions = 0u64;
-    let mut success = true;
-
-    // Check if program is pure
-    if !is_program_pure(program) {
-        return BenchmarkResult {
-            name: format!("FastVM:{}", name),
-            total_time: Duration::ZERO,
-            iterations: 0,
-            total_instructions: 0,
-            success: false,
-        };
-    }
+    assert!(
+        is_program_pure(program),
+        "FastVM benchmark must be pure: {name}"
+    );
 
     // Run until we hit target duration or minimum iterations
     while iterations < MIN_ITERATIONS || start.elapsed().as_millis() < TARGET_DURATION_MS as u128 {
         let mut executor = FastExecutor::new(max_instructions);
-        match executor.execute_pure(program, &program.quotes) {
-            Ok(()) => {}
-            Err(_) => {
-                success = false;
-            }
-        }
+        executor
+            .execute_pure(program, &program.quotes)
+            .unwrap_or_else(|error| panic!("FastVM failed for {name}: {error}"));
+        assert_eq!(
+            executor.status,
+            EpochStatus::Finished,
+            "FastVM failed for {name}"
+        );
+        assert_eq!(
+            executor.output.as_slice(),
+            expected_output,
+            "FastVM output for {name}"
+        );
 
         total_instructions += executor.instructions_executed;
         iterations += 1;
@@ -188,8 +192,24 @@ fn benchmark_fast_vm(name: &str, program: &Program, max_instructions: u64) -> Be
         total_time: start.elapsed(),
         iterations,
         total_instructions,
-        success,
     }
+}
+
+fn benchmark_pure(name: &str, code: &str, expected: &[u64]) {
+    let program = parse(code);
+    let output = numeric_output(expected);
+    let vm_result = benchmark_vm(name, &program, 10_000_000, &output);
+    let fast_result = benchmark_fast_vm(name, &program, 10_000_000, &output);
+    vm_result.print();
+    fast_result.print();
+    compare_results(&vm_result, &fast_result);
+}
+
+fn numeric_output(words: &[u64]) -> Vec<OutputItem> {
+    words
+        .iter()
+        .map(|&word| OutputItem::Val(Value::new(word)))
+        .collect()
 }
 
 // =============================================================================
@@ -198,17 +218,18 @@ fn benchmark_fast_vm(name: &str, program: &Program, max_instructions: u64) -> Be
 
 /// Fibonacci computation (pure, stack-intensive).
 const FIBONACCI_N: &str = r#"
-    1 1
-    0 WHILE { DUP 100000 LT } {
-        OVER ADD
+    0 0 1
+    WHILE { 2 PICK 100000 LT } {
+        SWAP OVER ADD
+        ROT 1 ADD ROT ROT
     }
-    OUTPUT
+    OUTPUT OUTPUT OUTPUT
 "#;
 
 /// Factorial computation (pure, multiplication-heavy).
 const FACTORIAL: &str = r#"
     1 1
-    0 WHILE { DUP 20 LT } {
+    WHILE { DUP 20 LTE } {
         SWAP OVER MUL SWAP 1 ADD
     }
     POP OUTPUT
@@ -216,29 +237,29 @@ const FACTORIAL: &str = r#"
 
 /// Tight arithmetic loop.
 const ARITHMETIC_LOOP: &str = r#"
-    0
-    0 WHILE { DUP 10000 LT } {
-        1 ADD DUP 3 MUL 2 ADD 7 MOD SWAP 1 ADD
+    0 0
+    WHILE { DUP 10000 LT } {
+        SWAP 3 MUL 2 ADD 7 MOD SWAP 1 ADD
     }
-    POP OUTPUT
+    OUTPUT OUTPUT
 "#;
 
 /// Stack manipulation stress test.
 const STACK_STRESS: &str = r#"
     1 2 3 4 5
     0 WHILE { DUP 1000 LT } {
-        SWAP OVER ROT SWAP OVER ROT
+        SWAP OVER ROT POP SWAP OVER ROT POP
         1 ADD
     }
-    DEPTH OUTPUT
+    POP DEPTH OUTPUT OUTPUT OUTPUT OUTPUT OUTPUT OUTPUT
 "#;
 
 /// Comparison operations.
 const COMPARISON_LOOP: &str = r#"
-    0 1
-    0 WHILE { DUP 10000 LT } {
-        OVER 5000 GT IF { OVER 1 ADD SWAP POP SWAP }
-        OVER 2500 LT IF { OVER 1 ADD SWAP POP SWAP }
+    0 0
+    WHILE { DUP 10000 LT } {
+        DUP 5000 GT IF { SWAP 1 ADD SWAP }
+        DUP 2500 LT IF { SWAP 1 ADD SWAP }
         1 ADD
     }
     OUTPUT OUTPUT
@@ -246,19 +267,19 @@ const COMPARISON_LOOP: &str = r#"
 
 /// Bitwise operations.
 const BITWISE_LOOP: &str = r#"
-    1
-    0 WHILE { DUP 10000 LT } {
-        OVER 3 SHL OVER XOR OVER AND SWAP 1 ADD
+    1 0
+    WHILE { DUP 10000 LT } {
+        SWAP DUP 3 SHL XOR OVER XOR 65535 AND SWAP 1 ADD
     }
     OUTPUT OUTPUT
 "#;
 
 /// Nested loops.
 const NESTED_LOOPS: &str = r#"
-    0
-    0 WHILE { DUP 100 LT } {
+    0 0
+    WHILE { DUP 100 LT } {
         0 WHILE { DUP 100 LT } {
-            OVER 1 ADD SWAP POP SWAP
+            ROT 1 ADD ROT ROT
             1 ADD
         }
         POP 1 ADD
@@ -273,7 +294,7 @@ const TEMPORAL_SIMPLE: &str = r#"
 
 /// Self-consistent temporal (converges quickly).
 const TEMPORAL_CONSISTENT: &str = r#"
-    0 ORACLE DUP 0 PROPHECY
+    0 ORACLE DUP OUTPUT 0 PROPHECY
 "#;
 
 // =============================================================================
@@ -282,121 +303,66 @@ const TEMPORAL_CONSISTENT: &str = r#"
 
 #[test]
 fn benchmark_fibonacci() {
-    println!("\n=== Fibonacci Benchmark ===");
-
-    let program = parse(FIBONACCI_N);
-    let max_instructions = 10_000_000;
-
-    let vm_result = benchmark_vm("fibonacci", &program, max_instructions);
-    vm_result.print();
-
-    let fast_result = benchmark_fast_vm("fibonacci", &program, max_instructions);
-    if fast_result.success {
-        fast_result.print();
-        compare_results(&vm_result, &fast_result);
+    let (mut previous, mut current) = (0u64, 1u64);
+    for _ in 0..100_000 {
+        (previous, current) = (current, previous.wrapping_add(current));
     }
+    benchmark_pure("fibonacci", FIBONACCI_N, &[current, previous, 100_000]);
 }
 
 #[test]
 fn benchmark_factorial() {
-    println!("\n=== Factorial Benchmark ===");
-
-    let program = parse(FACTORIAL);
-    let max_instructions = 10_000_000;
-
-    let vm_result = benchmark_vm("factorial", &program, max_instructions);
-    vm_result.print();
-
-    let fast_result = benchmark_fast_vm("factorial", &program, max_instructions);
-    if fast_result.success {
-        fast_result.print();
-        compare_results(&vm_result, &fast_result);
-    }
+    let expected = (1u64..=20).product();
+    benchmark_pure("factorial", FACTORIAL, &[expected]);
 }
 
 #[test]
 fn benchmark_arithmetic_loop() {
-    println!("\n=== Arithmetic Loop Benchmark ===");
-
-    let program = parse(ARITHMETIC_LOOP);
-    let max_instructions = 10_000_000;
-
-    let vm_result = benchmark_vm("arithmetic", &program, max_instructions);
-    vm_result.print();
-
-    let fast_result = benchmark_fast_vm("arithmetic", &program, max_instructions);
-    if fast_result.success {
-        fast_result.print();
-        compare_results(&vm_result, &fast_result);
+    let mut accumulator = 0u64;
+    for _ in 0..10_000 {
+        accumulator = (accumulator * 3 + 2) % 7;
     }
+    benchmark_pure("arithmetic", ARITHMETIC_LOOP, &[10_000, accumulator]);
 }
 
 #[test]
 fn benchmark_stack_operations() {
-    println!("\n=== Stack Operations Benchmark ===");
-
-    let program = parse(STACK_STRESS);
-    let max_instructions = 10_000_000;
-
-    let vm_result = benchmark_vm("stack", &program, max_instructions);
-    vm_result.print();
-
-    let fast_result = benchmark_fast_vm("stack", &program, max_instructions);
-    if fast_result.success {
-        fast_result.print();
-        compare_results(&vm_result, &fast_result);
-    }
+    // SWAP OVER ROT POP restores its two operands. Each iteration preserves
+    // the five data words and advances only the counter.
+    let words: Vec<u64> = (1..=5).collect();
+    let expected: Vec<_> = std::iter::once(words.len() as u64)
+        .chain(words.iter().rev().copied())
+        .collect();
+    benchmark_pure("stack", STACK_STRESS, &expected);
 }
 
 #[test]
 fn benchmark_comparisons() {
-    println!("\n=== Comparison Operations Benchmark ===");
-
-    let program = parse(COMPARISON_LOOP);
-    let max_instructions = 10_000_000;
-
-    let vm_result = benchmark_vm("comparison", &program, max_instructions);
-    vm_result.print();
-
-    let fast_result = benchmark_fast_vm("comparison", &program, max_instructions);
-    if fast_result.success {
-        fast_result.print();
-        compare_results(&vm_result, &fast_result);
+    let mut matches = 0;
+    for index in 0..10_000 {
+        matches += u64::from(index > 5000) + u64::from(index < 2500);
     }
+    benchmark_pure("comparison", COMPARISON_LOOP, &[10_000, matches]);
 }
 
 #[test]
 fn benchmark_bitwise() {
-    println!("\n=== Bitwise Operations Benchmark ===");
-
-    let program = parse(BITWISE_LOOP);
-    let max_instructions = 10_000_000;
-
-    let vm_result = benchmark_vm("bitwise", &program, max_instructions);
-    vm_result.print();
-
-    let fast_result = benchmark_fast_vm("bitwise", &program, max_instructions);
-    if fast_result.success {
-        fast_result.print();
-        compare_results(&vm_result, &fast_result);
+    let mut accumulator = 1u64;
+    for index in 0..10_000 {
+        accumulator = (accumulator ^ (accumulator << 3) ^ index) & 0xffff;
     }
+    benchmark_pure("bitwise", BITWISE_LOOP, &[10_000, accumulator]);
 }
 
 #[test]
 fn benchmark_nested_loops() {
-    println!("\n=== Nested Loops Benchmark ===");
-
-    let program = parse(NESTED_LOOPS);
-    let max_instructions = 10_000_000;
-
-    let vm_result = benchmark_vm("nested", &program, max_instructions);
-    vm_result.print();
-
-    let fast_result = benchmark_fast_vm("nested", &program, max_instructions);
-    if fast_result.success {
-        fast_result.print();
-        compare_results(&vm_result, &fast_result);
+    let mut visits = 0;
+    for _ in 0..100 {
+        for _ in 0..100 {
+            visits += 1;
+        }
     }
+    benchmark_pure("nested", NESTED_LOOPS, &[100, visits]);
 }
 
 #[test]
@@ -407,14 +373,15 @@ fn benchmark_temporal_overhead() {
     let program = parse(TEMPORAL_SIMPLE);
     let max_instructions = 10_000_000;
 
-    let vm_result = benchmark_vm("temporal_simple", &program, max_instructions);
+    let vm_result = benchmark_vm("temporal_simple", &program, max_instructions, &[]);
     vm_result.print();
 
-    // This should fail (temporal ops not supported in fast VM)
-    let fast_result = benchmark_fast_vm("temporal_simple", &program, max_instructions);
-    if !fast_result.success {
-        println!("  FastVM: Not applicable (temporal operations)");
-    }
+    assert!(!is_program_pure(&program));
+    let error = FastExecutor::new(max_instructions)
+        .execute_pure(&program, &program.quotes)
+        .expect_err("FastVM must reject temporal operations");
+    assert!(error.contains("full temporal/effect runtime"), "{error}");
+    println!("  FastVM: Not applicable (temporal operations)");
 }
 
 #[test]
@@ -437,9 +404,22 @@ fn benchmark_timeloop_convergence() {
     let mut iterations = 0u32;
 
     while iterations < MIN_ITERATIONS || start.elapsed().as_millis() < TARGET_DURATION_MS as u128 {
-        let _result = TimeLoop::new(config.clone())
+        let result = TimeLoop::new(config.clone())
             .expect("valid configuration")
             .run(&program);
+        match result {
+            ConvergenceStatus::Consistent { epochs, output, .. } => {
+                assert_eq!(epochs, 1);
+                assert_eq!(
+                    output,
+                    vec![OutputItem::Val(Value::with_provenance(
+                        0,
+                        ourochronos::core::Provenance::single(0),
+                    ))],
+                );
+            }
+            status => panic!("consistent temporal benchmark failed: {status:?}"),
+        }
         iterations += 1;
 
         if iterations > 1000 {
@@ -457,25 +437,63 @@ fn benchmark_timeloop_convergence() {
 // Invariant Tests (Benchmark-Related)
 // =============================================================================
 
-/// Verify that FastVM is observably indistinguishable from the VM for pure
-/// programmes: identical output buffers and successful completion. This is
-/// the differential gate behind fast_vm's semantic-preservation claim.
+/// Failed runs and changed observations must invalidate a timing campaign.
+/// These are real program mutations, including gas exhaustion and a value
+/// changed to a character; both facades must expose the disagreement.
+#[test]
+fn benchmark_checks_reject_failed_and_incorrect_runs() {
+    let cases = [
+        ("POP", 100, vec![]),
+        ("WHILE { 1 } { NOP }", 20, vec![]),
+        ("PARADOX", 100, vec![]),
+        ("41 OUTPUT", 100, numeric_output(&[42])),
+        ("42 EMIT", 100, numeric_output(&[42])),
+        ("42 OUTPUT 42 OUTPUT", 100, numeric_output(&[42])),
+        ("NOP", 100, numeric_output(&[42])),
+    ];
+    for (code, gas, expected) in cases {
+        let program = parse(code);
+        assert!(
+            std::panic::catch_unwind(|| benchmark_vm(code, &program, gas, &expected)).is_err(),
+            "VM benchmark accepted {code}",
+        );
+        if is_program_pure(&program) {
+            assert!(
+                std::panic::catch_unwind(|| benchmark_fast_vm(code, &program, gas, &expected))
+                    .is_err(),
+                "FastVM benchmark accepted {code}",
+            );
+        }
+    }
+}
+
+/// Both facades must match independently expected typed output. They share
+/// bytecode dispatch, so agreement between them alone is insufficient.
 #[test]
 fn invariant_fastvm_matches_vm() {
     let pure_programs = [
-        "10 20 ADD OUTPUT",
-        "1 2 3 ROT OUTPUT OUTPUT OUTPUT",
-        "5 DUP MUL OUTPUT",
-        "100 50 SUB 25 ADD OUTPUT",
-        "7 3 MOD OUTPUT",
-        "72 EMIT 73 EMIT",
-        "1 IF { 42 OUTPUT } ELSE { 7 OUTPUT }",
-        "3 WHILE { DUP 0 GT } { DUP OUTPUT 1 SUB } POP",
-        "INPUT OUTPUT INPUT OUTPUT",
+        ("10 20 ADD OUTPUT", numeric_output(&[30])),
+        ("1 2 3 ROT OUTPUT OUTPUT OUTPUT", numeric_output(&[1, 3, 2])),
+        ("5 DUP MUL OUTPUT", numeric_output(&[25])),
+        ("100 50 SUB 25 ADD OUTPUT", numeric_output(&[75])),
+        ("7 3 MOD OUTPUT", numeric_output(&[1])),
+        (
+            "72 EMIT 73 EMIT",
+            vec![OutputItem::Char(b'H'), OutputItem::Char(b'I')],
+        ),
+        (
+            "1 IF { 42 OUTPUT } ELSE { 7 OUTPUT }",
+            numeric_output(&[42]),
+        ),
+        (
+            "3 WHILE { DUP 0 GT } { DUP OUTPUT 1 SUB } POP",
+            numeric_output(&[3, 2, 1]),
+        ),
+        ("INPUT OUTPUT INPUT OUTPUT", numeric_output(&[11, 22])),
     ];
     let scripted_input = vec![11u64, 22u64];
 
-    for code in &pure_programs {
+    for (code, expected) in &pure_programs {
         let program = parse(code);
         assert!(is_program_pure(&program), "expected pure: {}", code);
 
@@ -500,23 +518,19 @@ fn invariant_fastvm_matches_vm() {
             .execute_pure(&program, &program.quotes)
             .unwrap_or_else(|e| panic!("FastVM failed for {}: {}", code, e));
 
-        let vm_out: Vec<String> = vm_result
-            .output
-            .iter()
-            .map(crate::common::render_output_item)
-            .collect();
-        let fast_out: Vec<String> = fast_exec
-            .output
-            .iter()
-            .map(crate::common::render_output_item)
-            .collect();
-        assert_eq!(vm_out, fast_out, "output diverged for: {}", code);
+        assert_eq!(&vm_result.output, expected, "VM output for: {code}");
+        assert_eq!(
+            fast_exec.status,
+            EpochStatus::Finished,
+            "FastVM status for: {code}"
+        );
+        assert_eq!(&fast_exec.output, expected, "FastVM output for: {code}");
     }
 }
 
 /// Rejection behavior is part of the optimized-runtime identity contract. In
-/// particular, register caching must not turn a statically invalid stack
-/// operation into a no-op when the cached registers are empty.
+/// particular, neither facade may turn a statically invalid stack operation
+/// into a successful no-op.
 #[test]
 fn invariant_fastvm_and_vm_reject_stack_underflow() {
     for code in ["SWAP", "1 SWAP", "DUP", "1 OVER", "1 2 ROT"] {

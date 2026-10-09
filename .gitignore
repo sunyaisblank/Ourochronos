@@ -1,3 +1,6 @@
 /target/
 **/*.rs.bk
 *.pdb
+
+# Generated Python research/interface caches
+**/__pycache__/

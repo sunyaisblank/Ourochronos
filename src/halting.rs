@@ -4,14 +4,19 @@
 //! instructions yields `NotHaltedWithinBound`, which is an unknown result for
 //! the unbounded run.
 
+use crate::admission::{admit_program, AdmissionConfig};
 use crate::ast::{EffectClass, OpCode, Program};
 use crate::bytecode::{BytecodeProgram, Instruction};
 use crate::bytecode_vm::{
     bytecode_vm_supports, BytecodeVm, BytecodeVmConfig, BytecodeVmError, BytecodeVmStatus,
 };
+use crate::checkpoint::{
+    CheckpointError, CheckpointOutcome, CheckpointPauseReason, ClassicalCheckpoint,
+    ClassicalCheckpointConfig,
+};
 use crate::core::{OutputItem, PagedMemory};
-use crate::hir::HirProgram;
 use std::collections::{HashSet, VecDeque};
+use std::sync::atomic::AtomicBool;
 
 #[derive(Debug)]
 pub enum BoundedHaltingResult {
@@ -33,7 +38,62 @@ pub enum BoundedHaltingResult {
 
 pub struct BoundedHaltingAnalyzer;
 
+/// Observations from a verified, resumable deterministic classical query.
+/// Every pause remains UNKNOWN for the unrestricted halting question.
+#[derive(Debug)]
+pub enum ResumableHaltingResult {
+    Halted {
+        instructions: u64,
+        output: Vec<OutputItem>,
+    },
+    Unknown {
+        instructions: u64,
+        reason: CheckpointPauseReason,
+        checkpoint: ClassicalCheckpoint,
+    },
+    RuntimeError {
+        message: String,
+        instructions: u64,
+    },
+}
+
 impl BoundedHaltingAnalyzer {
+    /// Start the explicitly declared checkpoint core. This narrower recovery
+    /// boundary does not change the existing one-shot analyzer's coverage.
+    pub fn start_checkpoint(
+        program: &BytecodeProgram,
+        config: ClassicalCheckpointConfig,
+    ) -> Result<ClassicalCheckpoint, CheckpointError> {
+        ClassicalCheckpoint::start(program, config)
+    }
+
+    pub fn analyze_checkpoint(
+        checkpoint: ClassicalCheckpoint,
+        allowance: u64,
+        cancellation: Option<&AtomicBool>,
+    ) -> Result<ResumableHaltingResult, CheckpointError> {
+        match checkpoint.run_slice(allowance, cancellation)? {
+            CheckpointOutcome::Complete(execution) => Ok(ResumableHaltingResult::Halted {
+                instructions: execution.instructions_executed,
+                output: execution.output,
+            }),
+            CheckpointOutcome::Paused { checkpoint, reason } => {
+                Ok(ResumableHaltingResult::Unknown {
+                    instructions: checkpoint.instructions_executed(),
+                    reason,
+                    checkpoint,
+                })
+            }
+            CheckpointOutcome::Fault {
+                error,
+                instructions,
+            } => Ok(ResumableHaltingResult::RuntimeError {
+                message: error.to_string(),
+                instructions,
+            }),
+        }
+    }
+
     /// Observe one deterministic, non-temporal program for at most `T`
     /// instructions. Both falling off the end and explicit HALT count as halt.
     pub fn analyze(
@@ -51,23 +111,15 @@ impl BoundedHaltingAnalyzer {
                 reason: "memory width must be greater than zero".into(),
             };
         }
-        let hir = match HirProgram::resolve(program) {
-            Ok(hir) => hir,
-            Err(errors) => {
-                return BoundedHaltingResult::Unsupported {
-                    reason: format!("typed name resolution failed: {errors:?}"),
-                };
-            }
-        };
-        let bytecode = match BytecodeProgram::compile(&hir) {
-            Ok(bytecode) => bytecode,
+        let admitted = match admit_program(program, AdmissionConfig { memory_cells }) {
+            Ok(admitted) => admitted,
             Err(error) => {
                 return BoundedHaltingResult::Unsupported {
-                    reason: format!("bytecode lowering failed: {error}"),
+                    reason: format!("source admission failed: {error}"),
                 };
             }
         };
-        Self::analyze_bytecode(&bytecode, instruction_bound, memory_cells)
+        Self::analyze_bytecode(admitted.program(), instruction_bound, memory_cells)
     }
 
     /// Observe the authoritative linked executable representation for at most

@@ -8,14 +8,6 @@ mod tests {
     use crate::*;
     use proptest::prelude::*;
 
-    /// Extract the numeric value from an OutputItem.
-    fn output_value(item: &OutputItem) -> u64 {
-        match item {
-            OutputItem::Val(v) => v.val,
-            OutputItem::Char(c) => *c as u64,
-        }
-    }
-
     // ========================================================================
     // Memory Property Tests
     // ========================================================================
@@ -149,16 +141,15 @@ mod tests {
                     selector.add_candidate(mem, 1, vec![], seed.clone());
                 }
 
-                if let Some(best) = selector.select_best() {
-                    results.push(best.memory.read(0).val);
-                }
+                let best = selector.select_best();
+                prop_assert!(best.is_some(), "nonempty candidates must produce a selection");
+                results.push(best.unwrap().memory.read(0).val);
             }
 
             // All selections should be identical
-            if let Some(&first) = results.first() {
-                for &val in &results {
-                    prop_assert_eq!(val, first);
-                }
+            prop_assert_eq!(results.len(), 3);
+            for &val in &results {
+                prop_assert_eq!(val, results[0]);
             }
         }
     }
@@ -168,29 +159,29 @@ mod tests {
     // ========================================================================
 
     proptest! {
-        /// Pure programs (no ORACLE) always converge in 1 epoch.
+        /// Generated pure additions converge in one epoch with exact output.
         #[test]
         fn prop_pure_program_single_epoch(
-            a in 1u64..1000,
-            b in 1u64..1000,
+            a in any::<u64>(),
+            b in any::<u64>(),
         ) {
             let source = format!("{} {} ADD OUTPUT", a, b);
             let tokens = tokenize(&source);
             let mut parser = Parser::new(&tokens);
 
-            if let Ok(program) = parser.parse_program() {
-                let config = crate::temporal::timeloop::TimeLoopConfig::default();
-                let mut driver = TimeLoop::new(config).expect("valid configuration");
-                let result = driver.run(&program);
+            let parsed = parser.parse_program();
+            prop_assert!(parsed.is_ok(), "generated valid source failed to parse: {:?}", parsed.as_ref().err());
+            let program = parsed.unwrap();
+            let config = crate::temporal::timeloop::TimeLoopConfig::default();
+            let mut driver = TimeLoop::new(config).expect("valid configuration");
+            let result = driver.run(&program);
 
-                match result {
-                    ConvergenceStatus::Consistent { epochs, output, .. } => {
-                        prop_assert_eq!(epochs, 1);
-                        prop_assert!(!output.is_empty());
-                        prop_assert_eq!(output_value(&output[0]), a.wrapping_add(b));
-                    }
-                    _ => prop_assert!(false, "Expected consistent"),
+            match result {
+                ConvergenceStatus::Consistent { epochs, output, .. } => {
+                    prop_assert_eq!(epochs, 1);
+                    prop_assert_eq!(output, vec![OutputItem::Val(Value::new(a.wrapping_add(b)))]);
                 }
+                status => prop_assert!(false, "Expected consistent, got {:?}", status),
             }
         }
     }

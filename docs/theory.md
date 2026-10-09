@@ -12,7 +12,7 @@ normative for syntax and operational behavior.
 | Ourochronos is Turing complete | **Yes for the idealized non-temporal language**, where vector storage and execution time are unbounded. `examples/turing_complete.ouro` is an executable two-counter-machine witness. No concrete finite process is literally Turing complete as a physical state machine. |
 | Ordinary point-consistency mode has PSPACE power | **No.** Requiring a pure state `F(s)=s` can reject deterministic cycles and is not the Aaronson--Watrous classical model. |
 | Deutsch mode represents the missing classical fixed points | **Yes for deterministic transitions.** A period-`k` cycle is returned as the uniform stationary ensemble, with probability `1/k` per state. |
-| The shipped executable is a PSPACE oracle | **No.** It follows one orbit with a configured finite width, finite epoch/gas limits, and can time out. Configurable width enables families but does not supply the ideal selector or prove uniformity/readout invariance. |
+| The shipped executable is a PSPACE oracle | **No.** It follows one orbit with a configured finite width, finite epoch/gas limits, and can time out. The restricted generator proves constant-template uniformity and the sparse projection/routing subclass has an all-input semantic theorem, but the executable does not supply the ideal selector or a general family theorem. |
 | A polynomially uniform Ourochronos family with an ideal Deutsch selector characterizes PSPACE | **Yes, under all conditions in §5.** This is a model-level equality, not a performance claim about iterative simulation. |
 | Finite Ourochronos decides the halting problem | **No, and it cannot be made to do so while remaining an effective finite implementation.** It can decide bounded halting and semidecide halting. |
 | Unbounded Deutschian CTC Turing machines characterize `Delta^0_2` | **Yes in the cited infinite-dimensional probabilistic/quantum model.** Infinite-support fixed points are essential; merely waiting for a point fixed state is not that construction. |
@@ -47,9 +47,10 @@ The project contains several related semantics. They must not be conflated.
 7. **Typed symbolic point solver (`--global`, `--smt`).** A finite,
    solver-independent typed temporal IR is translated to QF_ABV and solved by
    in-process Z3. SAT models are decoded and independently replayed by the
-   linked-bytecode VM. Complete-IR UNSAT proves point-state nonexistence; loop-bounded
-   UNSAT is `UNKNOWN`. `--smt` exports this same IR rather than a second
-   semantics.
+   linked-bytecode VM. Complete-IR UNSAT proves point-state nonexistence only
+   with a bounded envelope containing the exact query and Z3 proof AST; the
+   envelope can be regenerated in a fresh Z3 context. Loop-bounded UNSAT is
+   `UNKNOWN`. `--smt` exports this same IR rather than a second semantics.
 8. **All-fixed and property verification.** `--all-fixed` blocks a first model
    and resolves to prove uniqueness or return two replayed witnesses.
    Source-level `PROPERTY ... ALL_FIXED CELL ...` declarations are verified by
@@ -76,15 +77,39 @@ The project contains several related semantics. They must not be conflated.
 13. **Complexity contracts.** `--resources` prints an exact concrete profile.
     A top-level `FAMILY` declaration and the Rust API's
     `PspaceFamilyContract` separately record polynomial bounds and every model
-    assumption, while deliberately distinguishing a declared obligation from
-    a verified proof. `examples/pspace_contract.ouro` is executable syntax.
+    assumption. `PspaceFamilyVerifier` exhaustively verifies the decidable
+    obligations of one exact Boolean input: polynomial cell/work/step bounds,
+    total closed effect-free transition, and one Boolean readout across all
+    recurrent classes. The certificate carries the input and complete finite
+    transition/workspace/readout table for VM-independent structural checking
+    and bytecode re-enumeration.
+    `PspaceUniformFamilyGenerator` separately proves a restricted uniformity
+    theorem: a constant admitted bytecode template with complete acyclic
+    reachable control, a polynomial temporal-width rule below `CTC_CELLS(n)`
+    for every nonempty `n`, and linear specialization work/descriptor size.
+    `--verify-family x` composes both proofs for the exact
+    bitstring `x`. It still distinguishes those results from a general family-
+    wide totality/readout theorem and an ideal selector. For fixed straight-line
+    sparse routing templates, `ProjectionFamilyCertificate` additionally proves
+    totality, polynomial resource bounds, effect isolation, and unanimous
+    recurrent readout for every nonempty input without enumeration. The body
+    may contain multiple cell copies, constants, and width-preserving bitwise
+    `AND`/`OR`/`XOR` or constant-right-shift assignments with last-write-wins
+    semantics; readout remains state-independent.
+    It derives the polynomial circuit-output size and materializes an exact
+    Boolean wiring circuit for each input length; the checker regenerates its
+    entire topology and the CLI differentially checks every finitely enumerated
+    edge against the VM table.
+    `examples/pspace_contract.ouro` is executable and verified syntax.
 14. **Exact rational stochastic backend.** `RationalMarkovChain` validates a
     finite row-stochastic matrix, finds every closed recurrent class, and
     solves its extremal stationary distribution exactly. `StationaryFamily`
     exposes the full convex hull and cycle/class-specific acceptance
     probabilities. A top-level `MARKOV` declaration exposes the backend in
     source and automatically classifies ACCEPT, REJECT, or AMBIGUOUS across
-    every extremal fixed point.
+    every extremal fixed point. A separate sparse arbitrary-precision Rust
+    profile and bounded frozen-VM adapter retain exact all-class semantics
+    under explicit state, arithmetic, work and evidence limits.
 15. **Bounded classical halting analysis.** `--halting-bound T` observes the
     deterministic, non-temporal core. A positive halt is conclusive;
     exhaustion returns `UNKNOWN`/exit 3. Temporal and externally stateful
@@ -93,17 +118,21 @@ The project contains several related semantics. They must not be conflated.
     operators, validates trace preservation, applies the channel, and
     approximates one fixed density operator through Cesaro averaging with an
     explicit residual and iteration bound. A source-level qubit `QCHANNEL`
-    additionally characterizes the complete affine fixed set in the Bloch ball
-    and verifies basis-readout bounds over every fixed density. This is
-    deliberately separate from exact classical execution.
+    additionally estimates the affine fixed set in the Bloch ball and
+    basis-readout extrema, with tolerance-dependent rank and uncertainty.
+    A separate bounded dimension-2–4 SDP/general-POVM investigation is complete;
+    its near-identity counterexample prevents exact-certificate interpretation.
+    Neither numerical backend proves exact all-fixed-density threshold bounds.
 
 Not implemented: unrestricted solving for arbitrary recursive/unbounded
 programs, automatic termination proofs for general WHILE loops,
-higher-dimensional all-fixed-density quantum solving,
+certified higher-dimensional all-fixed-density quantum solving,
 general POVM source syntax, exact algebraic quantum amplitudes, a
 maximum-entropy fixed-point selector, automatic extraction of a stochastic
-matrix from arbitrary VM code, a machine-checked verifier for FAMILY
-declarations, or an infinite-dimensional CTC.
+matrix from arbitrary VM code, general non-projection inductive family-wide totality/readout proofs,
+direct Boolean-circuit artifacts for non-routing restricted templates,
+non-constant code-template generators, a general independent SMT proof kernel, or an
+infinite-dimensional CTC.
 
 ## 3. Turing completeness
 
@@ -117,27 +146,54 @@ rules as Ourochronos except that:
 - allocation succeeds whenever the mathematical run uses a finite amount of
   storage at that point.
 
-`Ouro_infinity` can simulate a two-counter Minsky machine. Represent each
-natural-number counter by a vector of identical tokens and keep a finite
-program counter in a memory cell. Then:
+`Ouro_infinity` can simulate a two-counter INC/DECJZ/HALT machine. Represent
+counter `n` by a vector `[0, 1, ..., 1]` with one permanent zero sentinel and
+`n` one tokens, and keep the finite program counter in a present-memory cell.
+Then:
 
 ```text
-INC(c, next)       := vector[c].push(token); pc := next
-DECJZ(c, z, nz)    := if len(vector[c]) = 0
-                      then pc := z
-                      else vector[c].pop(); pc := nz
-HALT               := running := 0
+INC(c, next)       := vector[c].push(1); pc := next
+DECJZ(c, z, nz)    := token := vector[c].pop()
+                     if token = 0
+                       then vector[c].push(0); pc := z
+                       else pc := nz
+HALT               := HALT
 ```
 
-A `WHILE` loop dispatches on `pc`. The translation from each finite
-two-counter program to Ourochronos source is effective, and two-counter
-machines are Turing universal. Therefore a universal Turing machine can be
-simulated, establishing Turing completeness of `Ouro_infinity`.
+A `WHILE { 1 }` loop dispatches on `pc`. This encoding uses only the words
+0 and 1 for counter contents: it never converts an unbounded vector length
+to a 64-bit word. The old length-based zero test would wrap at length `2^64`
+and does not justify the idealized claim. Zero-test restoration and nonzero
+decrement preserve the sentinel invariant.
 
-`examples/turing_complete.ouro` implements this encoding and its integration
-test executes a three-token transfer. The example is evidence that the
-required instructions compose correctly; the universality statement rests on
-the parametric translation above, not on that one finite run.
+`formal/CounterMachine.lean`, checked with `formal/lean-toolchain` (Lean
+4.29.1), defines the two-counter machine, the ordinary stack/present/vector
+primitives, finite-label dispatch, and the translated loop. Its
+`machine_step_simulation` and `finite_trace_simulation` theorems connect
+arbitrary natural-number counters to primitive small steps; `tokens_injective`
+checks that distinct counters remain distinct. The proof imports no custom
+axiom and uses no `sorry`; its printed dependencies are Lean's standard
+`propext` and `Quot.sound`. This trusts Lean's kernel and these definitions,
+and does not verify the Rust compiler, runtime, or host allocation.
+
+Universality of the declared INC/DECJZ two-counter model remains an external
+mathematical premise. The instruction set matters: it embeds CM2 from
+Dudenhefner's [*Certified Decision Procedures for Two-Counter Machines*,
+§2/Theorem 6](https://doi.org/10.4230/LIPIcs.FSCD.2022.16), by mapping an
+increment at label `p` to `INC(c,p+1)` and a nonzero-decrement jump to
+`DECJZ(c,p+1,q)`. A restricted zero-jump/fallthrough model does not have the
+same universality result. One fixed universal machine has finitely many
+labels fitting in 64-bit words; arbitrary input is encoded in its unbounded
+natural counters. Their sentinel representation and the checked translation
+therefore transfer that universality to the idealized ordinary core. The
+translation is effective for programs whose labels fit the declared word
+domain; it does not claim to encode an arbitrary number of distinct labels.
+
+`tests/counter_machine.rs` independently executes finite counter-machine
+traces and compares generated ordinary source in the real VM. The older
+`examples/turing_complete.ouro` remains a bounded three-token transfer using
+`VEC_LEN`; it demonstrates composition at that size, rather than the
+unbounded zero-test encoding proved above.
 
 ### 3.2 Concrete qualification
 
@@ -283,16 +339,31 @@ polynomial-space Turing machine. The equality and construction are proved in
 Aaronson and Watrous, [*Closed Timelike Curves Make Quantum and Classical
 Computing Equivalent*](https://arxiv.org/abs/0808.2669).
 
-Ourochronos now has configurable finite CTC width and the correct deterministic stationary-cycle primitive, but
-the concrete executable does not itself meet the asymptotic model:
+Ourochronos now has configurable finite CTC width, the correct deterministic
+stationary-cycle primitive, exact immutable Boolean inputs, and a restricted
+proof-carrying uniform generator. The generator proves constant-template
+acyclic construction, polynomial width, and linear specialization for all nonempty
+input lengths. The concrete executable still does not itself meet the full
+ideal asymptotic model:
 
-- a sequence of widths can instantiate `m=p(n)`, but a uniform generator and
-  proof of the polynomial bound remain external obligations;
+- outside the recognized sparse projection/routing theorem, family-wide totality, step/work
+  bounds, and recurrent readout invariance do not follow from checking finitely
+  many generated instances;
 - ordinary execution searches an orbit instead of receiving a fixed point;
 - `max_epochs` and `max_instructions` can produce `Timeout` or `Error`;
 - one seed witnesses one recurrent class, not correctness over all classes;
 - action mode deliberately selects among point fixed states and is outside the
   theorem.
+
+For domains within the explicit-state ceiling, `--verify-family x` supplies
+the conventional exponential alternative mentioned below. It proves the
+restricted generator, specializes the exact frozen bitstring `x`, checks every
+temporal state, proves transition totality/closure and effect isolation for
+that input, measures the declared resource bounds, and requires one Boolean
+decision on every recurrent class. This detects false `TOTAL`, polynomial-
+bound, and `READOUT_INVARIANT` declarations. It does not turn enumeration into
+Nature's cost-free selector or infer all-input semantic correctness from one
+specialization.
 
 Accordingly, programs can encode finite PSPACE-style consistency
 constructions, but claiming that running the binary grants PSPACE speed or
@@ -311,10 +382,20 @@ Computable_CTC = QComputable_CTC = Computable^Halt = Delta^0_2.
 This concerns Deutschian CTC Turing machines with no bound on width or length,
 equivalently computable Markov chains or quantum channels on countably
 infinite-dimensional state spaces. The halting construction can require fixed
-probability distributions with **infinite support**. Requiring finite support,
-or even a computable bound on expected string length, collapses the power back
-to computable languages. See Aaronson et al., [*Computability Theory of Closed
-Timelike Curves*](https://arxiv.org/abs/1609.05507).
+probability distributions with **infinite support**. The model requires an
+invariant state to exist and requires the same decision for every invariant
+state. Its channel must admit effective finite rational approximations in
+trace norm. See Aaronson et al., [*Computability Theory of Closed Timelike
+Curves*, corrected v2, §3.3](https://arxiv.org/abs/1609.05507v2).
+The 2024 revision repairs the earlier quantum upper-bound proof; the original
+2016 proof should not be used as that claim's authority.
+
+The earlier paper's [v1 §4.1, Proposition 4 and Theorem
+5](https://arxiv.org/pdf/1609.05507v1) treats different promises: existence of
+a finitely supported invariant distribution, or a computable bound on one
+invariant distribution's expected string length. Those are additional
+classical-model assumptions, rather than consequences of finite samples or
+the absence of a concrete memory bound.
 
 The tempting point-search recipe—“encode a history; if the simulated machine
 halts a fixed point appears, otherwise search forever”—does not decide
@@ -356,12 +437,14 @@ program cannot halt under an unbounded run.
 
 The next sound extensions, in decreasing order of leverage, are:
 
-1. a static/solver-backed verifier for in-language `FAMILY` declarations;
-2. a sparse alternative for very wide, low-occupancy finite temporal memories;
+1. generalize the all-input sparse-routing theorem to arithmetic/Boolean gates,
+   inductive/compositional acyclic transitions, and then bounded loops;
+2. a sparse/symbolic complete-recurrence alternative for very wide,
+   low-occupancy finite temporal memories;
 3. add arbitrary-precision rationals and sparse matrices for larger MARKOV
    instances, plus extraction from a bounded VM transition;
-4. static or solver-assisted verification that the decision bit agrees on all
-   recurrent classes/fixed points;
+4. lift the exhaustive all-recurrent-class readout proof into a symbolic or
+   compositional certificate beyond the explicit-state ceiling;
 5. extend bounded-halting analysis with resumable checkpoints and systematic
    cutoff experiments while retaining the `UNKNOWN` result;
 6. a formal small-step semantics and machine-checked compiler from a universal

@@ -6,6 +6,7 @@ pub mod core;
 // ═══════════════════════════════════════════════════════════════════════════
 // Layer 1: Compiler (depends on core)
 // ═══════════════════════════════════════════════════════════════════════════
+pub mod admission;
 pub mod ast;
 pub mod bytecode;
 pub mod bytecode_action;
@@ -21,6 +22,7 @@ pub mod module_graph;
 pub mod object_compiler;
 pub mod package;
 pub mod parser;
+pub mod portable_artifact;
 pub mod semantics;
 pub mod source;
 
@@ -49,9 +51,13 @@ pub mod tooling;
 // Standard Library & Cross-cutting
 // ═══════════════════════════════════════════════════════════════════════════
 pub mod audit;
+pub mod checkpoint;
 pub mod complexity;
+pub mod family_verifier;
+pub mod finite_proof;
 pub mod halting;
 pub mod stdlib;
+pub mod uniform_family;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Public API Re-exports
@@ -70,6 +76,10 @@ pub use core::{
 };
 
 // AST and parser
+pub use admission::{
+    admit_program, analyze_program, AdmissionConfig, AdmissionError, AdmissionPhase,
+    AdmittedProgram, SourceAdmission,
+};
 pub use ast::{
     ComplexRationalLiteral, LocatedProgram, ManifestDeclaration, MarkovDeclaration, OpCode,
     PolynomialDeclaration, ProcedureLocations, Program, ProgramLocations, PropertyCell,
@@ -101,8 +111,8 @@ pub use bytecode_verifier::{
     VerificationObligation, VerificationObligationKind, VerificationSite,
 };
 pub use bytecode_vm::{
-    bytecode_vm_supports, BytecodeExecution, BytecodeVm, BytecodeVmConfig, BytecodeVmError,
-    BytecodeVmStatus, FrozenEndpointTape, FrozenFileSnapshot, FrozenProcessResult,
+    bytecode_vm_supports, BytecodeExecution, BytecodeVm, BytecodeVmConfig, BytecodeVmDiagnostic,
+    BytecodeVmError, BytecodeVmStatus, FrozenEndpointTape, FrozenFileSnapshot, FrozenProcessResult,
     PreparedBytecode,
 };
 pub use hir::{
@@ -110,7 +120,10 @@ pub use hir::{
     HirForeign, HirOwner, HirProcedure, HirProgram, HirProperty, HirPropertyCell, HirQuote,
     HirStmt, HirStmtKind, HirTemporal, IndexKind, ProcedureId, PropertyId, TemporalId,
 };
-pub use launcher::{build_native_launcher, embedded_package, LauncherError, MAX_LAUNCHER_BYTES};
+pub use launcher::{
+    build_native_artifact_launcher, build_native_launcher, embedded_artifact, embedded_package,
+    LauncherError, MAX_LAUNCHER_BYTES,
+};
 pub use lexer::{lex, LexError, LexErrorKind, LiteralKind, LocatedToken, Token, MAX_SOURCE_TOKENS};
 pub use linker::{
     link, link_with_metadata, LinkError, LinkedProgram, ObjectEffectSummary, ObjectEffects,
@@ -126,7 +139,7 @@ pub use module_graph::{
     ImportEdge, ModuleError, ModuleGraph, SourceModule, MAX_GRAPH_EXPANDED_STATEMENTS,
     MAX_GRAPH_SOURCE_TOKENS,
 };
-pub use object_compiler::{compile_objects, ObjectCompileError};
+pub use object_compiler::{compile_objects, compile_objects_with_memory, ObjectCompileError};
 pub use package::{
     PackageError, PackageManifest, PackageResolutionPolicy, PackageSolverDependency,
     PackageSolverDescriptor, PackageWitness, PortablePackage, CURRENT_RESOLUTION_POLICY_VERSION,
@@ -136,6 +149,12 @@ pub use package::{
 };
 pub use parser::{
     tokenize, Parser, MAX_EXPANDED_STATEMENTS, MAX_MARKOV_STATES, MAX_PARSER_NESTING,
+};
+pub use portable_artifact::{
+    program_digest as portable_program_digest, PortableArtifact, PortableArtifactError,
+    PortableArtifactPayload, PortableEvidence, PortableProvenance, SourceProvenanceStatus,
+    MAX_PORTABLE_ARTIFACT_BYTES, MAX_PORTABLE_EVIDENCE_BYTES, MAX_PORTABLE_PROVENANCE_BYTES,
+    MAX_PORTABLE_SOURCE_FILES, MAX_PORTABLE_SOURCE_NAME_BYTES, PORTABLE_ARTIFACT_VERSION,
 };
 pub use runtime::ffi::{ForeignHostError, ForeignHostFn, ForeignHostTable};
 pub use semantics::{
@@ -153,11 +172,13 @@ pub use temporal::action::{ActionConfig, ActionPrinciple};
 pub use temporal::effect_adapter::NativeEffectAdapter;
 pub use temporal::global_solver::{
     FixedPointWitness, GlobalFixedPointSolver, GlobalSolveConfig, GlobalSolveResult,
-    GlobalUniquenessResult, PropertyVerificationResult, UnsatCertificate,
+    GlobalUniquenessResult, PropertyVerificationResult, UnsatCertificate, UnsatEvidenceError,
+    MAX_UNSAT_EVIDENCE_BYTES, UNSAT_EVIDENCE_FORMAT_VERSION,
 };
 pub use temporal::ir::{
-    CompareOp, ExprId, IrCompleteness, IrExpr, IrExprKind, IrObservation, IrType, ObservationKind,
-    TemporalIr, TemporalIrCompiler, TemporalIrConfig, TemporalIrError, WordBinaryOp, WordUnaryOp,
+    temporal_ir_supports_opcode, CompareOp, ExprId, IrCompleteness, IrExpr, IrExprKind,
+    IrObservation, IrType, ObservationKind, TemporalIr, TemporalIrConfig, TemporalIrError,
+    WordBinaryOp, WordUnaryOp,
 };
 pub use temporal::quantum::{
     analyze_quantum_declaration, Complex64, ComplexMatrix, QuantumChannel, QuantumFixedPoint,
@@ -174,14 +195,14 @@ pub use temporal::timeloop::{
 };
 pub use temporal::transaction::{
     CandidateContext, CommitLog, CommitOutcome, CommitReceipt, CommitToken, CommittedBatch,
-    EffectCommitAdapter, EffectIntent, ObservationTranscript, TemporalTransaction,
-    TimelineCandidate, TimelineId, TransactionError, TransactionLimits,
+    EffectApplicationStatus, EffectCommitAdapter, EffectIntent, ObservationTranscript,
+    TemporalTransaction, TimelineCandidate, TimelineId, TransactionError, TransactionLimits,
 };
 pub use temporal::transition_graph::{
     BytecodeTransitionAnalyzer, DeterministicTransitionGraph, ProgramGraphAnalysis,
     ProgramGraphConfig, ProgramTransitionAnalyzer, RecurrentAnalysis, TransitionGraphError,
-    MAX_RECURRENT_INSTRUCTIONS, MAX_RECURRENT_OUTPUT_BYTES, MAX_RECURRENT_OUTPUT_ITEMS,
-    MAX_RECURRENT_STATES,
+    MAX_RECURRENT_FROZEN_INPUTS, MAX_RECURRENT_INSTRUCTIONS, MAX_RECURRENT_OUTPUT_BYTES,
+    MAX_RECURRENT_OUTPUT_ITEMS, MAX_RECURRENT_STATES,
 };
 
 // Type system
@@ -195,8 +216,21 @@ pub use tooling::repl::{Repl, ReplConfig};
 
 // Standard library
 pub use complexity::{ConcreteResourceProfile, PolynomialBound, PspaceFamilyContract};
+pub use family_verifier::{
+    PspaceCertificateError, PspaceFamilyVerifier, PspaceInstanceCertificate, PspaceInstanceConfig,
+    PspaceInstanceVerificationResult, PspaceReadoutEvidence, PspaceTransitionEvidence,
+    PSPACE_INSTANCE_CERTIFICATE_VERSION, PSPACE_INSTANCE_DECISION_BITS,
+};
 pub use halting::{BoundedHaltingAnalyzer, BoundedHaltingResult};
 pub use stdlib::StdLib;
+pub use uniform_family::{
+    ProjectionAssignment, ProjectionCellSource, ProjectionCircuit, ProjectionCircuitError,
+    ProjectionDecisionRule, ProjectionFamilyCertificate, ProjectionWire,
+    PspaceUniformFamilyGenerator, UniformFamilyCertificate, UniformFamilyError,
+    UniformFamilyInstance, UniformSpecializationEvidence, MAX_PROJECTION_CIRCUIT_STATE_BITS,
+    PROJECTION_CIRCUIT_VERSION, PROJECTION_FAMILY_CERTIFICATE_VERSION,
+    UNIFORM_FAMILY_CERTIFICATE_VERSION,
+};
 
 mod determinism_tests;
 mod property_tests;

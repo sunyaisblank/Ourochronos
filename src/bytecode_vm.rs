@@ -27,6 +27,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
 use std::io::Read;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 /// Deterministic resource and memory policy for bytecode execution.
@@ -204,6 +205,10 @@ pub struct BytecodeExecution {
     pub maximum_call_depth: usize,
     /// Maximum simultaneously active temporal scopes.
     pub maximum_temporal_depth: usize,
+    /// Maximum operand-stack words retained at any point in the run.
+    pub maximum_stack_depth: usize,
+    /// Maximum aggregate bytes charged to dynamic structures and buffers.
+    pub maximum_dynamic_bytes: usize,
 }
 
 impl BytecodeExecution {
@@ -351,6 +356,72 @@ pub enum BytecodeVmError {
     AllocationLimit { what: &'static str, limit: usize },
     /// An impossible program counter was encountered after validation.
     InvalidProgramCounter(u32),
+}
+
+/// A failure at a fetched record, or before dispatch when `instruction` is
+/// absent. Gas exhaustion points to the next record without charging it.
+/// Source spans are producer metadata; they never grant a capability.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BytecodeVmDiagnostic {
+    pub error: Box<BytecodeVmError>,
+    pub instruction: Option<u32>,
+    pub span: Option<crate::source::SourceSpan>,
+    pub instructions_executed: u64,
+}
+
+impl BytecodeVmDiagnostic {
+    fn before_dispatch(error: BytecodeVmError) -> Self {
+        Self {
+            error: Box::new(error),
+            instruction: None,
+            span: None,
+            instructions_executed: 0,
+        }
+    }
+
+    /// Resolve a retained manifest without opening source paths. Missing or
+    /// inconsistent names retain the numeric source identity and byte range.
+    /// Names are escaped and bounded; no source text or line number is invented.
+    pub fn format_with_sources(&self, sources: &[crate::linker::ObjectSourceFile]) -> String {
+        let mut message = self.error.to_string();
+        if let Some(pc) = self.instruction {
+            message.push_str(&format!(" [bytecode pc {pc}"));
+            if let Some(span) = self.span {
+                let source = sources.iter().find(|source| {
+                    source.id as usize == span.source.index()
+                        && span.range.start <= span.range.end
+                        && span.range.end as u64 <= source.byte_len
+                });
+                if let Some(source) = source {
+                    let mut end = source.name.len().min(4096);
+                    while !source.name.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    message.push_str(&format!(", source {:?}", &source.name[..end]));
+                    if end < source.name.len() {
+                        message.push_str(" (name truncated)");
+                    }
+                } else {
+                    message.push_str(&format!(", source {}", span.source.index()));
+                }
+                message.push_str(&format!(" bytes {}..{}", span.range.start, span.range.end));
+            }
+            message.push(']');
+        }
+        message
+    }
+}
+
+impl fmt::Display for BytecodeVmDiagnostic {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.format_with_sources(&[]))
+    }
+}
+
+impl Error for BytecodeVmDiagnostic {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        Some(self.error.as_ref())
+    }
 }
 
 impl fmt::Display for BytecodeVmError {
@@ -623,48 +694,81 @@ impl BytecodeVm {
         self.run_validated_program(program.program(), anamnesis)
     }
 
+    /// Execute with a structured failing-record diagnostic. Verification and
+    /// environment setup failures have no fetched instruction location.
+    pub fn run_diagnostic(
+        &self,
+        program: &BytecodeProgram,
+        anamnesis: &PagedMemory,
+    ) -> Result<BytecodeExecution, BytecodeVmDiagnostic> {
+        verify_bytecode(program)
+            .map_err(BytecodeVmError::from)
+            .map_err(BytecodeVmDiagnostic::before_dispatch)?;
+        self.run_validated_diagnostic(program, anamnesis)
+    }
+
+    pub fn run_prepared_diagnostic(
+        &self,
+        program: &PreparedBytecode,
+        anamnesis: &PagedMemory,
+    ) -> Result<BytecodeExecution, BytecodeVmDiagnostic> {
+        self.run_validated_diagnostic(program.program(), anamnesis)
+    }
+
     fn run_validated_program(
         &self,
         program: &BytecodeProgram,
         anamnesis: &PagedMemory,
     ) -> Result<BytecodeExecution, BytecodeVmError> {
+        self.run_validated_diagnostic(program, anamnesis)
+            .map_err(|diagnostic| *diagnostic.error)
+    }
+
+    fn run_validated_diagnostic(
+        &self,
+        program: &BytecodeProgram,
+        anamnesis: &PagedMemory,
+    ) -> Result<BytecodeExecution, BytecodeVmDiagnostic> {
         if let Some(first) = program.foreigns.first() {
             let host = self
                 .foreign_host
                 .as_deref()
                 .ok_or(BytecodeVmError::ForeignLink(
                     ForeignHostError::UnknownTarget { id: first.id },
-                ))?;
+                ))
+                .map_err(BytecodeVmDiagnostic::before_dispatch)?;
             host.validate_program(program)
-                .map_err(BytecodeVmError::ForeignLink)?;
+                .map_err(BytecodeVmError::ForeignLink)
+                .map_err(BytecodeVmDiagnostic::before_dispatch)?;
         }
         Runtime::new(
             program,
             anamnesis,
             &self.config,
             self.foreign_host.as_deref(),
-        )?
-        .run()
+        )
+        .map_err(BytecodeVmDiagnostic::before_dispatch)?
+        .run_diagnostic()
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-struct Cursor {
-    pc: u32,
-    end: u32,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Cursor {
+    pub(crate) pc: u32,
+    pub(crate) end: u32,
 }
 
-#[derive(Debug, Clone)]
-enum Completion {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Completion {
     None,
     Restore(Value),
     BiSecond { value: Value, quotation: QuoteId },
 }
 
-#[derive(Debug, Clone)]
-struct CallFrame {
-    caller: Cursor,
-    completion: Completion,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CallFrame {
+    pub(crate) caller: Cursor,
+    pub(crate) completion: Completion,
 }
 
 #[derive(Debug, Clone)]
@@ -1622,9 +1726,131 @@ struct Runtime<'a> {
     temporal_exits: u64,
     maximum_call_depth: usize,
     maximum_temporal_depth: usize,
+    maximum_stack_depth: usize,
+    maximum_dynamic_bytes: usize,
+}
+
+/// Only the deterministic classical subset can use this recovery image.
+/// It is never a public execution authority: checkpoint loading must first
+/// establish exact equality with a bounded canonical prefix execution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ClassicalVmState {
+    pub(crate) cursor: Cursor,
+    pub(crate) frames: Vec<CallFrame>,
+    pub(crate) stack: Vec<Value>,
+    pub(crate) present: PagedMemory,
+    pub(crate) output: Vec<OutputItem>,
+    pub(crate) output_bytes: usize,
+    pub(crate) input_cursor: usize,
+    pub(crate) inputs_consumed: Vec<u64>,
+    pub(crate) instructions_executed: u64,
+    pub(crate) maximum_call_depth: usize,
+    pub(crate) maximum_stack_depth: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ClassicalPause {
+    Slice,
+    InstructionBound,
+    Cancelled,
+}
+
+pub(crate) enum ClassicalVmProgress {
+    Paused {
+        state: ClassicalVmState,
+        reason: ClassicalPause,
+    },
+    Complete(BytecodeExecution),
+    Fault {
+        error: BytecodeVmError,
+        instructions: u64,
+    },
+}
+
+/// Resume actual runtime state. Callers must seal the program and admit the
+/// checkpoint subset before invoking this internal entry point.
+pub(crate) fn classical_slice(
+    program: &PreparedBytecode,
+    config: &BytecodeVmConfig,
+    memory_cells: usize,
+    state: Option<ClassicalVmState>,
+    allowance: u64,
+    cancellation: Option<&AtomicBool>,
+) -> Result<ClassicalVmProgress, BytecodeVmError> {
+    // Anamnesis is unobservable in this admitted subset. Reuse the saved COW
+    // page table instead of constructing and discarding zero memory per slice.
+    let anamnesis = match &state {
+        Some(state) => state.present.clone(),
+        None => PagedMemory::with_size(memory_cells)
+            .map_err(|error| BytecodeVmError::TemporalViolation(error.to_string()))?,
+    };
+    let mut runtime = Runtime::new_with_present(
+        program.program(),
+        &anamnesis,
+        config,
+        None,
+        anamnesis.clone(),
+    )?;
+    if let Some(state) = state {
+        runtime.cursor = state.cursor;
+        runtime.frames = state.frames;
+        runtime.stack = state.stack;
+        runtime.present = state.present;
+        runtime.output = state.output;
+        runtime.output_bytes = state.output_bytes;
+        runtime.input_cursor = state.input_cursor;
+        runtime.inputs_consumed = state.inputs_consumed;
+        runtime.instructions_executed = state.instructions_executed;
+        runtime.maximum_call_depth = state.maximum_call_depth;
+        runtime.maximum_stack_depth = state.maximum_stack_depth;
+    }
+    let slice_end = runtime.instructions_executed.saturating_add(allowance);
+    loop {
+        let reason = if runtime.instructions_executed >= config.max_instructions {
+            Some(ClassicalPause::InstructionBound)
+        } else if cancellation.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+            Some(ClassicalPause::Cancelled)
+        } else if runtime.instructions_executed >= slice_end {
+            Some(ClassicalPause::Slice)
+        } else {
+            None
+        };
+        if let Some(reason) = reason {
+            return Ok(ClassicalVmProgress::Paused {
+                state: runtime.classical_state(),
+                reason,
+            });
+        }
+        match runtime.step() {
+            Ok(Some(status)) => return Ok(ClassicalVmProgress::Complete(runtime.finish(status))),
+            Ok(None) => {}
+            Err(error) => {
+                return Ok(ClassicalVmProgress::Fault {
+                    error,
+                    instructions: runtime.instructions_executed,
+                });
+            }
+        }
+    }
 }
 
 impl<'a> Runtime<'a> {
+    fn classical_state(self) -> ClassicalVmState {
+        ClassicalVmState {
+            cursor: self.cursor,
+            frames: self.frames,
+            stack: self.stack,
+            present: self.present,
+            output: self.output,
+            output_bytes: self.output_bytes,
+            input_cursor: self.input_cursor,
+            inputs_consumed: self.inputs_consumed,
+            instructions_executed: self.instructions_executed,
+            maximum_call_depth: self.maximum_call_depth,
+            maximum_stack_depth: self.maximum_stack_depth,
+        }
+    }
+
     fn new(
         program: &'a BytecodeProgram,
         anamnesis: &'a PagedMemory,
@@ -1633,6 +1859,16 @@ impl<'a> Runtime<'a> {
     ) -> Result<Self, BytecodeVmError> {
         let present = PagedMemory::with_size(anamnesis.len())
             .map_err(|error| BytecodeVmError::TemporalViolation(error.to_string()))?;
+        Self::new_with_present(program, anamnesis, config, foreign_host, present)
+    }
+
+    fn new_with_present(
+        program: &'a BytecodeProgram,
+        anamnesis: &'a PagedMemory,
+        config: &'a BytecodeVmConfig,
+        foreign_host: Option<&'a ForeignHostTable>,
+        present: PagedMemory,
+    ) -> Result<Self, BytecodeVmError> {
         let files = VirtualFileStore::new(config)?;
         let network = VirtualNetworkStore::new(config)?;
         let processes = FrozenProcessStore::new(config)?;
@@ -1668,94 +1904,123 @@ impl<'a> Runtime<'a> {
             temporal_exits: 0,
             maximum_call_depth: 0,
             maximum_temporal_depth: 0,
+            maximum_stack_depth: 0,
+            maximum_dynamic_bytes: 0,
         })
     }
 
-    fn run(mut self) -> Result<BytecodeExecution, BytecodeVmError> {
-        let status = loop {
-            if self.instructions_executed >= self.config.max_instructions {
-                return Err(BytecodeVmError::GasExhausted {
-                    limit: self.config.max_instructions,
-                });
-            }
-            if self.cursor.pc >= self.cursor.end {
-                return Err(BytecodeVmError::InvalidProgramCounter(self.cursor.pc));
-            }
+    fn run_diagnostic(mut self) -> Result<BytecodeExecution, BytecodeVmDiagnostic> {
+        loop {
             let pc = self.cursor.pc;
-            let instruction = *self
-                .program
-                .instructions
-                .get(pc as usize)
-                .ok_or(BytecodeVmError::InvalidProgramCounter(pc))?;
-            self.cursor.pc = self
-                .cursor
-                .pc
-                .checked_add(1)
-                .ok_or(BytecodeVmError::InvalidProgramCounter(pc))?;
-            self.instructions_executed += 1;
-
-            match instruction {
-                Instruction::Primitive(OpCode::Halt) => break BytecodeVmStatus::Halted,
-                Instruction::Primitive(OpCode::Paradox) => {
-                    self.rollback_temporal()?;
-                    break BytecodeVmStatus::Paradox;
-                }
-                Instruction::Primitive(opcode) => self.execute_primitive(opcode)?,
-                Instruction::PushWord(word) => self.push(Value::new(word))?,
-                Instruction::PushQuote(id) => self.push(Value::new(id.as_u64()))?,
-                Instruction::CallProcedure(id) => {
-                    let entry = self
+            match self.step() {
+                Ok(Some(status)) => return Ok(self.finish(status)),
+                Ok(None) => {}
+                Err(error) => {
+                    let span = self
                         .program
-                        .procedures
-                        .get(id.index())
-                        .ok_or(BytecodeVmError::InvalidProgramCounter(pc))?;
-                    self.enter(entry.range, Completion::None)?;
-                }
-                Instruction::CallForeign(id) => {
-                    self.call_foreign(id)?;
-                }
-                Instruction::IfFalse {
-                    else_target,
-                    end_target: _,
-                    has_else: _,
-                } => {
-                    let condition = self.pop("IF")?;
-                    if !condition.to_bool() {
-                        self.cursor.pc = else_target;
-                    }
-                }
-                Instruction::Jump { target } | Instruction::LoopBack { target } => {
-                    self.cursor.pc = target;
-                }
-                Instruction::WhileFalse {
-                    loop_start: _,
-                    end_target,
-                } => {
-                    let condition = self.pop("WHILE")?;
-                    if !condition.to_bool() {
-                        self.cursor.pc = end_target;
-                    }
-                }
-                Instruction::TemporalEnter {
-                    base,
-                    size,
-                    cell_bits,
-                    exit_target: _,
-                } => self.enter_temporal(pc, base, size, cell_bits)?,
-                Instruction::TemporalExit { enter_target } => {
-                    self.exit_temporal(enter_target)?;
-                }
-                Instruction::Return => {
-                    let Some(frame) = self.frames.pop() else {
-                        break BytecodeVmStatus::Finished;
-                    };
-                    self.cursor = frame.caller;
-                    self.finish_completion(frame.completion)?;
+                        .source_map
+                        .binary_search_by_key(&pc, |entry| entry.instruction)
+                        .ok()
+                        .map(|index| self.program.source_map[index].span);
+                    return Err(BytecodeVmDiagnostic {
+                        error: Box::new(error),
+                        instruction: Some(pc),
+                        span,
+                        instructions_executed: self.instructions_executed,
+                    });
                 }
             }
-        };
+        }
+    }
 
-        Ok(BytecodeExecution {
+    /// One authoritative fetched record. Slice and ordinary execution share
+    /// this exact dispatch, including gas charge before opcode errors.
+    fn step(&mut self) -> Result<Option<BytecodeVmStatus>, BytecodeVmError> {
+        if self.instructions_executed >= self.config.max_instructions {
+            return Err(BytecodeVmError::GasExhausted {
+                limit: self.config.max_instructions,
+            });
+        }
+        if self.cursor.pc >= self.cursor.end {
+            return Err(BytecodeVmError::InvalidProgramCounter(self.cursor.pc));
+        }
+        let pc = self.cursor.pc;
+        let instruction = *self
+            .program
+            .instructions
+            .get(pc as usize)
+            .ok_or(BytecodeVmError::InvalidProgramCounter(pc))?;
+        self.cursor.pc = self
+            .cursor
+            .pc
+            .checked_add(1)
+            .ok_or(BytecodeVmError::InvalidProgramCounter(pc))?;
+        self.instructions_executed += 1;
+
+        match instruction {
+            Instruction::Primitive(OpCode::Halt) => return Ok(Some(BytecodeVmStatus::Halted)),
+            Instruction::Primitive(OpCode::Paradox) => {
+                self.rollback_temporal()?;
+                return Ok(Some(BytecodeVmStatus::Paradox));
+            }
+            Instruction::Primitive(opcode) => self.execute_primitive(opcode)?,
+            Instruction::PushWord(word) => self.push(Value::new(word))?,
+            Instruction::PushQuote(id) => self.push(Value::new(id.as_u64()))?,
+            Instruction::CallProcedure(id) => {
+                let entry = self
+                    .program
+                    .procedures
+                    .get(id.index())
+                    .ok_or(BytecodeVmError::InvalidProgramCounter(pc))?;
+                self.enter(entry.range, Completion::None)?;
+            }
+            Instruction::CallForeign(id) => {
+                self.call_foreign(id)?;
+            }
+            Instruction::IfFalse {
+                else_target,
+                end_target: _,
+                has_else: _,
+            } => {
+                let condition = self.pop("IF")?;
+                if !condition.to_bool() {
+                    self.cursor.pc = else_target;
+                }
+            }
+            Instruction::Jump { target } | Instruction::LoopBack { target } => {
+                self.cursor.pc = target;
+            }
+            Instruction::WhileFalse {
+                loop_start: _,
+                end_target,
+            } => {
+                let condition = self.pop("WHILE")?;
+                if !condition.to_bool() {
+                    self.cursor.pc = end_target;
+                }
+            }
+            Instruction::TemporalEnter {
+                base,
+                size,
+                cell_bits,
+                exit_target: _,
+            } => self.enter_temporal(pc, base, size, cell_bits)?,
+            Instruction::TemporalExit { enter_target } => {
+                self.exit_temporal(enter_target)?;
+            }
+            Instruction::Return => {
+                let Some(frame) = self.frames.pop() else {
+                    return Ok(Some(BytecodeVmStatus::Finished));
+                };
+                self.cursor = frame.caller;
+                self.finish_completion(frame.completion)?;
+            }
+        }
+        Ok(None)
+    }
+
+    fn finish(self, status: BytecodeVmStatus) -> BytecodeExecution {
+        BytecodeExecution {
             stack: self.stack,
             present: self.present,
             output: self.output,
@@ -1773,7 +2038,9 @@ impl<'a> Runtime<'a> {
             temporal_exits: self.temporal_exits,
             maximum_call_depth: self.maximum_call_depth,
             maximum_temporal_depth: self.maximum_temporal_depth,
-        })
+            maximum_stack_depth: self.maximum_stack_depth,
+            maximum_dynamic_bytes: self.maximum_dynamic_bytes,
+        }
     }
 
     fn enter(&mut self, range: CodeRange, completion: Completion) -> Result<(), BytecodeVmError> {
@@ -1946,6 +2213,7 @@ impl<'a> Runtime<'a> {
             .map_err(|_| BytecodeVmError::StackLimitExceeded {
                 limit: self.config.max_stack_depth,
             })?;
+        self.maximum_stack_depth = self.maximum_stack_depth.max(new_depth);
         Ok(())
     }
 
@@ -2002,6 +2270,7 @@ impl<'a> Runtime<'a> {
         self.stack.truncate(retained);
         if let Some(value) = result {
             self.stack.push(Value::new(value));
+            self.maximum_stack_depth = self.maximum_stack_depth.max(self.stack.len());
         }
         Ok(())
     }
@@ -2357,6 +2626,7 @@ impl<'a> Runtime<'a> {
         values.push(Value::new(part_count as u64));
         debug_assert_eq!(values.len(), output_count);
         self.stack.extend(values);
+        self.maximum_stack_depth = self.maximum_stack_depth.max(final_depth);
         Ok(())
     }
 
@@ -3028,6 +3298,7 @@ impl<'a> Runtime<'a> {
             });
         }
         self.dynamic_bytes = next;
+        self.maximum_dynamic_bytes = self.maximum_dynamic_bytes.max(next);
         Ok(())
     }
 
@@ -3814,9 +4085,10 @@ mod tests {
             Vec::new(),
             Vec::new(),
         );
-        assert!(BytecodeVm::with_config(config)
+        let execution = BytecodeVm::with_config(config)
             .run(&freed_then_reused, &memory())
-            .is_ok());
+            .unwrap();
+        assert!(execution.maximum_dynamic_bytes >= 72);
     }
 
     #[test]
@@ -5200,6 +5472,13 @@ mod tests {
             reference.process_results_consumed
         );
         assert_eq!(optimized.effects, reference.effects);
+        assert_eq!(optimized.maximum_stack_depth, 2);
+        assert_eq!(optimized.maximum_stack_depth, reference.maximum_stack_depth);
+        assert_eq!(optimized.maximum_dynamic_bytes, 0);
+        assert_eq!(
+            optimized.maximum_dynamic_bytes,
+            reference.maximum_dynamic_bytes
+        );
 
         let bounded = BytecodeVm::with_config(BytecodeVmConfig {
             max_instructions: 3,

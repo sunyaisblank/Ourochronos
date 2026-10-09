@@ -99,6 +99,8 @@ impl std::error::Error for PagedMemoryError {}
 #[derive(Clone)]
 struct Page {
     cells: Box<[Value]>,
+    /// Exact occupancy, independent of the collision-prone cached hash.
+    non_default_cells: usize,
     /// XOR of exact, absolute-address cell contributions in this page.
     cached_hash: u64,
 }
@@ -112,6 +114,7 @@ impl Page {
         cells.resize(PAGE_CELLS, Value::ZERO);
         Ok(Self {
             cells: cells.into_boxed_slice(),
+            non_default_cells: 0,
             cached_hash: 0,
         })
     }
@@ -324,7 +327,7 @@ impl PagedMemory {
     /// A zero-valued cell with provenance is intentionally not returned here;
     /// use [`Self::iter_sparse`] when exact state reconstruction is required.
     pub fn iter_nonzero(&self) -> impl Iterator<Item = (Address, &Value)> + '_ {
-        self.iter().filter(|(_, value)| value.val != 0)
+        self.iter_sparse().filter(|(_, value)| value.val != 0)
     }
 
     /// Iterate every cell that differs exactly from pure zero.
@@ -332,7 +335,19 @@ impl PagedMemory {
     /// Unlike numeric nonzero iteration, this includes zero-valued cells that
     /// carry provenance. The result is sufficient for exact reconstruction.
     pub fn iter_sparse(&self) -> impl Iterator<Item = (Address, &Value)> + '_ {
-        self.iter().filter(|(_, value)| **value != Value::ZERO)
+        self.pages
+            .iter()
+            .enumerate()
+            .filter(|(_, page)| page.non_default_cells != 0)
+            .flat_map(move |(page_index, page)| {
+                let base = page_index * PAGE_CELLS;
+                let visible = PAGE_CELLS.min(self.width - base);
+                page.cells[..visible]
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, value)| **value != Value::ZERO)
+                    .map(move |(offset, value)| ((base + offset) as Address, value))
+            })
     }
 
     /// Materialize the exact sparse state used by collision-safe temporal caches.
@@ -464,9 +479,12 @@ impl PagedMemory {
         let address = index as Address;
         let old_contribution = hash_cell(address, old_value);
         let new_contribution = hash_cell(address, &value);
+        let was_present = usize::from(*old_value != Value::ZERO);
+        let is_present = usize::from(value != Value::ZERO);
 
         let pages = Arc::make_mut(&mut self.pages);
         let page = Arc::make_mut(&mut pages[page_index]);
+        page.non_default_cells = page.non_default_cells - was_present + is_present;
         page.cells[offset] = value;
         page.cached_hash ^= old_contribution ^ new_contribution;
         self.cached_hash ^= old_contribution ^ new_contribution;
@@ -699,6 +717,50 @@ mod tests {
         );
         assert_ne!(pure.cmp(&temporal), Ordering::Equal);
         assert_eq!(pure.diff(&temporal), vec![3]);
+    }
+
+    #[test]
+    fn sparse_page_skipping_matches_dense_projection_after_writes_and_clone() {
+        let width = PAGE_CELLS * 3 + 7;
+        let mut memory = PagedMemory::with_size(width).unwrap();
+        let mut expected = vec![Value::ZERO; width];
+        let mut prior = None;
+        for step in 0..180 {
+            let address = [0, PAGE_CELLS - 1, PAGE_CELLS, PAGE_CELLS * 2 + 5, width - 1][step % 5];
+            let value = match step % 4 {
+                0 => Value::ZERO,
+                1 => Value::new(step as u64),
+                2 => Value::with_provenance(0, provenance(&[2, 9])),
+                _ => Value::with_provenance(0, Provenance::saturated()),
+            };
+            memory.write(address as u64, value.clone()).unwrap();
+            expected[address] = value;
+            let exact: Vec<_> = expected
+                .iter()
+                .enumerate()
+                .filter(|(_, value)| **value != Value::ZERO)
+                .map(|(index, value)| (index as Address, value.clone()))
+                .collect();
+            assert_eq!(memory.sparse_state(), exact);
+            let numeric: Vec<_> = expected
+                .iter()
+                .enumerate()
+                .filter(|(_, value)| value.val != 0)
+                .map(|(index, value)| (index as Address, value.val))
+                .collect();
+            assert_eq!(memory.numeric_sparse_state(), numeric);
+            if step == 50 {
+                prior = Some((memory.clone(), exact));
+            }
+            if let Some((snapshot, image)) = &prior {
+                assert_eq!(snapshot.sparse_state(), *image);
+            }
+        }
+        for address in 0..width {
+            memory.write(address as u64, Value::ZERO).unwrap();
+        }
+        assert!(memory.iter_sparse().next().is_none());
+        assert!(memory.pages.iter().all(|page| page.non_default_cells == 0));
     }
 
     #[test]

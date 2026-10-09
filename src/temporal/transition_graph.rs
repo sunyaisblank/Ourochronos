@@ -6,14 +6,13 @@
 //! limit.  Consequently every reported recurrent class and basin is complete
 //! for that domain.
 
+use crate::admission::{admit_program, AdmissionConfig};
 use crate::ast::Program;
 use crate::bytecode::BytecodeProgram;
 use crate::bytecode_vm::{
     BytecodeVm, BytecodeVmConfig, BytecodeVmError, BytecodeVmStatus, PreparedBytecode,
 };
 use crate::core::{BoundsPolicy, Memory, OutputItem, PagedMemory, Value};
-use crate::hir::HirProgram;
-use crate::linker::{link, ObjectModule};
 use std::fmt;
 
 /// Hard ceiling for complete recurrent-domain enumeration, independent of a
@@ -29,6 +28,11 @@ pub const MAX_RECURRENT_OUTPUT_ITEMS: usize = 1_000_000;
 
 /// Hard ceiling on conservative retained output bytes across all source states.
 pub const MAX_RECURRENT_OUTPUT_BYTES: usize = 64 * 1024 * 1024;
+
+/// Hard ceiling on the immutable scalar input tape copied into each state
+/// transition. Family verification uses Boolean entries and applies the same
+/// ceiling before specialization.
+pub const MAX_RECURRENT_FROZEN_INPUTS: usize = 1_048_576;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeterministicTransitionGraph {
@@ -160,7 +164,7 @@ pub struct RecurrentAnalysis {
     pub basin_sizes: Vec<usize>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProgramGraphConfig {
     pub memory_cells: usize,
     pub cell_bits: u8,
@@ -187,6 +191,18 @@ pub struct ProgramGraphAnalysis {
     pub recurrent: RecurrentAnalysis,
     /// Buffered bytecode-VM output for each source state.
     pub outputs: Vec<Vec<OutputItem>>,
+    /// Exact fetched-instruction count for each source-state transition.
+    pub instructions_executed: Vec<u64>,
+    /// Per-state peak workspace used to derive the complete-domain maxima.
+    pub stack_depths: Vec<usize>,
+    pub dynamic_bytes: Vec<usize>,
+    pub call_depths: Vec<usize>,
+    pub temporal_depths: Vec<usize>,
+    /// Peak concrete workspace observed anywhere in the complete domain.
+    pub maximum_stack_depth: usize,
+    pub maximum_dynamic_bytes: usize,
+    pub maximum_call_depth: usize,
+    pub maximum_temporal_depth: usize,
     pub memory_cells: usize,
     pub cell_bits: u8,
 }
@@ -206,6 +222,15 @@ impl ProgramGraphAnalysis {
                 observable_outputs_equal(&self.outputs[*state], &self.outputs[*first])
             }),
         }
+    }
+
+    /// Maximum work performed by any transition in this complete domain.
+    pub fn maximum_transition_instructions(&self) -> u64 {
+        self.instructions_executed
+            .iter()
+            .copied()
+            .max()
+            .unwrap_or(0)
     }
 
     /// Graphviz DOT for the complete transition graph. Recurrent states use
@@ -259,8 +284,15 @@ impl ProgramTransitionAnalyzer {
         program: &Program,
         config: ProgramGraphConfig,
     ) -> Result<ProgramGraphAnalysis, TransitionGraphError> {
-        let program = linked_bytecode(program)?;
-        BytecodeTransitionAnalyzer::analyze(&program, config)
+        checked_state_count(config)?;
+        let admitted = admit_program(
+            program,
+            AdmissionConfig {
+                memory_cells: config.memory_cells,
+            },
+        )
+        .map_err(|error| TransitionGraphError::Unsupported(error.to_string()))?;
+        BytecodeTransitionAnalyzer::analyze(admitted.program(), config)
     }
 
     /// Analyze an already-linked bytecode artifact.
@@ -289,6 +321,31 @@ impl BytecodeTransitionAnalyzer {
         program: &BytecodeProgram,
         config: ProgramGraphConfig,
     ) -> Result<ProgramGraphAnalysis, TransitionGraphError> {
+        Self::analyze_with_frozen_input(program, config, &[])
+    }
+
+    /// Analyze a transition map specialized by one exact immutable input tape.
+    /// `INPUT` may consume the supplied prefix, but no live or non-input
+    /// observation is admitted.
+    pub fn analyze_with_frozen_input(
+        program: &BytecodeProgram,
+        config: ProgramGraphConfig,
+        frozen_input: &[u64],
+    ) -> Result<ProgramGraphAnalysis, TransitionGraphError> {
+        if frozen_input.len() > MAX_RECURRENT_FROZEN_INPUTS {
+            return Err(TransitionGraphError::ResourceLimit(format!(
+                "frozen input length {} exceeds hard ceiling {MAX_RECURRENT_FROZEN_INPUTS}",
+                frozen_input.len()
+            )));
+        }
+        let mut input = Vec::new();
+        input.try_reserve_exact(frozen_input.len()).map_err(|_| {
+            TransitionGraphError::ResourceLimit(format!(
+                "cannot reserve {} frozen input words",
+                frozen_input.len()
+            ))
+        })?;
+        input.extend_from_slice(frozen_input);
         let state_count = checked_state_count(config)?;
         let prepared = PreparedBytecode::new(program.clone())
             .map_err(|error| TransitionGraphError::Unsupported(error.to_string()))?;
@@ -305,16 +362,44 @@ impl BytecodeTransitionAnalyzer {
                 "cannot reserve output tables for {state_count} recurrent states"
             ))
         })?;
+        let mut instructions_executed = Vec::new();
+        instructions_executed
+            .try_reserve_exact(state_count)
+            .map_err(|_| {
+                TransitionGraphError::ResourceLimit(format!(
+                    "cannot reserve instruction evidence for {state_count} recurrent states"
+                ))
+            })?;
+        let mut stack_depths = Vec::new();
+        let mut dynamic_bytes = Vec::new();
+        let mut call_depths = Vec::new();
+        let mut temporal_depths = Vec::new();
+        for (values, what) in [
+            (&mut stack_depths, "stack-depth"),
+            (&mut dynamic_bytes, "dynamic-byte"),
+            (&mut call_depths, "call-depth"),
+            (&mut temporal_depths, "temporal-depth"),
+        ] {
+            values.try_reserve_exact(state_count).map_err(|_| {
+                TransitionGraphError::ResourceLimit(format!(
+                    "cannot reserve {what} evidence for {state_count} recurrent states"
+                ))
+            })?;
+        }
 
         let mut vm = BytecodeVm::with_config(BytecodeVmConfig {
             max_instructions: config.max_instructions,
             memory_bounds: config.bounds_policy,
-            input: Vec::new(),
+            input,
             ..BytecodeVmConfig::default()
         });
         let mut aggregate_instructions = 0u64;
         let mut aggregate_outputs = 0usize;
         let mut aggregate_output_bytes = 0usize;
+        let mut maximum_stack_depth = 0usize;
+        let mut maximum_dynamic_bytes = 0usize;
+        let mut maximum_call_depth = 0usize;
+        let mut maximum_temporal_depth = 0usize;
         for state in 0..state_count {
             let remaining_instructions = MAX_RECURRENT_INSTRUCTIONS - aggregate_instructions;
             let epoch_instruction_limit = config.max_instructions.min(remaining_instructions);
@@ -332,6 +417,21 @@ impl BytecodeTransitionAnalyzer {
                         "aggregate recurrent-analysis instructions reached hard ceiling {MAX_RECURRENT_INSTRUCTIONS}"
                     ))
                 }
+                BytecodeVmError::GasExhausted { limit } => {
+                    TransitionGraphError::ResourceLimit(format!(
+                        "transition from state {state} reached configured instruction limit {limit}"
+                    ))
+                }
+                BytecodeVmError::CallDepthExceeded { limit } => {
+                    TransitionGraphError::ResourceLimit(format!(
+                        "transition from state {state} reached configured call-depth limit {limit}"
+                    ))
+                }
+                BytecodeVmError::StackLimitExceeded { limit } => {
+                    TransitionGraphError::ResourceLimit(format!(
+                        "transition from state {state} reached configured operand-stack limit {limit}"
+                    ))
+                }
                 BytecodeVmError::AllocationLimit { what: "output", .. } => {
                     TransitionGraphError::ResourceLimit(format!(
                         "aggregate recurrent-analysis output reached hard ceiling {MAX_RECURRENT_OUTPUT_ITEMS}"
@@ -343,6 +443,11 @@ impl BytecodeTransitionAnalyzer {
                 } => TransitionGraphError::ResourceLimit(format!(
                     "aggregate recurrent-analysis output bytes reached hard ceiling {MAX_RECURRENT_OUTPUT_BYTES}"
                 )),
+                BytecodeVmError::AllocationLimit { what, limit } => {
+                    TransitionGraphError::ResourceLimit(format!(
+                        "transition from state {state} reached configured {what} limit {limit}"
+                    ))
+                }
                 error => TransitionGraphError::UndefinedTransition {
                     state,
                     reason: error.to_string(),
@@ -401,6 +506,34 @@ impl BytecodeTransitionAnalyzer {
                 }
             }
 
+            let input_is_declared_prefix = epoch.inputs_consumed.len() <= frozen_input.len()
+                && epoch.inputs_consumed.as_slice() == &frozen_input[..epoch.inputs_consumed.len()];
+            if !input_is_declared_prefix
+                || !epoch.clock_inputs_consumed.is_empty()
+                || !epoch.random_inputs_consumed.is_empty()
+                || !epoch.file_snapshots_consumed.is_empty()
+                || !epoch.endpoint_tapes_consumed.is_empty()
+                || !epoch.process_results_consumed.is_empty()
+            {
+                return Err(TransitionGraphError::UndefinedTransition {
+                    state,
+                    reason: "transition depends on observations outside the enumerated temporal state and declared frozen input"
+                        .to_string(),
+                });
+            }
+            if !epoch.effects.is_empty() {
+                return Err(TransitionGraphError::UndefinedTransition {
+                    state,
+                    reason: "transition stages host effects outside the enumerated temporal state"
+                        .to_string(),
+                });
+            }
+
+            maximum_stack_depth = maximum_stack_depth.max(epoch.maximum_stack_depth);
+            maximum_dynamic_bytes = maximum_dynamic_bytes.max(epoch.maximum_dynamic_bytes);
+            maximum_call_depth = maximum_call_depth.max(epoch.maximum_call_depth);
+            maximum_temporal_depth = maximum_temporal_depth.max(epoch.maximum_temporal_depth);
+
             if let Some((address, value)) = epoch
                 .present
                 .iter()
@@ -414,6 +547,11 @@ impl BytecodeTransitionAnalyzer {
                 });
             }
             successors.push(encode_state(&epoch.present, config.cell_bits));
+            instructions_executed.push(epoch.instructions_executed);
+            stack_depths.push(epoch.maximum_stack_depth);
+            dynamic_bytes.push(epoch.maximum_dynamic_bytes);
+            call_depths.push(epoch.maximum_call_depth);
+            temporal_depths.push(epoch.maximum_temporal_depth);
             outputs.push(epoch.output);
         }
 
@@ -423,27 +561,19 @@ impl BytecodeTransitionAnalyzer {
             graph,
             recurrent,
             outputs,
+            instructions_executed,
+            stack_depths,
+            dynamic_bytes,
+            call_depths,
+            temporal_depths,
+            maximum_stack_depth,
+            maximum_dynamic_bytes,
+            maximum_call_depth,
+            maximum_temporal_depth,
             memory_cells: config.memory_cells,
             cell_bits: config.cell_bits,
         })
     }
-}
-
-fn linked_bytecode(program: &Program) -> Result<BytecodeProgram, TransitionGraphError> {
-    let hir = HirProgram::resolve(program).map_err(|errors| {
-        TransitionGraphError::Unsupported(format!(
-            "typed name resolution failed: {}",
-            errors
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join("; ")
-        ))
-    })?;
-    let code = BytecodeProgram::compile(&hir)
-        .map_err(|error| TransitionGraphError::Unsupported(error.to_string()))?;
-    link(&[ObjectModule::new("transition-graph-source", code)])
-        .map_err(|error| TransitionGraphError::Unsupported(error.to_string()))
 }
 
 fn checked_state_count(config: ProgramGraphConfig) -> Result<usize, TransitionGraphError> {
@@ -615,7 +745,9 @@ mod tests {
     use crate::parser::parse;
 
     fn bytecode(source: &str) -> BytecodeProgram {
-        linked_bytecode(&parse(source).unwrap()).unwrap()
+        admit_program(&parse(source).unwrap(), AdmissionConfig { memory_cells: 1 })
+            .unwrap()
+            .into_program()
     }
 
     #[test]
@@ -656,7 +788,9 @@ mod tests {
     #[test]
     fn source_and_bytecode_apis_have_identical_observations_and_dot() {
         let source = parse("PROCEDURE step { 0 ORACLE NOT DUP OUTPUT 0 PROPHECY } step").unwrap();
-        let bytecode = linked_bytecode(&source).unwrap();
+        let bytecode = admit_program(&source, AdmissionConfig { memory_cells: 1 })
+            .unwrap()
+            .into_program();
         let source_analysis =
             ProgramTransitionAnalyzer::analyze(&source, ProgramGraphConfig::default()).unwrap();
         let bytecode_analysis =
@@ -692,7 +826,7 @@ mod tests {
         .unwrap_err();
         assert!(matches!(
             error,
-            TransitionGraphError::UndefinedTransition { state: 0, ref reason }
+            TransitionGraphError::ResourceLimit(ref reason)
                 if reason.contains("instruction limit")
         ));
     }
@@ -708,6 +842,22 @@ mod tests {
 
     #[test]
     fn bytecode_environment_inputs_must_be_frozen_for_recurrent_analysis() {
+        let input = bytecode("INPUT POP 0 ORACLE 0 PROPHECY");
+        let error =
+            BytecodeTransitionAnalyzer::analyze(&input, ProgramGraphConfig::default()).unwrap_err();
+        assert!(matches!(
+            error,
+            TransitionGraphError::UndefinedTransition { state: 0, ref reason }
+                if reason.contains("frozen input exhausted")
+        ));
+        let analysis = BytecodeTransitionAnalyzer::analyze_with_frozen_input(
+            &input,
+            ProgramGraphConfig::default(),
+            &[1],
+        )
+        .unwrap();
+        assert_eq!(analysis.graph.successors(), &[0, 1]);
+
         let clock = bytecode("CLOCK POP 0 ORACLE 0 PROPHECY");
         let error =
             BytecodeTransitionAnalyzer::analyze(&clock, ProgramGraphConfig::default()).unwrap_err();
@@ -806,6 +956,15 @@ mod tests {
                     OutputItem::Char(b'x'),
                 ],
             ],
+            instructions_executed: vec![1, 1],
+            stack_depths: vec![0, 0],
+            dynamic_bytes: vec![0, 0],
+            call_depths: vec![0, 0],
+            temporal_depths: vec![0, 0],
+            maximum_stack_depth: 0,
+            maximum_dynamic_bytes: 0,
+            maximum_call_depth: 0,
+            maximum_temporal_depth: 0,
             memory_cells: 1,
             cell_bits: 1,
         };

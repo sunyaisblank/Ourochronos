@@ -10,6 +10,32 @@ fn ouro() -> Command {
     Command::new(env!("CARGO_BIN_EXE_ourochronos"))
 }
 
+fn bytecode_artifact(bytes: &[u8]) -> ourochronos::BytecodeProgram {
+    let artifact =
+        ourochronos::PortableArtifact::from_bytes(bytes).expect("portable bytecode validates");
+    assert_eq!(
+        artifact.provenance_status(),
+        ourochronos::SourceProvenanceStatus::ManifestAvailable
+    );
+    match artifact.payload {
+        ourochronos::PortableArtifactPayload::Bytecode(program) => program,
+        _ => panic!("expected a bytecode payload"),
+    }
+}
+
+fn package_artifact(bytes: &[u8]) -> ourochronos::PortablePackage {
+    let artifact =
+        ourochronos::PortableArtifact::from_bytes(bytes).expect("portable package validates");
+    assert_eq!(
+        artifact.provenance_status(),
+        ourochronos::SourceProvenanceStatus::ManifestAvailable
+    );
+    match artifact.payload {
+        ourochronos::PortableArtifactPayload::Package(package) => package,
+        _ => panic!("expected a package runtime contract"),
+    }
+}
+
 /// Write a programme fixture under a shared temp directory and return its
 /// path. Filenames must be unique per test: the directory is shared, so a
 /// reused name would let parallel tests clobber each other's fixture.
@@ -19,6 +45,256 @@ fn write_temp_program(name: &str, source: &str) -> std::path::PathBuf {
     let path = dir.join(name);
     std::fs::write(&path, source).expect("write programme");
     path
+}
+
+#[test]
+fn portable_runtime_failure_names_imported_source_after_source_removal() {
+    let directory = std::env::temp_dir().join(format!(
+        "ouro-portable-diagnostic-cli-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&directory).unwrap();
+    let library = directory.join("library.ouro");
+    let source = directory.join("main.ouro");
+    let package = directory.join("failure.ouropkg");
+    std::fs::write(&library, "PROCEDURE fail { 0 99 INDEX POP }\n").unwrap();
+    std::fs::write(&source, "IMPORT \"library.ouro\"\nfail\n").unwrap();
+    let built = ouro()
+        .arg(&source)
+        .arg("--build")
+        .arg(&package)
+        .args(["--memory-cells", "4", "--strict"])
+        .output()
+        .unwrap();
+    assert_eq!(built.status.code(), Some(0), "{built:?}");
+    let ordinary = ouro()
+        .arg(&source)
+        .args(["--memory-cells", "4", "--strict"])
+        .output()
+        .unwrap();
+    assert_eq!(ordinary.status.code(), Some(1), "{ordinary:?}");
+    let ordinary_text = String::from_utf8_lossy(&ordinary.stdout);
+    assert!(ordinary_text.contains("library.ouro"), "{ordinary:?}");
+    assert!(ordinary_text.contains("bytes 22..27"), "{ordinary:?}");
+    std::fs::remove_file(&library).unwrap();
+    std::fs::remove_file(&source).unwrap();
+    let portable = ouro().arg("run-package").arg(&package).output().unwrap();
+    assert_eq!(portable.status.code(), Some(1), "{portable:?}");
+    let portable_text = String::from_utf8_lossy(&portable.stdout);
+    assert!(portable_text.contains("library.ouro"), "{portable:?}");
+    assert!(portable_text.contains("bytes 22..27"), "{portable:?}");
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn affine_cli_checks_all_classes_and_refuses_periodic_or_insufficient_gas() {
+    let directory = std::env::temp_dir().join(format!("ouro-affine-cli-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let bytecode = directory.join("model.ourobc");
+    let emit = |source: &std::path::Path| {
+        let output = ouro()
+            .arg(source)
+            .arg("--emit-bytecode")
+            .arg(&bytecode)
+            .args(["--memory-cells", "4"])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(0), "{output:?}");
+    };
+    emit(std::path::Path::new("examples/affine_feedback.ouro"));
+    let analyze = |mask: &str, gas: &str| {
+        ouro()
+            .arg("analyse-affine")
+            .arg(&bytecode)
+            .args([mask, "4", gas])
+            .output()
+            .unwrap()
+    };
+    let uniform = analyze("1", "64");
+    assert_eq!(uniform.status.code(), Some(0), "{uniform:?}");
+    let text = String::from_utf8_lossy(&uniform.stdout);
+    assert!(text.contains("all 1 recurrent classes"), "{uniform:?}");
+    assert!(text.contains("transient bound 3"), "{uniform:?}");
+    assert!(text.contains("UNIFORM PARITY READOUT: 0"), "{uniform:?}");
+    assert_eq!(analyze("8", "64").status.code(), Some(1));
+    let low_gas = analyze("1", "1");
+    assert_eq!(low_gas.status.code(), Some(1), "{low_gas:?}");
+    assert!(!String::from_utf8_lossy(&low_gas.stdout).contains("CHECKED"));
+    let source = directory.join("adjacent.ouro");
+    std::fs::write(
+        &source,
+        "TEMPORAL 0 2 BITS 1 { 0 ORACLE 0 PROPHECY 1 ORACLE 1 PROPHECY }",
+    )
+    .unwrap();
+    emit(&source);
+    let ambiguous = analyze("1", "64");
+    assert_eq!(ambiguous.status.code(), Some(2), "{ambiguous:?}");
+    let text = String::from_utf8_lossy(&ambiguous.stdout);
+    assert!(text.contains("all 4 recurrent classes"), "{ambiguous:?}");
+    assert!(text.contains("AMBIGUOUS PARITY READOUT"), "{ambiguous:?}");
+    std::fs::write(
+        &source,
+        "TEMPORAL 0 2 BITS 1 { 1 ORACLE 0 PROPHECY 0 ORACLE 1 PROPHECY }",
+    )
+    .unwrap();
+    emit(&source);
+    let periodic = analyze("1", "64");
+    assert_eq!(periodic.status.code(), Some(1), "{periodic:?}");
+    assert!(
+        String::from_utf8_lossy(&periodic.stderr).contains("does not stabilize"),
+        "{periodic:?}"
+    );
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn isolated_cli_preserves_results_times_out_and_withholds_host_capabilities() {
+    let ordinary = ouro()
+        .args(["isolate", "2000", "256", "examples/simple.ouro"])
+        .output()
+        .unwrap();
+    assert_eq!(ordinary.status.code(), Some(0), "{ordinary:?}");
+    assert!(
+        String::from_utf8_lossy(&ordinary.stdout).contains("["),
+        "{ordinary:?}"
+    );
+    let source = write_temp_program("isolated-infinite-loop.ouro", "WHILE { 1 } { }\n");
+    let timeout = ouro()
+        .args(["isolate", "40", "256"])
+        .arg(&source)
+        .args(["--max-inst", "18446744073709551615"])
+        .output()
+        .unwrap();
+    assert_eq!(timeout.status.code(), Some(3), "{timeout:?}");
+    assert!(
+        timeout.stdout.is_empty(),
+        "partial claims must be withheld: {timeout:?}"
+    );
+    assert!(
+        String::from_utf8_lossy(&timeout.stderr).contains("UNKNOWN isolated execution"),
+        "{timeout:?}"
+    );
+    let denied = ouro()
+        .args([
+            "isolate",
+            "2000",
+            "256",
+            "examples/simple.ouro",
+            "--allow-sleep-ms",
+            "0",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(denied.status.code(), Some(1), "{denied:?}");
+    assert!(
+        String::from_utf8_lossy(&denied.stderr).contains("outside the isolated analysis profile")
+    );
+    let solver = ouro()
+        .args([
+            "isolate",
+            "2000",
+            "256",
+            "examples/finite_flip.ouro",
+            "--global",
+            "--memory-cells",
+            "4",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(solver.status.code(), Some(2), "{solver:?}");
+    assert!(
+        String::from_utf8_lossy(&solver.stdout).contains("UNSAT"),
+        "{solver:?}"
+    );
+    std::fs::remove_file(source).unwrap();
+}
+
+#[test]
+fn portable_artifacts_retain_sources_and_enforce_package_kind_after_source_removal() {
+    use ourochronos::{PortableArtifact, SourceProvenanceStatus};
+
+    let directory =
+        std::env::temp_dir().join(format!("ouro-portable-source-cli-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let library = directory.join("library.ouro");
+    let source = directory.join("main.ouro");
+    let package_path = directory.join("main.ouropkg");
+    let bytecode_path = directory.join("main.ourobc");
+    std::fs::write(&library, "PROCEDURE answer { 42 OUTPUT }\n").unwrap();
+    std::fs::write(&source, "IMPORT \"library.ouro\"\nanswer\n").unwrap();
+    for (flag, output) in [
+        ("--build", &package_path),
+        ("--emit-bytecode", &bytecode_path),
+    ] {
+        let result = ouro()
+            .arg(&source)
+            .arg(flag)
+            .arg(output)
+            .args(["--memory-cells", "4"])
+            .output()
+            .unwrap();
+        assert_eq!(result.status.code(), Some(0), "{:?}", result);
+    }
+    let bytes = std::fs::read(&package_path).unwrap();
+    let artifact = PortableArtifact::from_bytes(&bytes).unwrap();
+    assert_eq!(
+        artifact.provenance_status(),
+        SourceProvenanceStatus::ManifestAvailable
+    );
+    let manifest = artifact.provenance.as_ref().unwrap();
+    for name in ["library.ouro", "main.ouro"] {
+        assert!(manifest
+            .source_files
+            .iter()
+            .any(|item| item.name.ends_with(name)));
+    }
+    std::fs::remove_file(&library).unwrap();
+    std::fs::remove_file(&source).unwrap();
+    assert_eq!(PortableArtifact::from_bytes(&bytes).unwrap(), artifact);
+    let result = ouro()
+        .arg("run-package")
+        .arg(&package_path)
+        .output()
+        .unwrap();
+    assert_eq!(result.status.code(), Some(0), "{:?}", result);
+    assert!(String::from_utf8_lossy(&result.stdout).contains("[42]"));
+
+    let legacy_path = directory.join("legacy.ouropkg");
+    std::fs::write(&legacy_path, artifact.legacy_bytes().unwrap()).unwrap();
+    let legacy = PortableArtifact::from_bytes(&std::fs::read(&legacy_path).unwrap()).unwrap();
+    assert_eq!(
+        legacy.provenance_status(),
+        SourceProvenanceStatus::Unavailable
+    );
+    let result = ouro()
+        .arg("run-package")
+        .arg(&legacy_path)
+        .output()
+        .unwrap();
+    assert_eq!(result.status.code(), Some(0), "{:?}", result);
+    assert!(String::from_utf8_lossy(&result.stdout).contains("[42]"));
+
+    let result = ouro()
+        .arg("run-package")
+        .arg(&bytecode_path)
+        .output()
+        .unwrap();
+    assert_eq!(result.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&result.stderr).contains("no package runtime/resolution manifest")
+    );
+    let mut corrupted = bytes;
+    *corrupted.last_mut().unwrap() ^= 1;
+    std::fs::write(&package_path, corrupted).unwrap();
+    let result = ouro()
+        .arg("run-package")
+        .arg(&package_path)
+        .output()
+        .unwrap();
+    assert_eq!(result.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&result.stderr).contains("checksum"));
+    std::fs::remove_dir_all(directory).unwrap();
 }
 
 #[test]
@@ -32,6 +308,7 @@ fn help_exits_zero_and_prints_usage() {
     assert!(text.contains("--all-fixed"));
     assert!(text.contains("--recurrent"));
     assert!(text.contains("--verify"));
+    assert!(text.contains("--verify-family"));
     assert!(text.contains("--state-bits"));
     assert!(text.contains("--solver-timeout"));
     assert!(text.contains("--loop-unroll"));
@@ -42,6 +319,143 @@ fn help_exits_zero_and_prints_usage() {
     assert!(text.contains("--build-executable"));
     assert!(text.contains("link <output.ourobc> <input.ouroobj>..."));
     assert!(text.contains("run-package <file.ouropkg>"));
+    assert!(text.contains("prove-finite <file.ourobc>"));
+    assert!(text.contains("check-finite <file.ourobc>"));
+    assert!(text.contains("halt-slice <file.ourobc>"));
+    assert!(text.contains("halt-resume <file.ourobc>"));
+}
+
+#[test]
+fn halting_checkpoint_cli_preserves_progress_and_rejects_budget_reset() {
+    let source = write_temp_program(
+        "cli_halting_checkpoint.ouro",
+        "5 WHILE { DUP } { 1 SUB } POP 42 OUTPUT",
+    );
+    let bytecode = source.with_extension("ourobc");
+    let checkpoint = source.with_extension("ourocp");
+    let emitted = ouro()
+        .arg(&source)
+        .arg("--emit-bytecode")
+        .arg(&bytecode)
+        .args(["--memory-cells", "1"])
+        .output()
+        .unwrap();
+    assert_eq!(emitted.status.code(), Some(0), "{:?}", emitted);
+    for (command, count) in [("halt-slice", 4), ("halt-resume", 8)] {
+        let result = ouro()
+            .arg(command)
+            .arg(&bytecode)
+            .arg(&checkpoint)
+            .args(["4", "1", "64"])
+            .output()
+            .unwrap();
+        assert_eq!(result.status.code(), Some(3), "{:?}", result);
+        assert!(String::from_utf8_lossy(&result.stdout)
+            .contains(&format!("UNKNOWN after {count} fetched instructions")));
+    }
+    let saved = std::fs::read(&checkpoint).unwrap();
+    let result = ouro()
+        .arg("halt-resume")
+        .arg(&bytecode)
+        .arg(&checkpoint)
+        .args(["64", "1", "65"])
+        .output()
+        .unwrap();
+    assert_eq!(result.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&result.stderr).contains("cumulative resource policy changed"));
+    assert_eq!(std::fs::read(&checkpoint).unwrap(), saved);
+    let result = ouro()
+        .arg("halt-resume")
+        .arg(&bytecode)
+        .arg(&checkpoint)
+        .args(["64", "1", "64"])
+        .output()
+        .unwrap();
+    assert_eq!(result.status.code(), Some(0), "{:?}", result);
+    assert!(
+        String::from_utf8_lossy(&result.stdout).contains("HALTED after 32 fetched instructions")
+    );
+    assert!(String::from_utf8_lossy(&result.stdout).contains("[42]"));
+    let mut corrupt = saved;
+    *corrupt.last_mut().unwrap() ^= 1;
+    std::fs::write(&checkpoint, corrupt).unwrap();
+    let result = ouro()
+        .arg("halt-resume")
+        .arg(&bytecode)
+        .arg(&checkpoint)
+        .args(["64", "1", "64"])
+        .output()
+        .unwrap();
+    assert_eq!(result.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&result.stderr).contains("checksum"));
+}
+
+#[test]
+fn finite_proof_cli_checks_exact_program_and_gas_identity() {
+    let source = write_temp_program(
+        "cli_finite_flip.ouro",
+        "TEMPORAL 0 1 BITS 1 { 0 ORACLE 1 XOR 0 PROPHECY }",
+    );
+    let bytecode = source.with_extension("ourobc");
+    let certificate = source.with_extension("ourofp");
+    let emitted = ouro()
+        .arg(&source)
+        .arg("--emit-bytecode")
+        .arg(&bytecode)
+        .args(["--memory-cells", "1"])
+        .output()
+        .unwrap();
+    assert_eq!(emitted.status.code(), Some(0), "{:?}", emitted);
+    for command in ["prove-finite", "check-finite"] {
+        let result = ouro()
+            .arg(command)
+            .arg(&bytecode)
+            .arg(&certificate)
+            .args(["1", "64"])
+            .output()
+            .unwrap();
+        assert_eq!(result.status.code(), Some(0), "{:?}", result);
+        assert!(String::from_utf8_lossy(&result.stdout)
+            .contains("CHECKED NO POINT FIXED STATE: 2 states"));
+    }
+    let result = ouro()
+        .arg("check-finite")
+        .arg(&bytecode)
+        .arg(&certificate)
+        .args(["1", "63"])
+        .output()
+        .unwrap();
+    assert_eq!(result.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&result.stderr).contains("resource configuration"));
+
+    std::fs::write(&source, "TEMPORAL 0 1 BITS 1 { 0 ORACLE 0 PROPHECY }").unwrap();
+    let emitted = ouro()
+        .arg(&source)
+        .arg("--emit-bytecode")
+        .arg(&bytecode)
+        .args(["--memory-cells", "1"])
+        .output()
+        .unwrap();
+    assert_eq!(emitted.status.code(), Some(0), "{:?}", emitted);
+    let result = ouro()
+        .arg("check-finite")
+        .arg(&bytecode)
+        .arg(&certificate)
+        .args(["1", "64"])
+        .output()
+        .unwrap();
+    assert_eq!(result.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&result.stderr).contains("program SHA-256"));
+    let result = ouro()
+        .arg("prove-finite")
+        .arg(&bytecode)
+        .arg(&certificate)
+        .args(["1", "64"])
+        .output()
+        .unwrap();
+    assert_eq!(result.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&result.stderr).contains("fixed point"));
+    assert!(!String::from_utf8_lossy(&result.stdout).contains("CHECKED"));
 }
 
 #[test]
@@ -318,10 +732,7 @@ fn typed_scalar_foreign_declarations_compile_but_require_an_explicit_host() {
         .output()
         .expect("binary runs");
     assert_eq!(emitted.status.code(), Some(0), "{emitted:?}");
-    let linked = ourochronos::BytecodeProgram::from_bytes(
-        &std::fs::read(&artifact).expect("read typed foreign artifact"),
-    )
-    .expect("decode typed foreign artifact");
+    let linked = bytecode_artifact(&std::fs::read(&artifact).expect("read typed foreign artifact"));
     assert_eq!(linked.foreigns.len(), 1);
     assert_eq!(linked.foreigns[0].library, "process");
     assert_eq!(linked.foreigns[0].symbol, "host_add");
@@ -462,7 +873,7 @@ fn check_compile_and_build_actions_use_validated_portable_artifacts() {
         String::from_utf8_lossy(&compiled.stderr)
     );
     let bytecode = std::fs::read(&bytecode_path).expect("bytecode artifact exists");
-    ourochronos::BytecodeProgram::from_bytes(&bytecode).expect("artifact validates");
+    bytecode_artifact(&bytecode);
 
     let mut link_command = ouro();
     link_command.arg("link").arg(&linked_path);
@@ -496,9 +907,9 @@ fn check_compile_and_build_actions_use_validated_portable_artifacts() {
         String::from_utf8_lossy(&built.stderr)
     );
     let package = std::fs::read(&package_path).expect("package artifact exists");
-    let decoded = ourochronos::PortablePackage::from_bytes(&package).expect("package validates");
+    let decoded = package_artifact(&package);
     assert_eq!(decoded.manifest.name, "portable_build_source");
-    assert_eq!(decoded.program.to_bytes().unwrap(), bytecode);
+    assert_eq!(decoded.program, bytecode_artifact(&bytecode));
 
     let rebuilt = ouro()
         .args([
@@ -713,8 +1124,7 @@ fn runtime_global_package_declares_solver_and_never_falls_back_to_orbit() {
         String::from_utf8_lossy(&built.stdout),
         String::from_utf8_lossy(&built.stderr)
     );
-    let package =
-        ourochronos::PortablePackage::from_bytes(&std::fs::read(&package_path).unwrap()).unwrap();
+    let package = package_artifact(&std::fs::read(&package_path).unwrap());
     assert_eq!(
         package.manifest.resolution_policy,
         ourochronos::PackageResolutionPolicy::RuntimeGlobalPoint
@@ -879,7 +1289,7 @@ fn cli_rejects_oversized_external_inputs_before_reading_them() {
 
     let package = sparse(
         "oversized.ouropkg",
-        u64::try_from(ourochronos::MAX_PACKAGE_BYTES).unwrap() + 1,
+        u64::try_from(ourochronos::MAX_PORTABLE_ARTIFACT_BYTES).unwrap() + 1,
     );
     let result = ouro()
         .args(["run-package", package.to_str().unwrap()])
@@ -1131,7 +1541,7 @@ fn strongest_three_cross_the_compiler_solver_replay_and_deployment_boundary() {
     }
     let linked = link_command.output().unwrap();
     assert_eq!(linked.status.code(), Some(0), "{:?}", linked);
-    ourochronos::BytecodeProgram::from_bytes(&std::fs::read(&mutual_bytecode).unwrap()).unwrap();
+    bytecode_artifact(&std::fs::read(&mutual_bytecode).unwrap());
 
     let solved = ouro()
         .args([
@@ -1171,8 +1581,7 @@ fn strongest_three_cross_the_compiler_solver_replay_and_deployment_boundary() {
         .output()
         .unwrap();
     assert_eq!(built.status.code(), Some(0), "{:?}", built);
-    let decoded =
-        ourochronos::PortablePackage::from_bytes(&std::fs::read(&mutual_package).unwrap()).unwrap();
+    let decoded = package_artifact(&std::fs::read(&mutual_package).unwrap());
     assert!(decoded.witness.is_some());
     let executed = ouro()
         .args(["run-package", mutual_package.to_str().unwrap()])
@@ -1706,7 +2115,194 @@ fn resources_report_surfaces_source_family_contract() {
     let text = String::from_utf8_lossy(&out.stdout);
     assert_eq!(out.status.code(), Some(0), "stdout was: {}", text);
     assert!(text.contains("Declared PSPACE Family Contract: identity_family"));
-    assert!(text.contains("semantic proof remains external"));
+    assert!(text.contains("finite-instance evidence and asymptotic assumptions remain distinct"));
+}
+
+#[test]
+fn family_instance_mode_proves_complete_readout_and_refutes_a_false_declaration() {
+    let artifact_path = std::env::temp_dir()
+        .join("ouro-cli-tests")
+        .join("family-instance-artifact.json");
+    let verified = ouro()
+        .args([
+            "examples/pspace_contract.ouro",
+            "--verify-family",
+            "1",
+            "--memory-cells",
+            "1",
+            "--state-bits",
+            "1",
+            "--state-limit",
+            "2",
+            "--artifact",
+            artifact_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("binary runs");
+    let verified_text = String::from_utf8_lossy(&verified.stdout);
+    assert_eq!(
+        verified.status.code(),
+        Some(0),
+        "stdout was: {verified_text}"
+    );
+    assert!(verified_text.contains("VERIFIED FINITE FAMILY INSTANCE"));
+    assert!(verified_text.contains("2 recurrent class(es)"));
+    assert!(verified_text.contains("Decision 1 is invariant"));
+    assert!(verified_text.contains("Structurally uniform generator verified"));
+    assert!(verified_text.contains("Family-wide projection/routing theorem verified"));
+    assert!(verified_text.contains("Explicit Boolean circuit verified"));
+    assert!(verified_text.contains("ideal Deutsch selector remains an external model assumption"));
+    let artifact = std::fs::read_to_string(artifact_path).expect("family JSON artifact");
+    assert!(artifact.starts_with("{\"schema\":\"ourochronos.projection-circuit-instance/v1\""));
+    assert!(artifact.contains("\"family_theorem\""));
+    assert!(artifact.contains("\"uniform_generation\""));
+    assert!(artifact.contains("\"boolean_circuit\""));
+    assert!(artifact.contains("\"next_temporal\""));
+    assert!(artifact.contains("\"bytecode_hex\""));
+    assert!(artifact.contains("\"finite_instance\""));
+    assert!(artifact.contains("\"proved_for_all_nonempty_inputs\""));
+    assert!(artifact.contains("\"status\":\"verified\""));
+    assert!(artifact.contains("\"input\":\"1\""));
+    assert!(artifact.contains("\"all-recurrent-class-readout\""));
+    assert!(artifact.contains("\"external_assumptions\""));
+    assert!(artifact.contains("\"maximum_stack_depths\""));
+    assert!(artifact.contains("\"maximum_dynamic_bytes\""));
+
+    let refuted_path = write_temp_program(
+        "family_false_readout.ouro",
+        "FAMILY false_readout {\n\
+         CTC_CELLS POLY 1 1 0;\n\
+         CHRONOLOGY_BITS POLY 1000 0 0;\n\
+         TRANSITION_STEPS POLY 20 0 0;\n\
+         UNIFORM; TOTAL; READOUT_INVARIANT; IDEAL_DEUTSCH; EFFECTS_FROZEN;\n\
+         }\n\
+         0 ORACLE DUP 0 PROPHECY OUTPUT\n",
+    );
+    let refuted = ouro()
+        .args([
+            refuted_path.to_str().unwrap(),
+            "--verify-family",
+            "1",
+            "--memory-cells",
+            "1",
+            "--state-bits",
+            "1",
+            "--state-limit",
+            "2",
+        ])
+        .output()
+        .expect("binary runs");
+    let refuted_text = String::from_utf8_lossy(&refuted.stdout);
+    assert_eq!(refuted.status.code(), Some(2), "stdout was: {refuted_text}");
+    assert!(refuted_text.contains("REFUTED FAMILY INSTANCE"));
+    assert!(refuted_text.contains("readout invariance is false"));
+
+    let input_path = write_temp_program(
+        "family_exact_input.ouro",
+        "FAMILY exact_input {\n\
+         CTC_CELLS POLY 1 1 0;\n\
+         CHRONOLOGY_BITS POLY 1000 0 0;\n\
+         TRANSITION_STEPS POLY 20 0 0;\n\
+         UNIFORM; TOTAL; READOUT_INVARIANT; IDEAL_DEUTSCH; EFFECTS_FROZEN;\n\
+         }\n\
+         INPUT 0 ORACLE DUP 0 PROPHECY POP OUTPUT\n",
+    );
+    for (input, decision) in [
+        ("0", "Decision 0 is invariant"),
+        ("1", "Decision 1 is invariant"),
+    ] {
+        let output = ouro()
+            .args([
+                input_path.to_str().unwrap(),
+                "--verify-family",
+                input,
+                "--memory-cells",
+                "1",
+                "--state-bits",
+                "1",
+                "--state-limit",
+                "2",
+            ])
+            .output()
+            .expect("binary runs");
+        let text = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(output.status.code(), Some(0), "stdout was: {text}");
+        assert!(text.contains(decision), "stdout was: {text}");
+    }
+
+    let routing_path = write_temp_program(
+        "family_sparse_routing.ouro",
+        "FAMILY routing {\n\
+         CTC_CELLS POLY 0 1 3;\n\
+         CHRONOLOGY_BITS POLY 1000 1 0;\n\
+         TRANSITION_STEPS POLY 30 1 0;\n\
+         UNIFORM; TOTAL; READOUT_INVARIANT; IDEAL_DEUTSCH; EFFECTS_FROZEN;\n\
+         }\n\
+         INPUT 0 ORACLE 1 PROPHECY 1 ORACLE 2 PROPHECY 1 0 PROPHECY 0 1 PROPHECY OUTPUT\n",
+    );
+    let routing = ouro()
+        .args([
+            routing_path.to_str().unwrap(),
+            "--verify-family",
+            "10",
+            "--memory-cells",
+            "3",
+            "--state-bits",
+            "1",
+            "--state-limit",
+            "8",
+        ])
+        .output()
+        .expect("binary runs");
+    let routing_text = String::from_utf8_lossy(&routing.stdout);
+    assert_eq!(routing.status.code(), Some(0), "stdout was: {routing_text}");
+    assert!(routing_text.contains("4 assignment(s)"));
+    assert!(routing_text.contains("Explicit Boolean circuit verified: 3 temporal-state wires"));
+
+    let malformed = ouro()
+        .args([input_path.to_str().unwrap(), "--verify-family", "102"])
+        .output()
+        .expect("binary runs");
+    assert_eq!(malformed.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&malformed.stderr).contains("binary input string"));
+
+    let generated_bound = ouro()
+        .args([
+            "examples/pspace_contract.ouro",
+            "--verify-family",
+            "1",
+            "--state-bits",
+            "1",
+            "--state-limit",
+            "8",
+        ])
+        .output()
+        .expect("binary runs");
+    let generated_bound_text = String::from_utf8_lossy(&generated_bound.stdout);
+    assert_eq!(
+        generated_bound.status.code(),
+        Some(0),
+        "stdout was: {generated_bound_text}"
+    );
+    assert!(generated_bound_text.contains("8 states"));
+    assert!(generated_bound_text.contains("generated CTC width 3 cells"));
+
+    let excessive_width = ouro()
+        .args([
+            "examples/pspace_contract.ouro",
+            "--verify-family",
+            "1",
+            "--memory-cells",
+            "4",
+            "--state-bits",
+            "1",
+            "--state-limit",
+            "16",
+        ])
+        .output()
+        .expect("binary runs");
+    assert_eq!(excessive_width.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&excessive_width.stdout).contains("not proved below CTC_CELLS"));
 }
 
 #[test]
@@ -1786,7 +2382,7 @@ fn source_markov_model_exposes_ambiguous_readouts() {
 }
 
 #[test]
-fn source_quantum_channel_verifies_every_fixed_density() {
+fn source_quantum_channel_reports_estimated_fixed_density_readout() {
     let out = ouro()
         .arg("examples/quantum_reset.ouro")
         .output()
@@ -1799,7 +2395,25 @@ fn source_quantum_channel_verifies_every_fixed_density() {
         text
     );
     assert!(text.contains("[1.000000000000, 1.000000000000]"));
-    assert!(text.contains("ACCEPT on every fixed density operator"));
+    assert!(text.contains("NUMERICAL DECISION: ACCEPT"));
+    assert!(text.contains("not certified error bounds"));
+}
+
+#[test]
+fn source_quantum_channel_distinguishes_threshold_uncertainty_from_ambiguity() {
+    let source = std::fs::read_to_string("examples/quantum_reset.ouro")
+        .unwrap()
+        .replace(
+            "ACCEPT_BASIS 0;",
+            "ACCEPT_BASIS 1; ACCEPT_AT_LEAST 1/2000000000; REJECT_AT_MOST 0/1;",
+        );
+    let path = write_temp_program("quantum_threshold_uncertainty.ouro", &source);
+    let out = ouro().arg(&path).output().unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(3), "{text}");
+    assert!(text.contains("[0.000000000000, 0.000000000000]"), "{text}");
+    assert!(text.contains("DECISION: NUMERICALLY UNCERTAIN"), "{text}");
+    assert!(!text.contains("DECISION: ACCEPT"), "{text}");
 }
 
 #[test]
@@ -2075,10 +2689,10 @@ fn examples_meet_their_contracts() {
         ("combinators", 0, Some("[10][20][11][10][11][20][11][57]")),
         ("data_structures", 0, Some("[10][30][100][42][3][2]")),
         ("turing_complete", 0, Some("[3]")),
-        ("pspace_contract", 0, Some("[0]")),
+        ("pspace_contract", 0, Some("[1]")),
         ("stochastic_accept", 0, Some("DECISION: ACCEPT")),
         ("stochastic_ambiguous", 2, Some("DECISION: AMBIGUOUS")),
-        ("quantum_reset", 0, Some("ACCEPT on every fixed density")),
+        ("quantum_reset", 0, Some("NUMERICAL DECISION: ACCEPT")),
         ("quantum_identity", 2, Some("DECISION: AMBIGUOUS")),
         ("paradox", 2, Some("OSCILLATION")),
         ("quantum_suicide", 2, Some("OSCILLATION")),

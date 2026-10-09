@@ -1720,30 +1720,56 @@ impl<'a> Parser<'a> {
                 _ => return Err("Expected FAMILY field or '}'".into()),
             };
             match field.as_str() {
-                "CTC_CELLS" => ctc_cells = Some(self.parse_polynomial_declaration("CTC_CELLS")?),
+                "CTC_CELLS" => {
+                    let value = self.parse_polynomial_declaration("CTC_CELLS")?;
+                    if ctc_cells.replace(value).is_some() {
+                        return Err("Duplicate FAMILY field CTC_CELLS".into());
+                    }
+                }
                 "CHRONOLOGY_BITS" => {
-                    chronology_bits = Some(self.parse_polynomial_declaration("CHRONOLOGY_BITS")?)
+                    let value = self.parse_polynomial_declaration("CHRONOLOGY_BITS")?;
+                    if chronology_bits.replace(value).is_some() {
+                        return Err("Duplicate FAMILY field CHRONOLOGY_BITS".into());
+                    }
                 }
                 "TRANSITION_STEPS" => {
-                    transition_steps = Some(self.parse_polynomial_declaration("TRANSITION_STEPS")?)
+                    let value = self.parse_polynomial_declaration("TRANSITION_STEPS")?;
+                    if transition_steps.replace(value).is_some() {
+                        return Err("Duplicate FAMILY field TRANSITION_STEPS".into());
+                    }
                 }
                 "UNIFORM" => {
+                    if uniform {
+                        return Err("Duplicate FAMILY field UNIFORM".into());
+                    }
                     uniform = true;
                     self.expect_semicolon("UNIFORM")?;
                 }
                 "TOTAL" => {
+                    if total {
+                        return Err("Duplicate FAMILY field TOTAL".into());
+                    }
                     total = true;
                     self.expect_semicolon("TOTAL")?;
                 }
                 "READOUT_INVARIANT" => {
+                    if readout {
+                        return Err("Duplicate FAMILY field READOUT_INVARIANT".into());
+                    }
                     readout = true;
                     self.expect_semicolon("READOUT_INVARIANT")?;
                 }
                 "IDEAL_DEUTSCH" => {
+                    if deutsch {
+                        return Err("Duplicate FAMILY field IDEAL_DEUTSCH".into());
+                    }
                     deutsch = true;
                     self.expect_semicolon("IDEAL_DEUTSCH")?;
                 }
                 "EFFECTS_FROZEN" => {
+                    if effects {
+                        return Err("Duplicate FAMILY field EFFECTS_FROZEN".into());
+                    }
                     effects = true;
                     self.expect_semicolon("EFFECTS_FROZEN")?;
                 }

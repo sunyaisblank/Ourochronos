@@ -1659,7 +1659,10 @@ pub mod server {
         };
 
         let init_result_json = serde_json::to_value(init_result)?;
-        connection.initialize(init_result_json)?;
+        // initialize() accepts bare capabilities and wraps them. We already
+        // have the complete InitializeResult, including serverInfo.
+        let (initialize_id, _) = connection.initialize_start()?;
+        connection.initialize_finish(initialize_id, init_result_json)?;
 
         eprintln!("OUROCHRONOS LSP Server initialized");
 
@@ -1685,6 +1688,9 @@ pub mod server {
             }
         }
 
+        // The stdio writer waits until every sender is dropped. Retaining the
+        // connection here would keep shutdown blocked after its reply.
+        drop(connection);
         io_threads.join()?;
         eprintln!("OUROCHRONOS LSP Server stopped");
         Ok(())
@@ -1741,8 +1747,9 @@ pub mod server {
                 let uri = params.text_document.uri.to_string();
                 let version = params.text_document.version;
 
-                // We use full sync, so there's exactly one change with the full text
-                if let Some(change) = params.content_changes.into_iter().next() {
+                // Every FULL change replaces the document. The last snapshot
+                // is the result after applying the list in received order.
+                if let Some(change) = params.content_changes.into_iter().next_back() {
                     let diagnostics = analyzer.update_document(&uri, &change.text, version);
                     publish_diagnostics(conn, &uri, diagnostics, Some(version))?;
                 }

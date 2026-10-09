@@ -1,0 +1,7 @@
+// Coupled Boolean feedback F(x,y,z)=(y XOR z,z,0) clears after three epochs.
+// The affine checker classifies every recurrent class without enumerating 8 states.
+TEMPORAL 0 3 BITS 1 {
+    1 ORACLE 2 ORACLE XOR 0 PROPHECY
+    2 ORACLE 1 PROPHECY
+    0 2 PROPHECY
+}

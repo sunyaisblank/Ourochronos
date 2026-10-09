@@ -1,0 +1,5 @@
+# One complete two-state point domain; every transition flips its bit.
+# Emit bytecode, then use prove-finite/check-finite with memory 1 and gas 64.
+TEMPORAL 0 1 BITS 1 {
+    0 ORACLE 1 XOR 0 PROPHECY
+}

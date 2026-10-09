@@ -8,7 +8,7 @@
 //! a solver is invoked.
 
 use crate::ast::{Procedure, Program, Stmt};
-use crate::temporal::ir::TemporalIrCompiler;
+use crate::temporal::ir::temporal_ir_supports_opcode;
 use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 
@@ -213,7 +213,7 @@ fn scan_region<'a>(
                     id.as_u64()
                 ),
             ),
-            Stmt::Op(op) if TemporalIrCompiler::supports_opcode(*op) => {}
+            Stmt::Op(op) if temporal_ir_supports_opcode(*op) => {}
             Stmt::Op(op) => issue(
                 report,
                 region,

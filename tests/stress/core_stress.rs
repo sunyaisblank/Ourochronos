@@ -24,6 +24,7 @@ use std::collections::BTreeSet;
 #[ignore]
 fn stress_memory_writes_1m() {
     let mut mem = Memory::new();
+    let mut expected = vec![0u64; 65536];
     let mut rng_state: u64 = 0xDEADBEEF;
 
     // Simple LCG for deterministic pseudo-random numbers
@@ -37,21 +38,18 @@ fn stress_memory_writes_1m() {
         let addr = next_rand() % 65536;
         let val = next_rand();
         mem.write(addr, Value::new(val));
+        expected[addr as usize] = val;
     }
 
-    // Verify hash is consistent (this implicitly tests the hash_mix function)
-    let hash = mem.state_hash();
-    assert!(
-        hash != 0 || mem.is_empty(),
-        "Hash should be non-zero for non-empty memory"
-    );
-
-    // Verify non-zero cells exist
-    let non_zero = mem.non_zero_cells();
-    assert!(
-        !non_zero.is_empty(),
-        "Memory should have non-zero cells after writes"
-    );
+    // Reconstruct the independently tracked final store with a different write
+    // history, so lost writes and stale incremental hash updates are observable.
+    let mut reconstructed = Memory::new();
+    for (addr, &value) in expected.iter().enumerate() {
+        assert_eq!(mem.read(addr as u64).val, value, "address {addr}");
+        reconstructed.write(addr as u64, Value::new(value));
+    }
+    assert_eq!(mem.state_hash(), reconstructed.state_hash());
+    assert!(mem.values_equal(&reconstructed));
 }
 
 /// Stress test: Write-read cycles with hash verification.
@@ -210,8 +208,8 @@ fn stress_stack_operations_100k() {
     assert_eq!(stack.depth(), 50_000);
 
     // Pop 25K values
-    for _ in 0..25_000 {
-        let _ = stack.pop();
+    for expected in (25_000..50_000).rev() {
+        assert_eq!(stack.pop().unwrap().val, expected);
     }
     assert_eq!(stack.depth(), 25_000);
 
@@ -224,8 +222,11 @@ fn stress_stack_operations_100k() {
         stack.push(Value::new(42));
     }
 
-    // Stack should be at expected depth
-    assert!(stack.depth() > 0);
+    assert_eq!(stack.depth(), 25_000);
+    for (index, value) in stack.as_slice()[..24_999].iter().enumerate() {
+        assert_eq!(value.val, index as u64);
+    }
+    assert_eq!(stack.peek().unwrap().val, 42);
 }
 
 /// Stress test: Stack with max depth under pressure.

@@ -248,4 +248,16 @@ mod tests {
         let error = parse("FAMILY bad { CTC_CELLS POLY 1 1 0; }").unwrap_err();
         assert!(error.contains("CHRONOLOGY_BITS"));
     }
+
+    #[test]
+    fn duplicate_family_claims_are_rejected_instead_of_overwritten() {
+        let error = parse(
+            "FAMILY bad {\n\
+             CTC_CELLS POLY 1 1 0; CTC_CELLS POLY 999 9 9;\n\
+             CHRONOLOGY_BITS POLY 1 1 0; TRANSITION_STEPS POLY 1 1 0;\n\
+             }",
+        )
+        .unwrap_err();
+        assert!(error.contains("Duplicate FAMILY field CTC_CELLS"));
+    }
 }

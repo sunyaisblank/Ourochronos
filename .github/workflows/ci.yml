@@ -17,7 +17,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.85.0
         with:
           components: rustfmt, clippy
 
@@ -31,7 +31,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-rust-1.85.0-cargo-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Run cargo check
         run: cargo check --all-targets --all-features --locked
@@ -39,17 +39,40 @@ jobs:
       - name: Run clippy
         run: cargo clippy --all-targets --all-features --locked -- -D warnings
 
-      - name: Run unit tests
-        run: cargo test --lib --all-features --locked
+      - name: Run library, integration, independent oracle and certificate targets
+        run: cargo test --all-targets --all-features --locked
 
-      - name: Run integration tests
-        run: cargo test --test main --all-features --locked
+      - name: Exercise the actual CLI, REPL and LSP interfaces
+        run: |
+          cargo build --all-features --locked
+          python3 scripts/qualify_interfaces.py --runtime target/debug/ourochronos --report "$RUNNER_TEMP/interface-qualification-report.json"
 
-      - name: Run property tests
-        run: cargo test property_tests --all-features --locked
+      - name: Run bounded verified phase workloads
+        run: |
+          cargo build --release --example bench_case_studies --locked
+          ulimit -v 524288
+          for phase in parse modules-hir objects link verify ir smt-text package vm-dense vm-wide vm-repeated provenance orbit-journal exact; do
+            timeout 15s target/release/examples/bench_case_studies --phase "$phase" 5
+          done
 
-      - name: Run determinism tests
-        run: cargo test determinism_tests --all-features --locked
+      - name: Check public API documentation
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --no-deps --all-features --locked
+
+      - name: Verify the source distribution by rebuilding its packaged bytes
+        run: cargo package --all-features --locked
+
+      - name: Run the explicitly excluded release stress gates
+        run: cargo test --release --test main --all-features --locked -- --ignored
+
+      - name: Retain interface evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-interface-evidence
+          path: ${{ runner.temp }}/interface-qualification-report.json
+          if-no-files-found: ignore
 
   format:
     runs-on: ubuntu-latest
@@ -58,7 +81,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.85.0
         with:
           components: rustfmt
 
@@ -78,7 +101,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.85.0
 
       - name: Install native solver dependencies
         run: sudo apt-get update && sudo apt-get install -y clang libclang-dev libz3-dev
@@ -104,7 +127,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y clang libclang-dev libz3-dev
 
       - name: Install cargo-tarpaulin
-        run: cargo install cargo-tarpaulin
+        run: cargo +stable install cargo-tarpaulin --locked
 
       - name: Generate coverage report
         run: cargo tarpaulin --all-features --out xml
@@ -125,10 +148,14 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install cargo-audit
-        run: cargo install cargo-audit
+        run: cargo +stable install cargo-audit --locked
 
       - name: Run security audit
-        run: cargo audit
+        run: |
+          # The retained advisory concerns an unused Rust owner, not Solver's
+          # native tactics. Fail any change to its reviewed exposure first.
+          python3 scripts/check_solver_usage.py
+          cargo audit --ignore RUSTSEC-2026-0295
 
   msrv:
     runs-on: ubuntu-latest
@@ -144,3 +171,84 @@ jobs:
 
       - name: Check MSRV compatibility
         run: cargo check --all-targets --all-features --locked
+
+  container:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the declared container runtime
+        run: docker build --tag ourochronos-qualified .
+      - name: Execute the actual packaged runtime
+        run: |
+          docker run --rm ourochronos-qualified --version
+          docker run --rm --volume "$PWD/examples:/app/programs:ro" ourochronos-qualified /app/programs/hello.ouro
+
+  formal:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check the pinned Lean simulation theorem
+        run: |
+          curl --fail --location --retry 2 --output "$RUNNER_TEMP/lean.tar.zst" https://github.com/leanprover/lean4/releases/download/v4.29.1/lean-4.29.1-linux.tar.zst
+          echo "bf062d29556d655685fb287563c249ad6a8fde34352c18b5e32568a595c1aec1  $RUNNER_TEMP/lean.tar.zst" | sha256sum --check
+          mkdir "$RUNNER_TEMP/qualified-lean"
+          tar --zstd --extract --file "$RUNNER_TEMP/lean.tar.zst" --strip-components=1 --directory "$RUNNER_TEMP/qualified-lean"
+          "$RUNNER_TEMP/qualified-lean/bin/lean" formal/CounterMachine.lean
+
+  quantum-research:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12.3'
+      - name: Run the bounded independent numerical investigation
+        run: |
+          python -m venv "$RUNNER_TEMP/quantum-venv"
+          python examples/quantum_fixed_space.py --requirements > "$RUNNER_TEMP/quantum.lock"
+          "$RUNNER_TEMP/quantum-venv/bin/python" -m pip install --only-binary=:all: --require-hashes -r "$RUNNER_TEMP/quantum.lock"
+          "$RUNNER_TEMP/quantum-venv/bin/python" tests/quantum_research.py --report target/quantum-research-report.json
+
+      - name: Retain bounded numerical evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: quantum-research-evidence
+          path: target/quantum-research-report.json
+          if-no-files-found: ignore
+
+  windows-build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cross-build the pinned Windows GNU runtime and solver
+        run: |
+          docker build --file scripts/windows.Dockerfile --tag ourochronos-windows .
+          docker create --name ourochronos-windows-export ourochronos-windows
+          mkdir windows-runtime
+          docker cp ourochronos-windows-export:/artifact/. windows-runtime/
+          docker rm ourochronos-windows-export
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-runtime
+          path: windows-runtime
+
+  windows-portable:
+    needs: windows-build
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-runtime
+          path: windows-runtime
+      - name: Execute the actual Windows portable workflows
+        shell: powershell
+        run: ./scripts/qualify_windows.ps1 -Runtime (Resolve-Path windows-runtime/ourochronos.exe) -Report windows-runtime/qualification.json
+      - name: Retain Windows workflow evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-portable-evidence
+          path: windows-runtime/qualification.json
+          if-no-files-found: ignore

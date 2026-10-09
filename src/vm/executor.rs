@@ -6,14 +6,13 @@
 //! The fixed-point search (in timeloop.rs) repeatedly runs epochs until
 //! Present = Anamnesis (temporal consistency achieved).
 
+use crate::admission::{admit_program, AdmissionConfig};
 use crate::ast::Program;
 #[cfg(test)]
 use crate::ast::{OpCode, Stmt};
-use crate::bytecode::{BytecodeProgram, Instruction};
-use crate::bytecode_verifier::verify_default as verify_bytecode;
+use crate::bytecode::Instruction;
 use crate::bytecode_vm::{
     BytecodeExecution, BytecodeVm, BytecodeVmConfig, BytecodeVmError, BytecodeVmStatus,
-    PreparedBytecode,
 };
 #[cfg(test)]
 use crate::core::error::{BoundsPolicy, MemoryOperation, SourceLocation};
@@ -23,15 +22,12 @@ use crate::core::provenance::Provenance;
 #[cfg(test)]
 use crate::core::Address;
 use crate::core::{DataStructures, Memory, OutputItem, PagedMemory, Value};
-use crate::hir::HirProgram;
 #[cfg(test)]
 use crate::runtime::ffi::FFICaller;
 use crate::runtime::ffi::FFIContext;
 use crate::runtime::io::IOContext;
 #[cfg(test)]
 use crate::runtime::io::{FileMode, SeekOrigin};
-use crate::semantics::check as check_semantics;
-use crate::types::type_check;
 use std::io::{self, BufRead, Read, Write};
 
 /// Status of epoch execution.
@@ -335,26 +331,14 @@ impl Executor {
             ));
         }
 
-        let type_report = type_check(program);
-        if !type_report.is_valid {
-            return Err(ExecutorFailure::admission(format!(
-                "semantic analysis failed during type checking: {:?}",
-                type_report.errors
-            )));
-        }
-        let hir = HirProgram::resolve(program).map_err(|errors| {
-            ExecutorFailure::admission(format!("HIR resolution failed: {errors:?}"))
-        })?;
-        let semantics = check_semantics(&hir);
-        if !semantics.is_accepted_for_interpreter() {
-            return Err(ExecutorFailure::admission(format!(
-                "semantic analysis failed: {:?}",
-                semantics.errors
-            )));
-        }
-        let bytecode = BytecodeProgram::compile(&hir).map_err(|error| {
-            ExecutorFailure::admission(format!("bytecode lowering failed: {error}"))
-        })?;
+        let admitted = admit_program(
+            program,
+            AdmissionConfig {
+                memory_cells: anamnesis.len(),
+            },
+        )
+        .map_err(|error| ExecutorFailure::admission(format!("source admission failed: {error}")))?;
+        let bytecode = admitted.program();
 
         if self.config.error_config.division_by_zero != DivisionByZeroPolicy::ReturnZero
             && bytecode.instructions.iter().any(|instruction| {
@@ -369,12 +353,6 @@ impl Executor {
             ));
         }
 
-        verify_bytecode(&bytecode).map_err(|error| {
-            ExecutorFailure::admission(format!("independent bytecode verification failed: {error}"))
-        })?;
-        let prepared = PreparedBytecode::new(bytecode).map_err(|error| {
-            ExecutorFailure::admission(format!("bytecode preparation failed: {error}"))
-        })?;
         let memory = memory_to_paged(anamnesis).map_err(ExecutorFailure::admission)?;
         let max_stack_depth = match self.config.error_config.max_stack_depth {
             0 => usize::MAX,
@@ -389,7 +367,7 @@ impl Executor {
             ..BytecodeVmConfig::default()
         });
         let execution = vm
-            .run_prepared(&prepared, &memory)
+            .run_prepared(admitted.executable(), &memory)
             .map_err(ExecutorFailure::runtime)?;
         if !execution.effects.is_empty() {
             return Err(ExecutorFailure::admission(
@@ -2180,7 +2158,7 @@ mod tests {
 
         match result.status {
             EpochStatus::Error(message) => {
-                assert!(message.contains("semantic analysis failed"), "{message}");
+                assert!(message.contains("structural semantics failed"), "{message}");
             }
             status => panic!("expected semantic rejection, got {status:?}"),
         }

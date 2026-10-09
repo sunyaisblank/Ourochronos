@@ -1,0 +1,29 @@
+name: Contract or behavior change
+description: Report a defect or propose a bounded change with acceptance checks.
+body:
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Affected behavior and expected contract
+      description: Identify the input, mode, source locations and expected outcome; include reference evidence and assumptions where relevant.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Current behavior and evidence
+      description: Provide a minimal reproduction or code argument. Distinguish an observed defect from a suspected problem or missing evidence.
+    validations:
+      required: true
+  - type: textarea
+    id: repair
+    attributes:
+      label: Proposed repair and dependencies
+      description: Describe the smallest coherent change and any shared prerequisites.
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance checks
+      description: Specify finite checks that establish the required result, including relevant rejection and recovery cases.
+    validations:
+      required: true

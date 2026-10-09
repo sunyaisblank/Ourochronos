@@ -129,6 +129,9 @@ impl NativeEffectAdapter {
     }
 
     fn authorize(&self, effect: &EffectIntent) -> Result<(), String> {
+        if !cfg!(target_os = "linux") {
+            return Err("native effect commits are supported on Linux only".to_string());
+        }
         match effect {
             EffectIntent::FileWrite { path, .. } | EffectIntent::FileSetLength { path, .. } => {
                 let path = Path::new(path);
@@ -414,6 +417,7 @@ impl NativeEffectAdapter {
             return Err(format!(
                 "secure missing-file creation is unsupported on this platform for '{path}'"
             ));
+            #[cfg(unix)]
             files.handles.insert(path.to_string(), file);
         }
         files
@@ -810,12 +814,6 @@ mod tests {
                 Ok(())
             })
             .register_custom("fail", |_| Err("deliberate failure".to_string()));
-        let receipt = CommitReceipt {
-            token: CommitToken(46),
-            timeline: crate::temporal::transaction::TimelineId(1),
-            batch_digest: 0xDD,
-            sequence: 0,
-        };
         let effects = [
             EffectIntent::Custom {
                 namespace: "first".to_string(),
@@ -827,10 +825,35 @@ mod tests {
             },
         ];
 
-        let first = adapter.apply_selected(&receipt, &effects).unwrap_err();
-        let replay = adapter.apply_selected(&receipt, &effects).unwrap_err();
-        assert_eq!(first, "deliberate failure");
+        let mut transaction =
+            TemporalTransaction::new(Vec::new(), TransactionLimits::default()).unwrap();
+        let mut context = transaction.begin_candidate().unwrap();
+        for effect in &effects {
+            context.stage_effect(effect.clone()).unwrap();
+        }
+        let timeline = transaction
+            .stage_candidate(context.finish(Vec::new()).unwrap())
+            .unwrap();
+        transaction.select(timeline).unwrap();
+        let mut log = CommitLog::default();
+        let token = CommitToken(46);
+        let first = transaction
+            .commit_selected_with_adapter(token, &mut log, &mut adapter)
+            .unwrap_err();
+        let replay = transaction
+            .commit_selected_with_adapter(token, &mut log, &mut adapter)
+            .unwrap_err();
+        assert!(matches!(&first,
+            crate::temporal::transaction::TransactionError::EffectAdapterFailed { message, .. }
+            if message == "deliberate failure"
+        ));
         assert_eq!(replay, first);
+        assert_eq!(
+            adapter
+                .apply_selected(&log.batches()[0].receipt, &effects)
+                .unwrap_err(),
+            "deliberate failure"
+        );
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 

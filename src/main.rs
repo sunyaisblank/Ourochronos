@@ -1,10 +1,10 @@
 use ourochronos::audit::{self, ActionCategory, AuditConfig, AuditEntry, AuditFormat, Severity};
 use ourochronos::{
-    build_native_launcher, bytecode_vm_supports, check_semantics, embedded_package, link,
+    build_native_artifact_launcher, bytecode_vm_supports, check_semantics, embedded_artifact,
     link_with_metadata, type_check, types, verify_bytecode, ActionConfig, BytecodeProgram,
     BytecodeTimeLoop, BytecodeTimeLoopConfig, BytecodeVmConfig, ConvergenceStatus, ErrorConfig,
     Instruction, ModuleGraph, ObjectModule, ObligationKind, OpCode, PackageManifest,
-    PackageWitness, PortablePackage, TemporalIrConfig,
+    PackageWitness, PortableArtifact, PortableArtifactPayload, PortablePackage, TemporalIrConfig,
 };
 use std::env;
 use std::fs;
@@ -174,6 +174,13 @@ const FLAGS: &[FlagSpec] = &[
         help: &["Verify every source PROPERTY over all point fixed states"],
     },
     FlagSpec {
+        name: "--verify-family",
+        alias: None,
+        arity: Arity::Value,
+        metavar: "<bitstring>",
+        help: &["Verify one finite FAMILY specialization for an exact binary input"],
+    },
+    FlagSpec {
         name: "--artifact",
         alias: None,
         arity: Arity::Value,
@@ -192,14 +199,14 @@ const FLAGS: &[FlagSpec] = &[
         alias: None,
         arity: Arity::Value,
         metavar: "<n>",
-        help: &["Bits per cell in --recurrent domain (default: 1)"],
+        help: &["Bits per cell in recurrent/family domain (default: 1)"],
     },
     FlagSpec {
         name: "--state-limit",
         alias: None,
         arity: Arity::Value,
         metavar: "<n>",
-        help: &["Maximum states enumerated by --recurrent (default: 65536)"],
+        help: &["Maximum states enumerated by recurrent/family proof (default: 65536)"],
     },
     FlagSpec {
         name: "--solver-timeout",
@@ -386,7 +393,7 @@ const FLAGS: &[FlagSpec] = &[
         alias: Some("-V"),
         arity: Arity::None,
         metavar: "",
-        help: &["Show version"],
+        help: &["Show version, platform and compiled features"],
     },
 ];
 
@@ -399,6 +406,12 @@ fn print_usage() {
     println!("       ourochronos repl");
     println!("       ourochronos link <output.ourobc> <input.ouroobj>...");
     println!("       ourochronos run-package <file.ouropkg>");
+    println!("       ourochronos prove-finite <file.ourobc> <proof.ourofp> <memory-cells> <gas>");
+    println!("       ourochronos check-finite <file.ourobc> <proof.ourofp> <memory-cells> <gas>");
+    println!("       ourochronos halt-slice <file.ourobc> <saved.ourocp> <slice> <memory-cells> <ceiling>");
+    println!("       ourochronos analyse-affine <file.ourobc> <parity-mask> <memory-cells> <gas>");
+    println!("       ourochronos isolate <wall-ms> <memory-MiB> <source.ouro> [analysis flags]");
+    println!("       ourochronos halt-resume <file.ourobc> <saved.ourocp> <slice> <memory-cells> <ceiling>");
     println!();
     println!("Options:");
     for flag in FLAGS {
@@ -466,6 +479,8 @@ fn write_native_launcher_file(
     runtime_path: &Path,
 ) -> Result<(), String> {
     write_binary_file(path, contents)?;
+    #[cfg(not(unix))]
+    let _ = runtime_path;
     #[cfg(unix)]
     {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -500,6 +515,15 @@ fn print_output_items(output: &[ourochronos::OutputItem]) {
     if !output.is_empty() {
         println!();
     }
+}
+
+fn print_unsat_evidence(certificate: &ourochronos::UnsatCertificate) {
+    println!(
+        "  UNSAT evidence: format v{}, {} query bytes + {} proof bytes; fresh Z3 replay verified.",
+        certificate.evidence_format,
+        certificate.solver_query.len(),
+        certificate.backend_proof.len()
+    );
 }
 
 fn finish_bytecode_standard(outcome: ConvergenceStatus) -> i32 {
@@ -591,6 +615,43 @@ fn finish_bytecode_orbit(outcome: ConvergenceStatus, diagnostic: bool) -> i32 {
 }
 
 #[allow(clippy::too_many_arguments)]
+fn construct_linked_package_artifact(
+    name: String,
+    memory_cells: usize,
+    max_instructions: u64,
+    memory_bounds: ourochronos::BoundsPolicy,
+    linked: ourochronos::LinkedProgram,
+    embed_global_witness: bool,
+    runtime_global_package: bool,
+    solver_timeout_ms: u64,
+    loop_unroll_limit: usize,
+) -> Result<PortableArtifact, String> {
+    let artifact = PortableArtifact::from_linked(linked).map_err(|error| error.to_string())?;
+    let PortableArtifact {
+        payload: PortableArtifactPayload::Bytecode(program),
+        provenance,
+    } = artifact
+    else {
+        return Err("linked source did not produce a bytecode payload".into());
+    };
+    let package = construct_portable_package(
+        name,
+        memory_cells,
+        max_instructions,
+        memory_bounds,
+        program,
+        embed_global_witness,
+        runtime_global_package,
+        solver_timeout_ms,
+        loop_unroll_limit,
+    )?;
+    Ok(PortableArtifact {
+        payload: PortableArtifactPayload::Package(package),
+        provenance,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
 fn construct_portable_package(
     name: String,
     memory_cells: usize,
@@ -634,9 +695,13 @@ fn construct_portable_package(
         ourochronos::GlobalSolveResult::ProvenNoFixedPoint(_) => {
             return Err("cannot embed a witness: the program has no point fixed state".to_string());
         }
-        ourochronos::GlobalSolveResult::Unknown { reason, .. } => {
+        ourochronos::GlobalSolveResult::Unknown {
+            reason,
+            completeness,
+            ..
+        } => {
             return Err(format!(
-                "cannot embed an incomplete/unknown witness: {reason}"
+                "cannot embed an incomplete/unknown witness: {reason}; IR completeness: {completeness:?}"
             ));
         }
         ourochronos::GlobalSolveResult::Unsupported { reason } => {
@@ -658,7 +723,10 @@ fn construct_portable_package(
         .map_err(|error| error.to_string())
 }
 
-fn execute_portable_package(package: PortablePackage) -> i32 {
+fn execute_portable_package(
+    package: PortablePackage,
+    diagnostic_sources: Vec<ourochronos::ObjectSourceFile>,
+) -> i32 {
     if let Err(error) = verify_bytecode(&package.program) {
         eprintln!("Package Error: bytecode verification failed: {error}");
         return EXIT_ERROR;
@@ -730,12 +798,18 @@ fn execute_portable_package(package: PortablePackage) -> i32 {
                     eprintln!("Package Error: runtime solver witness failed independent replay");
                     return EXIT_ERROR;
                 }
-                ourochronos::GlobalSolveResult::ProvenNoFixedPoint(_) => {
+                ourochronos::GlobalSolveResult::ProvenNoFixedPoint(certificate) => {
                     println!("PROVEN NO POINT FIXED STATE for packaged runtime-global policy.");
+                    print_unsat_evidence(&certificate);
                     return EXIT_PARADOX;
                 }
-                ourochronos::GlobalSolveResult::Unknown { reason, .. } => {
+                ourochronos::GlobalSolveResult::Unknown {
+                    reason,
+                    completeness,
+                    ..
+                } => {
                     println!("UNKNOWN packaged global resolution: {reason}");
+                    println!("IR completeness: {completeness:?}");
                     return EXIT_TIMEOUT;
                 }
                 ourochronos::GlobalSolveResult::Unsupported { reason } => {
@@ -752,6 +826,7 @@ fn execute_portable_package(package: PortablePackage) -> i32 {
     let driver = match BytecodeTimeLoop::new(BytecodeTimeLoopConfig {
         memory_cells,
         initial_state,
+        diagnostic_sources,
         vm: BytecodeVmConfig {
             max_instructions: package.manifest.max_instructions,
             memory_bounds: package.manifest.memory_bounds,
@@ -768,6 +843,277 @@ fn execute_portable_package(package: PortablePackage) -> i32 {
     finish_bytecode_standard(driver.run(&package.program))
 }
 
+fn execute_package_artifact(artifact: PortableArtifact) -> i32 {
+    let diagnostic_sources = artifact
+        .provenance
+        .map(|provenance| provenance.source_files)
+        .unwrap_or_default();
+    match artifact.payload {
+        PortableArtifactPayload::Package(package) => {
+            execute_portable_package(package, diagnostic_sources)
+        }
+        PortableArtifactPayload::Bytecode(_) => {
+            eprintln!("Package Error: artifact has no package runtime/resolution manifest");
+            EXIT_ERROR
+        }
+    }
+}
+
+fn run_finite_certificate(args: &[String]) -> i32 {
+    use ourochronos::finite_proof::{
+        check_certificate, generate_certificate, FiniteNoFixedPointCertificate, FiniteProofConfig,
+        FiniteProofQuery, MAX_FINITE_PROOF_BYTES,
+    };
+
+    if args.len() != 6 {
+        return fail_usage(
+            "prove-finite/check-finite require bytecode, certificate, memory-cells, and gas",
+        );
+    }
+    let memory_cells = match args[4].parse::<usize>() {
+        Ok(value) if value > 0 => value,
+        _ => return fail_usage("finite proof memory-cells must be a positive integer"),
+    };
+    let max_instructions = match args[5].parse::<u64>() {
+        Ok(value) if value > 0 => value,
+        _ => return fail_usage("finite proof gas must be a positive integer"),
+    };
+    let operation = || -> Result<_, String> {
+        let bytes = read_bounded_regular_file(
+            &args[2],
+            ourochronos::MAX_PORTABLE_ARTIFACT_BYTES,
+            "finite proof bytecode",
+        )?;
+        let artifact = PortableArtifact::from_bytes(&bytes).map_err(|error| error.to_string())?;
+        let PortableArtifactPayload::Bytecode(program) = artifact.payload else {
+            return Err(
+                "finite proof requires bytecode; package runtime policies are a separate contract"
+                    .into(),
+            );
+        };
+        let config = FiniteProofConfig {
+            memory_cells,
+            max_instructions,
+            ..FiniteProofConfig::default()
+        };
+        let query = FiniteProofQuery::NoFixedPoint;
+        let certificate = if args[1] == "prove-finite" {
+            generate_certificate(&program, &config, query).map_err(|error| error.to_string())?
+        } else {
+            let bytes = read_bounded_regular_file(
+                &args[3],
+                MAX_FINITE_PROOF_BYTES,
+                "finite proof certificate",
+            )?;
+            FiniteNoFixedPointCertificate::from_bytes(&bytes).map_err(|error| error.to_string())?
+        };
+        let verified = check_certificate(&certificate, &program, &config, query)
+            .map_err(|error| error.to_string())?;
+        if args[1] == "prove-finite" {
+            let bytes = certificate.to_bytes().map_err(|error| error.to_string())?;
+            write_binary_file(&args[3], &bytes)?;
+        }
+        Ok(verified)
+    };
+    match operation() {
+        Ok(verified) => {
+            println!(
+                "CHECKED NO POINT FIXED STATE: {} states, independent finite checker v{}; memory {}, gas {}.",
+                verified.enumerated_states,
+                ourochronos::finite_proof::FINITE_PROOF_SEMANTICS_VERSION,
+                memory_cells,
+                max_instructions
+            );
+            EXIT_OK
+        }
+        Err(error) => {
+            eprintln!("Finite Proof Error: {error}");
+            EXIT_ERROR
+        }
+    }
+}
+
+fn run_affine_analysis(args: &[String]) -> i32 {
+    use ourochronos::temporal::affine_recurrence::{
+        certify_affine_recurrence, check_affine_bytecode_binding,
+        check_affine_recurrence_certificate, extract_affine_bytecode, AffineExtractionConfig,
+        AffineReadout, AffineReadoutOutcome,
+    };
+    if args.len() != 6 {
+        return fail_usage("analyse-affine requires bytecode, parity-mask, memory-cells, and gas");
+    }
+    let mask = match args[3].parse::<u64>() {
+        Ok(value) => value,
+        _ => return fail_usage("affine parity-mask must be an unsigned 64-bit integer"),
+    };
+    let memory_cells = match args[4].parse::<usize>() {
+        Ok(value) if value > 0 => value,
+        _ => return fail_usage("affine memory-cells must be a positive integer"),
+    };
+    let max_instructions = match args[5].parse::<u64>() {
+        Ok(value) if value > 0 => value,
+        _ => return fail_usage("affine gas must be a positive integer"),
+    };
+    let operation = || -> Result<_, String> {
+        let bytes = read_bounded_regular_file(
+            &args[2],
+            ourochronos::MAX_PORTABLE_ARTIFACT_BYTES,
+            "affine bytecode",
+        )?;
+        let artifact = PortableArtifact::from_bytes(&bytes).map_err(|error| error.to_string())?;
+        let PortableArtifactPayload::Bytecode(program) = artifact.payload else {
+            return Err("affine analysis requires bytecode; package runtime policies are a separate contract".into());
+        };
+        let config = AffineExtractionConfig {
+            memory_cells,
+            max_instructions,
+            ..AffineExtractionConfig::default()
+        };
+        let extracted =
+            extract_affine_bytecode(&program, &config).map_err(|error| error.to_string())?;
+        check_affine_bytecode_binding(&extracted, &program, &config)
+            .map_err(|error| error.to_string())?;
+        let query = AffineReadout {
+            mask,
+            constant: false,
+        };
+        let certificate = certify_affine_recurrence(&extracted.model, query)
+            .map_err(|error| error.to_string())?;
+        check_affine_recurrence_certificate(&certificate, &extracted.model, query)
+            .map_err(|error| error.to_string())
+    };
+    match operation() {
+        Ok(verified) => {
+            println!("CHECKED AFFINE RECURRENCE: {} Boolean cells; all {} recurrent classes are point fixed states; transient bound {}.",
+                verified.bits, verified.class_count.as_u128().expect("affine class count is bounded by 2^64"), verified.transient_bound);
+            println!("Trust: bytecode extraction plus independent affine-model certificate checker; parity mask {mask}.");
+            match verified.outcome {
+                AffineReadoutOutcome::Uniform { value } => {
+                    println!("UNIFORM PARITY READOUT: {}.", u8::from(value));
+                    EXIT_OK
+                }
+                AffineReadoutOutcome::Disagreement {
+                    zero_state,
+                    one_state,
+                } => {
+                    println!("AMBIGUOUS PARITY READOUT: fixed states {zero_state} and {one_state} give 0 and 1.");
+                    EXIT_PARADOX
+                }
+            }
+        }
+        Err(error) => {
+            eprintln!("Affine Analysis Refused: {error}");
+            EXIT_ERROR
+        }
+    }
+}
+
+fn run_isolated(args: &[String]) -> i32 {
+    use ourochronos::runtime::isolation::{run_bounded, ProcessLimits};
+    use std::io::Write;
+    if args.len() < 5 {
+        return fail_usage(
+            "isolate requires wall-ms, memory-MiB, source, and optional analysis flags",
+        );
+    }
+    let milliseconds = match args[2].parse::<u64>() {
+        Ok(value) if (1..=3_600_000).contains(&value) => value,
+        _ => return fail_usage("isolation wall-ms must be in 1..=3600000"),
+    };
+    let memory_mib = match args[3].parse::<u64>() {
+        Ok(value) if (16..=16384).contains(&value) => value,
+        _ => return fail_usage("isolation memory-MiB must be in 16..=16384"),
+    };
+    let mut child_args = vec![args[0].clone(), args[4].clone()];
+    child_args.extend_from_slice(&args[5..]);
+    if let Err(error) = validate_args(&child_args) {
+        return fail_usage(&error);
+    }
+    let mut index = 2;
+    while index < child_args.len() {
+        let flag = find_flag(&child_args[index]).expect("analysis arguments were validated");
+        if !matches!(
+            flag.name,
+            "--diagnostic"
+                | "--deutsch"
+                | "--action"
+                | "--typecheck"
+                | "--resources"
+                | "--check"
+                | "--smt"
+                | "--global"
+                | "--all-fixed"
+                | "--recurrent"
+                | "--verify"
+                | "--verify-family"
+                | "--state-bits"
+                | "--state-limit"
+                | "--solver-timeout"
+                | "--loop-unroll"
+                | "--stationary"
+                | "--quantum-fixed"
+                | "--seed"
+                | "--seeds"
+                | "--max-inst"
+                | "--halting-bound"
+                | "--memory-cells"
+                | "--fast"
+                | "--strict"
+                | "--permissive"
+                | "--provenance-limit"
+        ) {
+            return fail_usage(&format!(
+                "{} is outside the isolated analysis profile",
+                flag.name
+            ));
+        }
+        index += if flag.arity == Arity::None { 1 } else { 2 };
+    }
+    let executable = match env::current_exe() {
+        Ok(path) => path,
+        Err(error) => {
+            eprintln!("Isolation Error: {error}");
+            return EXIT_ERROR;
+        }
+    };
+    let mut command = std::process::Command::new(executable);
+    command.args(&child_args[1..]);
+    match run_bounded(
+        command,
+        ProcessLimits {
+            wall_time: std::time::Duration::from_millis(milliseconds),
+            address_space_bytes: memory_mib * 1024 * 1024,
+            output_bytes: 1024 * 1024,
+        },
+        None,
+    ) {
+        Ok(output) if output.stopped.is_some() || output.status.code().is_none() => {
+            eprintln!("UNKNOWN isolated execution: stop {:?}, status {}; elapsed {} ms. Partial result output withheld.", output.stopped, output.status, output.elapsed.as_millis());
+            EXIT_TIMEOUT
+        }
+        Ok(output) => {
+            if std::io::stdout()
+                .write_all(&output.stdout)
+                .and_then(|_| std::io::stderr().write_all(&output.stderr))
+                .is_err()
+            {
+                return EXIT_ERROR;
+            }
+            match output.status.code() {
+                Some(code @ 0..=3) => code,
+                _ => {
+                    eprintln!("Isolation Error: child exited with {}", output.status);
+                    EXIT_ERROR
+                }
+            }
+        }
+        Err(error) => {
+            eprintln!("Isolation Error: {error}");
+            EXIT_ERROR
+        }
+    }
+}
+
 fn run_portable_package(args: &[String]) -> i32 {
     let Some(path) = args.get(2) else {
         return fail_usage("run-package requires a package file");
@@ -775,18 +1121,106 @@ fn run_portable_package(args: &[String]) -> i32 {
     if args.len() != 3 {
         return fail_usage("run-package accepts exactly one package file");
     }
-    let bytes =
-        match read_bounded_regular_file(path, ourochronos::MAX_PACKAGE_BYTES, "portable package") {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                eprintln!("Package Error: cannot read '{path}': {error}");
-                return EXIT_ERROR;
-            }
-        };
-    match PortablePackage::from_bytes(&bytes) {
-        Ok(package) => execute_portable_package(package),
+    let bytes = match read_bounded_regular_file(
+        path,
+        ourochronos::MAX_PORTABLE_ARTIFACT_BYTES,
+        "portable package",
+    ) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            eprintln!("Package Error: cannot read '{path}': {error}");
+            return EXIT_ERROR;
+        }
+    };
+    match PortableArtifact::from_bytes(&bytes) {
+        Ok(artifact) => execute_package_artifact(artifact),
         Err(error) => {
             eprintln!("Package Error: {error}");
+            EXIT_ERROR
+        }
+    }
+}
+
+fn run_halting_checkpoint(args: &[String]) -> i32 {
+    use ourochronos::checkpoint::{
+        CheckpointOutcome, ClassicalCheckpoint, ClassicalCheckpointConfig, UnverifiedCheckpoint,
+        MAX_CHECKPOINT_BYTES,
+    };
+    if args.len() != 7 {
+        return fail_usage(
+            "halt-slice/halt-resume require bytecode, checkpoint, slice, memory-cells, and ceiling",
+        );
+    }
+    let allowance = match args[4].parse::<u64>() {
+        Ok(value) => value,
+        _ => return fail_usage("checkpoint slice must be a nonnegative integer"),
+    };
+    let memory_cells = match args[5].parse::<usize>() {
+        Ok(value) if value > 0 => value,
+        _ => return fail_usage("checkpoint memory-cells must be a positive integer"),
+    };
+    let max_instructions = match args[6].parse::<u64>() {
+        Ok(value) if value > 0 => value,
+        _ => return fail_usage("checkpoint ceiling must be a positive integer"),
+    };
+    let operation = || -> Result<i32, String> {
+        let bytes = read_bounded_regular_file(
+            &args[2],
+            ourochronos::MAX_PORTABLE_ARTIFACT_BYTES,
+            "checkpoint bytecode",
+        )?;
+        let artifact = PortableArtifact::from_bytes(&bytes).map_err(|error| error.to_string())?;
+        let PortableArtifactPayload::Bytecode(program) = artifact.payload else {
+            return Err("halting checkpoint requires bytecode; package runtime policies are a separate contract".into());
+        };
+        let config = ClassicalCheckpointConfig {
+            memory_cells,
+            max_instructions,
+            ..ClassicalCheckpointConfig::default()
+        };
+        let checkpoint = if args[1] == "halt-slice" {
+            ClassicalCheckpoint::start(&program, config).map_err(|error| error.to_string())?
+        } else {
+            let bytes =
+                read_bounded_regular_file(&args[3], MAX_CHECKPOINT_BYTES, "halting checkpoint")?;
+            UnverifiedCheckpoint::from_bytes(&bytes)
+                .and_then(|image| image.validate(&program, &config, None))
+                .map_err(|error| error.to_string())?
+        };
+        match checkpoint
+            .run_slice(allowance, None)
+            .map_err(|error| error.to_string())?
+        {
+            CheckpointOutcome::Paused { checkpoint, reason } => {
+                let bytes = checkpoint.to_bytes().map_err(|error| error.to_string())?;
+                write_binary_file(&args[3], &bytes)?;
+                println!(
+                    "UNKNOWN after {} fetched instructions: {reason:?}; saved {}.",
+                    checkpoint.instructions_executed(),
+                    args[3]
+                );
+                Ok(EXIT_TIMEOUT)
+            }
+            CheckpointOutcome::Complete(execution) => {
+                println!(
+                    "HALTED after {} fetched instructions.",
+                    execution.instructions_executed
+                );
+                print_output_items(&execution.output);
+                Ok(EXIT_OK)
+            }
+            CheckpointOutcome::Fault {
+                error,
+                instructions,
+            } => Err(format!(
+                "runtime fault after {instructions} fetched instructions: {error}"
+            )),
+        }
+    };
+    match operation() {
+        Ok(status) => status,
+        Err(error) => {
+            eprintln!("Checkpoint Error: {error}");
             EXIT_ERROR
         }
     }
@@ -814,8 +1248,8 @@ fn run_embedded_package() -> Option<i32> {
             return Some(EXIT_ERROR);
         }
     };
-    match embedded_package(&bytes) {
-        Ok(Some(package)) => Some(execute_portable_package(package)),
+    match embedded_artifact(&bytes) {
+        Ok(Some(artifact)) => Some(execute_package_artifact(artifact)),
         Ok(None) => None,
         Err(error) => {
             eprintln!("Launcher Error: {error}");
@@ -867,24 +1301,25 @@ fn link_portable_objects(args: &[String]) -> i32 {
             }
         }
     }
-    let program = match link(&objects) {
-        Ok(program) => program,
+    let linked = match link_with_metadata(&objects) {
+        Ok(linked) => linked,
         Err(error) => {
             eprintln!("Link Error: {error}");
             return EXIT_ERROR;
         }
     };
-    if let Err(error) = verify_bytecode(&program) {
+    if let Err(error) = verify_bytecode(&linked.code) {
         eprintln!("Link Error: linked bytecode verification failed: {error}");
         return EXIT_ERROR;
     }
-    let artifact = match program.to_bytes() {
-        Ok(artifact) => artifact,
-        Err(error) => {
-            eprintln!("Link Error: cannot serialize linked bytecode: {error}");
-            return EXIT_ERROR;
-        }
-    };
+    let artifact =
+        match PortableArtifact::from_linked(linked).and_then(|artifact| artifact.to_bytes()) {
+            Ok(artifact) => artifact,
+            Err(error) => {
+                eprintln!("Link Error: cannot serialize linked bytecode: {error}");
+                return EXIT_ERROR;
+            }
+        };
     match write_binary_file(output, &artifact) {
         Ok(()) => {
             println!("Wrote linked bytecode: {output}");
@@ -1267,6 +1702,17 @@ fn run() -> i32 {
     }
     if args.iter().skip(1).any(|a| a == "--version" || a == "-V") {
         println!("ourochronos {}", env!("CARGO_PKG_VERSION"));
+        println!(
+            "platform: {}-{}; runtime ABI {}; native effect commits: Linux only",
+            std::env::consts::ARCH,
+            std::env::consts::OS,
+            ourochronos::package::CURRENT_RUNTIME_ABI
+        );
+        println!(
+            "compiled features: lsp={} dynamic-ffi={}; Z3 native library required",
+            cfg!(feature = "lsp"),
+            cfg!(feature = "dynamic-ffi")
+        );
         return EXIT_OK;
     }
 
@@ -1309,6 +1755,18 @@ fn run() -> i32 {
     if args[1] == "run-package" {
         return run_portable_package(&args);
     }
+    if matches!(args[1].as_str(), "prove-finite" | "check-finite") {
+        return run_finite_certificate(&args);
+    }
+    if matches!(args[1].as_str(), "halt-slice" | "halt-resume") {
+        return run_halting_checkpoint(&args);
+    }
+    if args[1] == "analyse-affine" {
+        return run_affine_analysis(&args);
+    }
+    if args[1] == "isolate" {
+        return run_isolated(&args);
+    }
     if args[1] == "link" {
         return link_portable_objects(&args);
     }
@@ -1332,6 +1790,29 @@ fn run() -> i32 {
     let all_fixed_mode = args.contains(&"--all-fixed".to_string());
     let recurrent_mode = args.contains(&"--recurrent".to_string());
     let verify_mode = args.contains(&"--verify".to_string());
+    let family_input = match args.iter().position(|arg| arg == "--verify-family") {
+        None => None,
+        Some(index) => {
+            let raw = args
+                .get(index + 1)
+                .expect("argument validation requires a --verify-family value");
+            if raw.is_empty() {
+                return fail_usage("--verify-family requires a nonempty binary input string");
+            }
+            if raw.len() > ourochronos::MAX_RECURRENT_FROZEN_INPUTS {
+                return fail_usage(&format!(
+                    "--verify-family input exceeds {} bits",
+                    ourochronos::MAX_RECURRENT_FROZEN_INPUTS
+                ));
+            }
+            if !raw.bytes().all(|bit| matches!(bit, b'0' | b'1')) {
+                return fail_usage("--verify-family requires a binary input string");
+            }
+            Some(raw.bytes().map(|bit| bit - b'0').collect::<Vec<_>>())
+        }
+    };
+    let family_input_bits = family_input.as_ref().map(|input| input.len() as u64);
+    let family_mode = family_input_bits.is_some();
     let artifact_path = args
         .iter()
         .position(|arg| arg == "--artifact")
@@ -1416,6 +1897,7 @@ fn run() -> i32 {
             || all_fixed_mode
             || recurrent_mode
             || verify_mode
+            || family_mode
             || stationary_mode
             || quantum_mode
             || fast_mode
@@ -1528,8 +2010,26 @@ fn run() -> i32 {
     {
         return fail_usage("--verify cannot be combined with another execution/search mode");
     }
-    if artifact_path.is_some() && !(global_mode || all_fixed_mode || verify_mode) {
-        return fail_usage("--artifact requires --global, --all-fixed, or --verify");
+    if family_mode
+        && (diagnostic
+            || deutsch_mode
+            || action_mode
+            || smt
+            || global_mode
+            || all_fixed_mode
+            || recurrent_mode
+            || verify_mode
+            || stationary_mode
+            || quantum_mode
+            || fast_mode
+            || halting_bound.is_some())
+    {
+        return fail_usage("--verify-family cannot be combined with another execution/search mode");
+    }
+    if artifact_path.is_some() && !(global_mode || all_fixed_mode || verify_mode || family_mode) {
+        return fail_usage(
+            "--artifact requires --global, --all-fixed, --verify, or --verify-family",
+        );
     }
     if dot_path.is_some() && !recurrent_mode {
         return fail_usage("--dot requires --recurrent");
@@ -1551,7 +2051,7 @@ fn run() -> i32 {
         ErrorConfig::default()
     };
 
-    let (seed, num_seeds, max_instructions, provenance_limit, memory_cells) =
+    let (seed, num_seeds, max_instructions, provenance_limit, mut memory_cells) =
         match parse_numeric_flags(&args) {
             Ok(values) => values,
             Err(msg) => return fail_usage(&msg),
@@ -1593,9 +2093,9 @@ fn run() -> i32 {
     }
     if (args.iter().any(|arg| arg == "--state-bits")
         || args.iter().any(|arg| arg == "--state-limit"))
-        && !recurrent_mode
+        && !(recurrent_mode || family_mode)
     {
-        return fail_usage("--state-bits and --state-limit require --recurrent");
+        return fail_usage("--state-bits and --state-limit require --recurrent or --verify-family");
     }
     if action_mode && num_seeds == 0 {
         return fail_usage("--seeds must be greater than 0 in action mode");
@@ -1642,6 +2142,7 @@ fn run() -> i32 {
             || all_fixed_mode
             || recurrent_mode
             || verify_mode
+            || family_mode
             || stationary_mode
             || quantum_mode
             || halting_bound.is_some())
@@ -1650,7 +2151,7 @@ fn run() -> i32 {
             "host capabilities are runtime-only and cannot be combined with build, proof, recurrent, declarative, or halting modes",
         );
     }
-    if (global_mode || all_fixed_mode || recurrent_mode || verify_mode)
+    if (global_mode || all_fixed_mode || recurrent_mode || verify_mode || family_mode)
         && args.iter().any(|arg| arg == "--effects")
     {
         return fail_usage(
@@ -1692,6 +2193,8 @@ fn run() -> i32 {
                 "mode",
                 if verify_mode {
                     "verify"
+                } else if family_mode {
+                    "verify-family"
                 } else if recurrent_mode {
                     "recurrent"
                 } else if all_fixed_mode {
@@ -1740,6 +2243,33 @@ fn run() -> i32 {
         }
     };
     let parsed_program = graph.program().clone();
+    let mut family_width_rule = None;
+    if let Some(input_bits) = family_input_bits {
+        let Some(declaration) = &parsed_program.family_declaration else {
+            return fail_usage("--verify-family requires a source FAMILY declaration");
+        };
+        let contract = ourochronos::PspaceFamilyContract::from(declaration);
+        let width_rule = if args.iter().any(|arg| arg == "--memory-cells") {
+            ourochronos::PolynomialBound {
+                coefficient: 0,
+                degree: 1,
+                additive: memory_cells as u64,
+            }
+        } else {
+            contract.ctc_cells
+        };
+        let Some(width) = width_rule.evaluate(input_bits) else {
+            return fail_usage("generated temporal-width polynomial overflows u128");
+        };
+        if width == 0 {
+            return fail_usage("CTC_CELLS must be positive for --verify-family");
+        }
+        let Ok(generated_width) = usize::try_from(width) else {
+            return fail_usage("CTC_CELLS is not representable on this host");
+        };
+        memory_cells = generated_width;
+        family_width_rule = Some(width_rule);
+    }
     let semantics_report = check_semantics(&resolved_hir);
     if !semantics_report.is_accepted_for_interpreter() {
         eprintln!("Compile Error: mandatory structural stack analysis failed");
@@ -1772,13 +2302,48 @@ fn run() -> i32 {
         return EXIT_ERROR;
     }
 
+    // Run source-wide gates before object construction so CLI diagnostics can
+    // retain the complete reports. The object compiler independently repeats
+    // these gates and seals the linked set, preventing library callers from
+    // bypassing them.
+    let region_report = ourochronos::TemporalRegionReport::analyze(&parsed_program, memory_cells);
+    let typecheck_result = type_check(&parsed_program);
+
+    if typecheck_mode {
+        println!("=== Temporal Type Analysis ===");
+        println!("{}", types::display_types(&typecheck_result));
+        if !region_report.regions.is_empty() || !region_report.host_effects.is_empty() {
+            println!("=== Finite Temporal Region Contracts ===");
+            println!("{}", region_report);
+        }
+        println!(); // blank line before execution
+    }
+
+    if !typecheck_result.is_valid {
+        if !typecheck_mode {
+            eprintln!("=== Mandatory Semantic Analysis ===");
+            eprintln!("{}", types::display_types(&typecheck_result));
+        }
+        eprintln!("Type errors found. Stopping.");
+        return EXIT_ERROR;
+    }
+
+    if !region_report.is_valid() {
+        if !typecheck_mode {
+            eprintln!("=== Finite Temporal Region Contracts ===");
+            eprintln!("{}", region_report);
+        }
+        eprintln!("Temporal region contract errors found. Stopping.");
+        return EXIT_ERROR;
+    }
+
     let artifact_name = Path::new(filename)
         .file_stem()
         .and_then(|name| name.to_str())
         .filter(|name| !name.is_empty())
         .unwrap_or("ourochronos-program")
         .to_string();
-    let objects = match graph.compile_objects() {
+    let objects = match graph.compile_objects_with_memory(memory_cells) {
         Ok(objects) => objects,
         Err(error) => {
             eprintln!("Compile Error: per-source object construction failed: {error}");
@@ -1792,6 +2357,7 @@ fn run() -> i32 {
             return EXIT_ERROR;
         }
     };
+    let linked_metadata = linked.metadata;
     let bytecode = linked.code;
     let bytecode_verification = match verify_bytecode(&bytecode) {
         Ok(report) => report,
@@ -1824,6 +2390,7 @@ fn run() -> i32 {
         && !all_fixed_mode
         && !recurrent_mode
         && !verify_mode
+        && !family_mode
         && !stationary_mode
         && !quantum_mode
         && halting_bound.is_none()
@@ -1850,48 +2417,10 @@ fn run() -> i32 {
             ),
     );
 
-    // Finite temporal-region contracts are language rules, not an optional
-    // lint. Analyze the original program before legacy procedure inlining can
-    // discard unused executable definitions. The report itself also scans all
-    // stored quotation bodies.
-    let region_report = ourochronos::TemporalRegionReport::analyze(&parsed_program, memory_cells);
-    // Type declarations belong to the retained source program as well. Check
-    // before inlining so an unused procedure cannot evade its declared effect
-    // contract merely because one execution mode erases the definition.
-    let typecheck_result = type_check(&parsed_program);
-
     // Source syntax is retained for declarations, resource reporting, and
     // source-oriented diagnostics only. Every executable policy consumes the
     // linked bytecode above; no mode preprocesses or interprets this AST.
     let program = parsed_program;
-
-    if typecheck_mode {
-        println!("=== Temporal Type Analysis ===");
-        println!("{}", types::display_types(&typecheck_result));
-        if !region_report.regions.is_empty() || !region_report.host_effects.is_empty() {
-            println!("=== Finite Temporal Region Contracts ===");
-            println!("{}", region_report);
-        }
-        println!(); // blank line before execution
-    }
-
-    if !typecheck_result.is_valid {
-        if !typecheck_mode {
-            eprintln!("=== Mandatory Semantic Analysis ===");
-            eprintln!("{}", types::display_types(&typecheck_result));
-        }
-        eprintln!("Type errors found. Stopping.");
-        return EXIT_ERROR;
-    }
-
-    if !region_report.is_valid() {
-        if !typecheck_mode {
-            eprintln!("=== Finite Temporal Region Contracts ===");
-            eprintln!("{}", region_report);
-        }
-        eprintln!("Temporal region contract errors found. Stopping.");
-        return EXIT_ERROR;
-    }
 
     if let Some(path) = object_path {
         let Some(root_index) = graph
@@ -1975,7 +2504,12 @@ fn run() -> i32 {
     }
 
     if let Some(path) = bytecode_path {
-        let artifact = match bytecode.to_bytes() {
+        let artifact = match PortableArtifact::from_linked(ourochronos::LinkedProgram {
+            code: bytecode,
+            metadata: linked_metadata,
+        })
+        .and_then(|artifact| artifact.to_bytes())
+        {
             Ok(artifact) => artifact,
             Err(error) => {
                 eprintln!("Compile Error: cannot serialize bytecode: {error}");
@@ -1995,12 +2529,15 @@ fn run() -> i32 {
     }
 
     if let Some(path) = package_path {
-        let package = match construct_portable_package(
+        let package = match construct_linked_package_artifact(
             artifact_name,
             memory_cells,
             max_instructions,
             error_config.memory_bounds,
-            bytecode,
+            ourochronos::LinkedProgram {
+                code: bytecode,
+                metadata: linked_metadata,
+            },
             embed_global_witness,
             runtime_global_package,
             solver_timeout_ms,
@@ -2032,12 +2569,15 @@ fn run() -> i32 {
     }
 
     if let Some(path) = launcher_path {
-        let package = match construct_portable_package(
+        let package = match construct_linked_package_artifact(
             artifact_name,
             memory_cells,
             max_instructions,
             error_config.memory_bounds,
-            bytecode,
+            ourochronos::LinkedProgram {
+                code: bytecode,
+                metadata: linked_metadata,
+            },
             embed_global_witness,
             runtime_global_package,
             solver_timeout_ms,
@@ -2070,7 +2610,7 @@ fn run() -> i32 {
                 return EXIT_ERROR;
             }
         };
-        let launcher = match build_native_launcher(&runtime, &package) {
+        let launcher = match build_native_artifact_launcher(&runtime, &package) {
             Ok(launcher) => launcher,
             Err(error) => {
                 eprintln!("Build Error: cannot construct native launcher: {error}");
@@ -2097,6 +2637,8 @@ fn run() -> i32 {
     if resources_mode {
         let semantics = if deutsch_mode {
             "Deutsch stationary-cycle"
+        } else if family_mode {
+            "exhaustive finite FAMILY-instance verification"
         } else if global_mode {
             "global symbolic point fixed state"
         } else if all_fixed_mode {
@@ -2124,7 +2666,7 @@ fn run() -> i32 {
             let contract = ourochronos::PspaceFamilyContract::from(declaration);
             println!("=== Declared PSPACE Family Contract: {} ===", contract.name);
             if contract.declared_eligible() {
-                println!("All Aaronson--Watrous obligations are declared; semantic proof remains external.");
+                println!("All Aaronson--Watrous obligations are declared; finite-instance evidence and asymptotic assumptions remain distinct.");
             } else {
                 println!("Missing declared obligations:");
                 for obligation in contract.missing_obligations() {
@@ -2133,6 +2675,176 @@ fn run() -> i32 {
             }
             println!();
         }
+    }
+
+    if let Some(input_bits) = family_input_bits {
+        let input = family_input.expect("family mode retains its parsed input");
+        if program.markov_declaration.is_some() || program.quantum_declaration.is_some() {
+            return fail_usage(
+                "--verify-family checks an executable deterministic FAMILY body, not MARKOV or QCHANNEL declarations",
+            );
+        }
+        let Some(declaration) = &program.family_declaration else {
+            return fail_usage("--verify-family requires a source FAMILY declaration");
+        };
+        let contract = ourochronos::PspaceFamilyContract::from(declaration);
+        let uniform_certificate = match ourochronos::PspaceUniformFamilyGenerator::certify_bytecode(
+            &contract,
+            &bytecode,
+            family_width_rule.expect("family mode establishes a width rule"),
+            state_bits,
+            error_config.memory_bounds,
+        ) {
+            Ok(certificate) => certificate,
+            Err(error) => {
+                println!("UNSUPPORTED UNIFORM FAMILY GENERATOR: {error}");
+                return EXIT_ERROR;
+            }
+        };
+        let generated = match uniform_certificate.specialize(&input, state_limit, max_instructions)
+        {
+            Ok(instance) => instance,
+            Err(error) => {
+                println!("UNSUPPORTED FAMILY SPECIALIZATION: {error}");
+                return EXIT_ERROR;
+            }
+        };
+        debug_assert_eq!(generated.config.input_bits, input_bits);
+        debug_assert_eq!(generated.config.graph.memory_cells, memory_cells);
+        let family_theorem =
+            ourochronos::ProjectionFamilyCertificate::prove(uniform_certificate.clone());
+        let family_circuit = match &family_theorem {
+            Ok(theorem) => match theorem.generate_circuit(input_bits) {
+                Ok(circuit) => Some(circuit),
+                Err(error) => {
+                    eprintln!("Internal family-circuit generation error: {error}");
+                    return EXIT_ERROR;
+                }
+            },
+            Err(_) => None,
+        };
+        let result = generated.verify();
+        if let Ok(theorem) = &family_theorem {
+            let theorem_decision = match theorem.decision(&input) {
+                Ok(decision) => decision,
+                Err(error) => {
+                    eprintln!("Internal family-theorem error: {error}");
+                    return EXIT_ERROR;
+                }
+            };
+            match &result {
+                ourochronos::PspaceInstanceVerificationResult::Verified(certificate) => {
+                    if certificate.decision != theorem_decision {
+                        eprintln!(
+                            "Internal family-theorem mismatch: symbolic decision {theorem_decision}, finite decision {}",
+                            certificate.decision
+                        );
+                        return EXIT_ERROR;
+                    }
+                    let circuit = family_circuit
+                        .as_ref()
+                        .expect("projection theorem produces a circuit");
+                    if let Err(error) = theorem.cross_check_finite(circuit, certificate) {
+                        eprintln!("Internal family-circuit mismatch: {error}");
+                        return EXIT_ERROR;
+                    }
+                }
+                ourochronos::PspaceInstanceVerificationResult::Refuted { reason } => {
+                    eprintln!(
+                        "Internal family-theorem mismatch: all-input theorem conflicts with finite refutation: {reason}"
+                    );
+                    return EXIT_ERROR;
+                }
+                _ => {}
+            }
+        }
+        if let Some(path) = &artifact_path {
+            let json = match &family_theorem {
+                Ok(theorem) => theorem.circuit_verification_json(
+                    family_circuit
+                        .as_ref()
+                        .expect("projection theorem produces a circuit"),
+                    &result,
+                ),
+                Err(_) => uniform_certificate.verification_json(&result),
+            };
+            if let Err(error) = write_analysis_file(path, &format!("{json}\n")) {
+                eprintln!("Error: {error}");
+                return EXIT_ERROR;
+            }
+            println!("Verification artifact: {path}");
+        }
+        return match result {
+            ourochronos::PspaceInstanceVerificationResult::Verified(certificate) => {
+                println!("=== VERIFIED FINITE FAMILY INSTANCE ===");
+                println!(
+                    "Family {} on input {} (length {}): {} states, {} recurrent class(es).",
+                    certificate.family_name,
+                    certificate
+                        .input
+                        .iter()
+                        .map(|bit| char::from(b'0' + *bit))
+                        .collect::<String>(),
+                    certificate.input_bits,
+                    certificate.state_count,
+                    certificate.recurrent_class_count
+                );
+                println!(
+                    "Decision {} is invariant; max transition {} steps; conservative chronology workspace {} bits.",
+                    certificate.decision,
+                    certificate.maximum_transition_steps,
+                    certificate.chronology_respecting_bits
+                );
+                println!(
+                    "Evidence digests: bytecode {:016x}, complete transition table {:016x}.",
+                    certificate.bytecode_digest, certificate.transition_digest
+                );
+                println!(
+                    "Structurally uniform generator verified: work <= {}*n^{}+{}, generated CTC width {} cells.",
+                    uniform_certificate.generation_work_bound.coefficient,
+                    uniform_certificate.generation_work_bound.degree,
+                    uniform_certificate.generation_work_bound.additive,
+                    generated.generation.temporal_cells,
+                );
+                match &family_theorem {
+                    Ok(theorem) => {
+                        let circuit = family_circuit
+                            .as_ref()
+                            .expect("projection theorem produces a circuit");
+                        println!(
+                            "Family-wide projection/routing theorem verified for every nonempty Boolean input: {} assignment(s), {:?}; chronology <= {}*n^{}+{}, transition <= {} steps.",
+                            theorem.assignments.len(),
+                            theorem.decision_rule,
+                            theorem.chronology_workspace_bound.coefficient,
+                            theorem.chronology_workspace_bound.degree,
+                            theorem.chronology_workspace_bound.additive,
+                            theorem.transition_steps,
+                        );
+                        println!(
+                            "Explicit Boolean circuit verified: {} temporal-state wires plus one decision wire; every finite successor was differentially checked.",
+                            circuit.state_bits()
+                        );
+                    }
+                    Err(error) => println!(
+                        "Family-wide semantic theorem unavailable ({error}); this exact input remains completely verified."
+                    ),
+                }
+                println!("Nature's ideal Deutsch selector remains an external model assumption.");
+                EXIT_OK
+            }
+            ourochronos::PspaceInstanceVerificationResult::Refuted { reason } => {
+                println!("REFUTED FAMILY INSTANCE: {reason}");
+                EXIT_PARADOX
+            }
+            ourochronos::PspaceInstanceVerificationResult::Unknown { reason } => {
+                println!("UNKNOWN FAMILY INSTANCE: {reason}");
+                EXIT_TIMEOUT
+            }
+            ourochronos::PspaceInstanceVerificationResult::Unsupported { reason } => {
+                println!("UNSUPPORTED FAMILY INSTANCE: {reason}");
+                EXIT_ERROR
+            }
+        };
     }
 
     if stationary_mode || program.markov_declaration.is_some() {
@@ -2223,20 +2935,32 @@ fn run() -> i32 {
                 );
                 println!("Fixed affine dimension: {}", analysis.affine_dimension);
                 println!(
-                    "Acceptance range over every fixed density: [{:.12}, {:.12}]",
+                    "Numerically estimated acceptance range: [{:.12}, {:.12}]",
                     analysis.minimum_acceptance, analysis.maximum_acceptance
                 );
+                println!(
+                    "Analysis tolerance: {}; rank and extrema are numerical estimates, not certified error bounds.",
+                    analysis.analysis_tolerance
+                );
+                if analysis.numerical_uncertainty {
+                    println!("DECISION: NUMERICALLY UNCERTAIN; the estimated range is too close to a decision threshold.");
+                    return EXIT_TIMEOUT;
+                }
                 match analysis.decision {
                     ourochronos::StationaryDecision::Accept => {
-                        println!("DECISION: ACCEPT on every fixed density operator.");
+                        println!(
+                            "NUMERICAL DECISION: ACCEPT under the estimated fixed-space model."
+                        );
                         EXIT_OK
                     }
                     ourochronos::StationaryDecision::Reject => {
-                        println!("DECISION: REJECT on every fixed density operator.");
+                        println!(
+                            "NUMERICAL DECISION: REJECT under the estimated fixed-space model."
+                        );
                         EXIT_OK
                     }
                     ourochronos::StationaryDecision::Ambiguous => {
-                        println!("DECISION: AMBIGUOUS; the all-fixed-density correctness promise is not satisfied.");
+                        println!("NUMERICAL DECISION: AMBIGUOUS; the estimated range establishes neither threshold decision.");
                         EXIT_PARADOX
                     }
                 }
@@ -2387,6 +3111,7 @@ fn run() -> i32 {
                         "  exemplar replay digest {:016x}; proof-query digest {:016x}",
                         exemplar.constraint_digest, certificate.constraint_digest
                     );
+                    print_unsat_evidence(&certificate);
                 }
                 ourochronos::PropertyVerificationResult::Refuted {
                     property,
@@ -2411,6 +3136,7 @@ fn run() -> i32 {
                         "VACUOUS {}: the program has no point fixed state (digest {:016x}).",
                         property.name, no_fixed_point.constraint_digest
                     );
+                    print_unsat_evidence(&no_fixed_point);
                     if exit != EXIT_ERROR {
                         exit = EXIT_PARADOX;
                     }
@@ -2418,10 +3144,12 @@ fn run() -> i32 {
                 ourochronos::PropertyVerificationResult::Unknown {
                     property,
                     reason,
+                    completeness,
                     constraint_digest,
                     ..
                 } => {
                     println!("UNKNOWN {}: {}", property.name, reason);
+                    println!("  IR completeness: {:?}", completeness);
                     if let Some(digest) = constraint_digest {
                         println!("  constraint digest: {:016x}", digest);
                     }
@@ -2508,14 +3236,16 @@ fn run() -> i32 {
                     certificate.backend
                 );
                 println!("Constraint digest: {:016x}", certificate.constraint_digest);
+                print_unsat_evidence(&certificate);
                 EXIT_PARADOX
             }
             ourochronos::GlobalSolveResult::Unknown {
                 reason,
+                completeness,
                 constraint_digest,
-                ..
             } => {
                 println!("UNKNOWN: {}", reason);
+                println!("IR completeness: {:?}", completeness);
                 if let Some(digest) = constraint_digest {
                     println!("Constraint digest: {:016x}", digest);
                 }
@@ -2549,6 +3279,7 @@ fn run() -> i32 {
             ourochronos::GlobalUniquenessResult::NoFixedPoint(certificate) => {
                 println!("PROVEN: the complete finite IR has no point fixed state.");
                 println!("Constraint digest: {:016x}", certificate.constraint_digest);
+                print_unsat_evidence(&certificate);
                 EXIT_PARADOX
             }
             ourochronos::GlobalUniquenessResult::Unique {
@@ -2574,6 +3305,7 @@ fn run() -> i32 {
                     "Witness replay verified; uniqueness-query digest: {:016x}",
                     certificate.constraint_digest
                 );
+                print_unsat_evidence(&certificate);
                 EXIT_OK
             }
             ourochronos::GlobalUniquenessResult::Multiple {
@@ -2591,10 +3323,11 @@ fn run() -> i32 {
             ourochronos::GlobalUniquenessResult::Unknown {
                 reason,
                 witness,
+                completeness,
                 constraint_digest,
-                ..
             } => {
                 println!("UNKNOWN: {}", reason);
+                println!("IR completeness: {:?}", completeness);
                 if witness.is_some() {
                     println!("At least one replay-verified point fixed state exists.");
                 }
@@ -2681,6 +3414,7 @@ fn run() -> i32 {
             seed,
             initial_state: Vec::new(),
             vm,
+            diagnostic_sources: linked_metadata.source_files,
         };
         if action_mode {
             println!(
