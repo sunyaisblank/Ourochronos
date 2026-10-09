@@ -45,7 +45,7 @@ jobs:
       - name: Exercise the actual CLI, REPL and LSP interfaces
         run: |
           cargo build --all-features --locked
-          python3 scripts/qualify_interfaces.py --runtime target/debug/ourochronos --report target/interface-qualification-report.json
+          python3 scripts/qualify_interfaces.py --runtime target/debug/ourochronos --report "$RUNNER_TEMP/interface-qualification-report.json"
 
       - name: Run bounded verified phase workloads
         run: |
@@ -71,7 +71,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: linux-interface-evidence
-          path: target/interface-qualification-report.json
+          path: ${{ runner.temp }}/interface-qualification-report.json
           if-no-files-found: ignore
 
   format:
