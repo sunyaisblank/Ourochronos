@@ -14,9 +14,6 @@ target/
 .git/
 .gitignore
 
-# Documentation (not needed in runtime image)
-docs/
-
 # Tests (not needed in runtime image)
 tests/
 
