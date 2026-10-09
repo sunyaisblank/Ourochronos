@@ -1,13 +1,12 @@
-//! Backwards-compatible source-AST SMT exporter used as a parity oracle.
+//! Source-facing SMT exporter over the canonical admission and bytecode path.
 //!
-//! Production global solving and the CLI lower verified linked bytecode into
-//! temporal IR. This historical library facade retains the older source
-//! compiler for differential tests; it is not an executable or proof
-//! authority, and supported-case parity is regression-tested explicitly.
+//! The older source-AST compiler remains private differential-test machinery.
+//! Public exports first enforce every mandatory source gate, lower to sealed
+//! bytecode, and derive temporal IR from that executable authority.
 
 use crate::ast::Program;
 use crate::core::BoundsPolicy;
-use crate::temporal::ir::{TemporalIrCompiler, TemporalIrConfig};
+use crate::temporal::global_solver::{GlobalFixedPointSolver, GlobalSolveConfig};
 
 #[derive(Debug, Clone, Copy)]
 pub struct SmtEncoder {
@@ -46,12 +45,13 @@ impl SmtEncoder {
     }
 
     pub fn encode(&mut self, program: &Program) -> Result<String, String> {
-        TemporalIrCompiler::compile(
+        GlobalFixedPointSolver::compile(
             program,
-            TemporalIrConfig {
+            GlobalSolveConfig {
                 memory_cells: self.memory_cells,
                 loop_unroll_limit: self.max_unroll,
                 bounds_policy: self.bounds_policy,
+                ..GlobalSolveConfig::default()
             },
         )
         .map(|ir| ir.to_smt2(true))
@@ -82,9 +82,9 @@ mod tests {
     #[test]
     fn unsupported_constructs_are_errors_not_noops() {
         for (source, needle) in [
-            ("0 ORACLE 0 PROPHECY VEC_NEW POP", "VEC_NEW"),
-            ("0 ORACLE 0 PROPHECY CLOCK POP", "CLOCK"),
-            ("[ 1 ] EXEC 0 ORACLE 0 PROPHECY", "quotation reference 0"),
+            ("0 ORACLE 0 PROPHECY VEC_NEW POP", "VecNew"),
+            ("0 ORACLE 0 PROPHECY CLOCK POP", "Clock"),
+            ("[ 1 ] EXEC 0 ORACLE 0 PROPHECY", "QuotationValue"),
         ] {
             let program = parse(source).unwrap();
             let error = SmtEncoder::new().encode(&program).expect_err(source);

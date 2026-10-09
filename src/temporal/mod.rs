@@ -10,17 +10,22 @@
 //! - **SMT Encoder**: Generation of SMT-LIB2 formulas for constraint solving
 
 pub mod action;
+pub mod affine_contract;
+pub mod affine_recurrence;
 pub mod cache;
+pub mod durable_kv;
 pub mod effect_adapter;
 pub mod global_solver;
 pub mod ir;
 pub mod quantum;
 pub mod region;
 pub mod smt_encoder;
+pub mod sparse_markov;
 pub mod stochastic;
 pub mod timeloop;
 pub mod transaction;
 pub mod transition_graph;
+pub mod vm_stochastic;
 
 pub use action::{
     ActionConfig, ActionPrinciple, FixedPointCandidate, FixedPointSelector, ProvenanceMap,
@@ -28,11 +33,13 @@ pub use action::{
 };
 pub use global_solver::{
     FixedPointWitness, GlobalFixedPointSolver, GlobalSolveConfig, GlobalSolveResult,
-    GlobalUniquenessResult, PropertyVerificationResult, UnsatCertificate,
+    GlobalUniquenessResult, PropertyVerificationResult, UnsatCertificate, UnsatEvidenceError,
+    MAX_UNSAT_EVIDENCE_BYTES, UNSAT_EVIDENCE_FORMAT_VERSION,
 };
 pub use ir::{
-    CompareOp, ExprId, IrCompleteness, IrExpr, IrExprKind, IrObservation, IrType, ObservationKind,
-    TemporalIr, TemporalIrCompiler, TemporalIrConfig, TemporalIrError, WordBinaryOp, WordUnaryOp,
+    temporal_ir_supports_opcode, CompareOp, ExprId, IrCompleteness, IrExpr, IrExprKind,
+    IrObservation, IrType, ObservationKind, TemporalIr, TemporalIrConfig, TemporalIrError,
+    WordBinaryOp, WordUnaryOp,
 };
 pub use quantum::{
     analyze_quantum_declaration, Complex64, ComplexMatrix, QuantumChannel, QuantumFixedPoint,

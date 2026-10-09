@@ -4,7 +4,7 @@
 //! large opcode switch. That was not an acceptable optimized backend: its
 //! stack, quotation, gas, and input behavior could drift from the executable
 //! authority. `FastExecutor` now resolves and lowers the program to the same
-//! validated [`BytecodeProgram`] used by normal execution, then delegates to
+//! validated [`BytecodeProgram`](crate::bytecode::BytecodeProgram) used by normal execution, then delegates to
 //! [`BytecodeVm`] through its immutable prevalidated dispatch path. That
 //! removes repeated artifact scans while leaving instruction dispatch, gas,
 //! errors, and observations identical. The public facade and experimental
@@ -12,13 +12,10 @@
 //! second language runtime in this module.
 
 use super::executor::{EpochResult, EpochStatus, ExecutorConfig};
+use crate::admission::{admit_program, AdmissionConfig};
 use crate::ast::{OpCode, Program, Stmt};
-use crate::bytecode::BytecodeProgram;
-use crate::bytecode_vm::{
-    BytecodeVm, BytecodeVmConfig, BytecodeVmError, BytecodeVmStatus, PreparedBytecode,
-};
+use crate::bytecode_vm::{BytecodeVm, BytecodeVmConfig, BytecodeVmError, BytecodeVmStatus};
 use crate::core::{Memory, OutputItem, PagedMemory, Value};
-use crate::hir::HirProgram;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Stack Register Cache
@@ -366,12 +363,13 @@ impl FastExecutor {
     }
 
     fn execute_bytecode(&mut self, program: &Program) -> Result<(), String> {
-        let hir = HirProgram::resolve(program)
-            .map_err(|errors| format!("fast bytecode name resolution failed: {errors:?}"))?;
-        let bytecode = BytecodeProgram::compile(&hir)
-            .map_err(|error| format!("fast bytecode lowering failed: {error}"))?;
-        let prepared = PreparedBytecode::new(bytecode)
-            .map_err(|error| format!("fast bytecode preparation failed: {error}"))?;
+        let admitted = admit_program(
+            program,
+            AdmissionConfig {
+                memory_cells: self.present.len(),
+            },
+        )
+        .map_err(|error| format!("fast source admission failed: {error}"))?;
         let anamnesis = PagedMemory::with_size(self.present.len())
             .map_err(|error| format!("fast bytecode memory failed: {error}"))?;
         let result = BytecodeVm::with_config(BytecodeVmConfig {
@@ -380,7 +378,7 @@ impl FastExecutor {
             allow_interactive_input: true,
             ..BytecodeVmConfig::default()
         })
-        .run_prepared(&prepared, &anamnesis)
+        .run_prepared(admitted.executable(), &anamnesis)
         .map_err(format_bytecode_error)?;
 
         self.stack = FastStack::from_value_vec(&result.stack);

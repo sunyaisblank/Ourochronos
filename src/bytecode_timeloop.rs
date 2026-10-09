@@ -41,6 +41,9 @@ pub struct BytecodeTimeLoopConfig {
     pub initial_state: Vec<(Address, u64)>,
     /// Per-epoch bytecode runtime configuration.
     pub vm: BytecodeVmConfig,
+    /// Optional retained source-manifest claims, used only for diagnostics.
+    /// Names are never opened or used as host capability paths.
+    pub diagnostic_sources: Vec<crate::linker::ObjectSourceFile>,
 }
 
 impl Default for BytecodeTimeLoopConfig {
@@ -51,6 +54,7 @@ impl Default for BytecodeTimeLoopConfig {
             seed: 0,
             initial_state: Vec::new(),
             vm: BytecodeVmConfig::default(),
+            diagnostic_sources: Vec::new(),
         }
     }
 }
@@ -679,8 +683,8 @@ impl BytecodeTimeLoop {
         vm_config.endpoint_tapes = frozen_inputs.endpoints.clone();
         vm_config.process_results = frozen_inputs.processes.clone();
         let result = BytecodeVm::with_config(vm_config.clone())
-            .run_prepared(program, anamnesis)
-            .map_err(|error| error.to_string())?;
+            .run_prepared_diagnostic(program, anamnesis)
+            .map_err(|error| error.format_with_sources(&self.config.diagnostic_sources))?;
         if vm_config.allow_interactive_input {
             if result.inputs_consumed.len() > frozen_inputs.input.len() {
                 frozen_inputs.input = result.inputs_consumed.clone();

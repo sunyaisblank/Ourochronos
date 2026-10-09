@@ -342,7 +342,7 @@ fn analyze_located(
         )
         .map_err(|error| error.to_string()),
         Lowering::ModuleGraph(graph) => graph
-            .compile_objects()
+            .compile_objects_with_memory(memory_cells)
             .map_err(|error| error.to_string())
             .and_then(|objects| link(&objects).map_err(|error| error.to_string())),
     };

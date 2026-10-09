@@ -122,7 +122,7 @@ impl Repl {
 
     /// Run the interactive REPL.
     pub fn run(&mut self) -> io::Result<()> {
-        println!("OUROCHRONOS REPL v0.2.0");
+        println!("OUROCHRONOS REPL v{}", env!("CARGO_PKG_VERSION"));
         println!("Type :help for commands, :quit to exit");
         println!();
 

@@ -5,24 +5,30 @@
 //! `present == anamnesis`.  UNSAT is called a global proof only for a complete
 //! IR; an unrolled-loop UNSAT result is deliberately `Unknown`.
 
+use crate::admission::{admit_program, AdmissionConfig};
 #[cfg(test)]
 use crate::ast::Stmt;
 use crate::ast::{
     OpCode, Program, PropertyComparison, PropertyPredicate, TemporalPropertyDeclaration,
 };
 use crate::bytecode::{BytecodeProgram, Instruction};
-use crate::bytecode_temporal::{lower_bytecode_temporal_ir, BytecodeTemporalLoweringError};
+use crate::bytecode_temporal::{
+    lower_bytecode_temporal_ir, summarized_instruction_upper_bound, BytecodeTemporalLoweringError,
+};
 use crate::bytecode_vm::{BytecodeVm, BytecodeVmConfig, BytecodeVmError, BytecodeVmStatus};
 use crate::core::{BoundsPolicy, Memory, OutputItem, PagedMemory, Value};
-use crate::hir::HirProgram;
-use crate::temporal::ir::{
-    IrCompleteness, TemporalIr, TemporalIrCompiler, TemporalIrConfig, TemporalIrError,
-};
+use crate::temporal::ir::{IrCompleteness, TemporalIr, TemporalIrConfig, TemporalIrError};
 #[cfg(test)]
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::fmt;
 use z3::ast::{Array, Ast, Dynamic};
 use z3::{Config as Z3Config, Context, DeclKind, Model, SatResult, Solver, Sort};
+
+/// Version of the self-contained complete-UNSAT evidence envelope.
+pub const UNSAT_EVIDENCE_FORMAT_VERSION: u16 = 1;
+/// Hard ceiling for the exact query and backend proof retained in one result.
+pub const MAX_UNSAT_EVIDENCE_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy)]
 pub struct GlobalSolveConfig {
@@ -97,10 +103,153 @@ impl FixedPointWitness {
 
 #[derive(Debug, Clone)]
 pub struct UnsatCertificate {
-    /// Deterministic FNV-1a digest of the exact SMT artifact sent to Z3.
+    /// Version of the evidence envelope represented by this value.
+    pub evidence_format: u16,
+    /// Deterministic FNV-1a identifier of `solver_query`.
+    ///
+    /// This digest is an integrity guard, not a cryptographic commitment. The
+    /// full query is retained and must be replayed before trusting the result.
     pub constraint_digest: u64,
     pub backend: &'static str,
     pub completeness: IrCompleteness,
+    /// Exact declarations and assertions passed to `Solver::from_string`.
+    pub solver_query: String,
+    /// Z3's proof AST for the UNSAT result.
+    ///
+    /// `verify_with_z3` regenerates and compares this term. This is useful
+    /// backend-replay evidence, but is not an independent proof-kernel check.
+    pub backend_proof: String,
+}
+
+/// Failure while replaying a complete-UNSAT evidence envelope.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UnsatEvidenceError {
+    UnsupportedFormat { found: u16 },
+    UnsupportedBackend { found: String },
+    IncompleteFormula,
+    MissingQuery,
+    QueryContainsNul,
+    MissingProof,
+    LimitExceeded { bytes: usize, limit: usize },
+    DigestMismatch { expected: u64, actual: u64 },
+    SolverReturnedSat,
+    SolverReturnedUnknown { reason: String },
+    ProofMismatch,
+}
+
+impl fmt::Display for UnsatEvidenceError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnsupportedFormat { found } => write!(
+                formatter,
+                "unsupported UNSAT evidence format {found}; expected {UNSAT_EVIDENCE_FORMAT_VERSION}"
+            ),
+            Self::UnsupportedBackend { found } => {
+                write!(formatter, "unsupported UNSAT evidence backend {found:?}")
+            }
+            Self::IncompleteFormula => {
+                write!(formatter, "bounded temporal formulas cannot certify global UNSAT")
+            }
+            Self::MissingQuery => write!(formatter, "UNSAT evidence has no solver query"),
+            Self::QueryContainsNul => {
+                write!(formatter, "UNSAT evidence query contains an interior NUL byte")
+            }
+            Self::MissingProof => write!(formatter, "UNSAT evidence has no backend proof"),
+            Self::LimitExceeded { bytes, limit } => write!(
+                formatter,
+                "UNSAT evidence is {bytes} bytes, exceeding the {limit}-byte limit"
+            ),
+            Self::DigestMismatch { expected, actual } => write!(
+                formatter,
+                "UNSAT query digest mismatch: certificate has {expected:016x}, query hashes to {actual:016x}"
+            ),
+            Self::SolverReturnedSat => {
+                write!(formatter, "fresh Z3 replay found the certified query satisfiable")
+            }
+            Self::SolverReturnedUnknown { reason } => {
+                write!(formatter, "fresh Z3 replay returned unknown: {reason}")
+            }
+            Self::ProofMismatch => {
+                write!(formatter, "fresh Z3 replay produced a different proof term")
+            }
+        }
+    }
+}
+
+impl std::error::Error for UnsatEvidenceError {}
+
+impl UnsatCertificate {
+    /// Replay the exact query in a fresh Z3 context and require the recorded
+    /// proof term to be reproduced byte-for-byte.
+    ///
+    /// This detects corrupted or substituted evidence and removes reliance on
+    /// the original solver process. It deliberately does not claim independent
+    /// proof checking: replay still trusts the linked Z3 backend.
+    pub fn verify_with_z3(&self, timeout_ms: u64) -> Result<(), UnsatEvidenceError> {
+        if self.evidence_format != UNSAT_EVIDENCE_FORMAT_VERSION {
+            return Err(UnsatEvidenceError::UnsupportedFormat {
+                found: self.evidence_format,
+            });
+        }
+        if self.backend != "Z3" {
+            return Err(UnsatEvidenceError::UnsupportedBackend {
+                found: self.backend.to_string(),
+            });
+        }
+        if !self.completeness.proves_global_unsat() {
+            return Err(UnsatEvidenceError::IncompleteFormula);
+        }
+        if self.solver_query.is_empty() {
+            return Err(UnsatEvidenceError::MissingQuery);
+        }
+        if self.solver_query.contains('\0') {
+            return Err(UnsatEvidenceError::QueryContainsNul);
+        }
+        if self.backend_proof.is_empty() {
+            return Err(UnsatEvidenceError::MissingProof);
+        }
+        let evidence_bytes = unsat_evidence_bytes(&self.solver_query, &self.backend_proof);
+        if evidence_bytes > MAX_UNSAT_EVIDENCE_BYTES {
+            return Err(UnsatEvidenceError::LimitExceeded {
+                bytes: evidence_bytes,
+                limit: MAX_UNSAT_EVIDENCE_BYTES,
+            });
+        }
+        let actual = fnv1a64(self.solver_query.as_bytes());
+        if actual != self.constraint_digest {
+            return Err(UnsatEvidenceError::DigestMismatch {
+                expected: self.constraint_digest,
+                actual,
+            });
+        }
+
+        let mut config = Z3Config::new();
+        config.set_model_generation(true);
+        config.set_proof_generation(true);
+        config.set_timeout_msec(timeout_ms);
+        let context = Context::new(&config);
+        let solver = Solver::new(&context);
+        solver.from_string(self.solver_query.as_bytes());
+        match solver.check() {
+            SatResult::Sat => Err(UnsatEvidenceError::SolverReturnedSat),
+            SatResult::Unknown => Err(UnsatEvidenceError::SolverReturnedUnknown {
+                reason: solver
+                    .get_reason_unknown()
+                    .unwrap_or_else(|| "solver returned unknown".to_string()),
+            }),
+            SatResult::Unsat => {
+                let replayed = solver
+                    .get_proof()
+                    .map(|proof| format!("{proof:?}"))
+                    .ok_or(UnsatEvidenceError::MissingProof)?;
+                if replayed == self.backend_proof {
+                    Ok(())
+                } else {
+                    Err(UnsatEvidenceError::ProofMismatch)
+                }
+            }
+        }
+    }
 }
 
 /// Exhaustive outcome algebra for integrated solving.
@@ -169,6 +318,7 @@ pub enum PropertyVerificationResult {
         property: TemporalPropertyDeclaration,
         reason: String,
         exemplar: Option<FixedPointWitness>,
+        completeness: Option<IrCompleteness>,
         constraint_digest: Option<u64>,
     },
     Unsupported {
@@ -200,14 +350,15 @@ impl GlobalSolveResult {
             ),
             Self::Unknown {
                 reason,
+                completeness,
                 constraint_digest,
-                ..
             } => artifact_json(
                 "fixed-point",
                 "unknown",
                 &format!(
-                    "\"reason\":\"{}\",\"constraint_digest\":{}",
+                    "\"reason\":\"{}\",\"completeness\":{},\"constraint_digest\":{}",
                     json_escape(reason),
+                    optional_completeness_json(*completeness),
                     optional_digest(*constraint_digest)
                 ),
             ),
@@ -266,18 +417,19 @@ impl GlobalUniquenessResult {
             Self::Unknown {
                 reason,
                 witness,
+                completeness,
                 constraint_digest,
-                ..
             } => artifact_json(
                 "all-fixed",
                 "unknown",
                 &format!(
-                    "\"reason\":\"{}\",\"witness\":{},\"constraint_digest\":{}",
+                    "\"reason\":\"{}\",\"witness\":{},\"completeness\":{},\"constraint_digest\":{}",
                     json_escape(reason),
                     witness
                         .as_ref()
                         .map(FixedPointWitness::to_json)
                         .unwrap_or_else(|| "null".to_string()),
+                    optional_completeness_json(*completeness),
                     optional_digest(*constraint_digest)
                 ),
             ),
@@ -331,17 +483,19 @@ impl PropertyVerificationResult {
                 property,
                 reason,
                 exemplar,
+                completeness,
                 constraint_digest,
             } => (
                 property,
                 "unknown",
                 format!(
-                    "\"reason\":\"{}\",\"exemplar\":{},\"constraint_digest\":{}",
+                    "\"reason\":\"{}\",\"exemplar\":{},\"completeness\":{},\"constraint_digest\":{}",
                     json_escape(reason),
                     exemplar
                         .as_ref()
                         .map(FixedPointWitness::to_json)
                         .unwrap_or_else(|| "null".to_string()),
+                    optional_completeness_json(*completeness),
                     optional_digest(*constraint_digest)
                 ),
             ),
@@ -463,14 +617,15 @@ impl GlobalFixedPointSolver {
         program: &Program,
         config: GlobalSolveConfig,
     ) -> Result<TemporalIr, TemporalIrError> {
-        TemporalIrCompiler::compile(
+        let admitted = admit_program(
             program,
-            TemporalIrConfig {
+            AdmissionConfig {
                 memory_cells: config.memory_cells,
-                loop_unroll_limit: config.loop_unroll_limit,
-                bounds_policy: config.bounds_policy,
             },
         )
+        .map_err(|error| TemporalIrError::new(format!("source admission failed: {error}")))?;
+        Self::compile_bytecode(admitted.program(), config)
+            .map_err(|error| TemporalIrError::new(error.to_string()))
     }
 
     /// Lower the validated linked executable directly into temporal IR.
@@ -489,7 +644,7 @@ impl GlobalFixedPointSolver {
     }
 
     pub fn solve(program: &Program, config: GlobalSolveConfig) -> GlobalSolveResult {
-        let bytecode = match source_program_bytecode(program) {
+        let bytecode = match source_program_bytecode(program, config) {
             Ok(bytecode) => bytecode,
             Err(reason) => return GlobalSolveResult::Unsupported { reason },
         };
@@ -522,7 +677,7 @@ impl GlobalFixedPointSolver {
         program: &Program,
         config: GlobalSolveConfig,
     ) -> GlobalUniquenessResult {
-        let bytecode = match source_program_bytecode(program) {
+        let bytecode = match source_program_bytecode(program, config) {
             Ok(bytecode) => bytecode,
             Err(reason) => return GlobalUniquenessResult::Unsupported { reason },
         };
@@ -619,7 +774,7 @@ impl GlobalFixedPointSolver {
         property: &TemporalPropertyDeclaration,
         config: GlobalSolveConfig,
     ) -> PropertyVerificationResult {
-        let bytecode = match source_program_bytecode(program) {
+        let bytecode = match source_program_bytecode(program, config) {
             Ok(bytecode) => bytecode,
             Err(reason) => {
                 return PropertyVerificationResult::Unsupported {
@@ -684,13 +839,14 @@ impl GlobalFixedPointSolver {
             }
             GlobalSolveResult::Unknown {
                 reason,
+                completeness,
                 constraint_digest,
-                ..
             } => {
                 return PropertyVerificationResult::Unknown {
                     property: property.clone(),
                     reason,
                     exemplar: None,
+                    completeness,
                     constraint_digest,
                 }
             }
@@ -732,12 +888,13 @@ impl GlobalFixedPointSolver {
             }
             GlobalSolveResult::Unknown {
                 reason,
+                completeness,
                 constraint_digest,
-                ..
             } => PropertyVerificationResult::Unknown {
                 property: property.clone(),
                 reason,
                 exemplar: Some(exemplar),
+                completeness,
                 constraint_digest,
             },
             GlobalSolveResult::Unsupported { reason } => PropertyVerificationResult::Unsupported {
@@ -764,14 +921,27 @@ impl GlobalFixedPointSolver {
             smt.push_str(assertion);
             smt.push('\n');
         }
-        let digest = fnv1a64(smt.as_bytes());
+        // `Z3_solver_from_string` accepts declarations, definitions, and
+        // assertions, but older libz3 releases treat session commands such as
+        // set-logic/set-option as a parser error for this API. The Context
+        // below carries those options. Hash and retain exactly the bytes that
+        // cross the `from_string` boundary.
+        let solver_smt: String = smt.lines().filter(|line| !line.starts_with("(set-")).fold(
+            String::new(),
+            |mut output, line| {
+                output.push_str(line);
+                output.push('\n');
+                output
+            },
+        );
+        let digest = fnv1a64(solver_smt.as_bytes());
 
         // The symbolic IR does not yet model gas exhaustion. A complete proof
-        // is therefore sound only when every represented acyclic path fits in
+        // is therefore sound only when every represented finite path fits in
         // the configured executable instruction budget. SAT replay alone
         // cannot protect UNSAT from this mismatch because there is no witness
         // to replay.
-        match replay_instruction_upper_bound_for(program) {
+        match replay_instruction_upper_bound_for(program, config) {
             Ok(Some(required)) if config.max_instructions < required => {
                 return GlobalSolveResult::Unknown {
                     reason: format!(
@@ -796,21 +966,10 @@ impl GlobalFixedPointSolver {
 
         let mut z3_config = Z3Config::new();
         z3_config.set_model_generation(true);
+        z3_config.set_proof_generation(true);
         z3_config.set_timeout_msec(config.solver_timeout_ms);
         let context = Context::new(&z3_config);
         let solver = Solver::new(&context);
-        // `Z3_solver_from_string` accepts declarations, definitions, and
-        // assertions, but older libz3 releases treat session commands such as
-        // set-logic/set-option as a parser error for this API.  The Context
-        // above already carries those options.
-        let solver_smt: String = smt.lines().filter(|line| !line.starts_with("(set-")).fold(
-            String::new(),
-            |mut output, line| {
-                output.push_str(line);
-                output.push('\n');
-                output
-            },
-        );
         solver.from_string(solver_smt.as_bytes());
         #[cfg(test)]
         if std::env::var_os("OURO_DEBUG_SOLVER").is_some() {
@@ -820,11 +979,47 @@ impl GlobalFixedPointSolver {
 
         match solver.check() {
             SatResult::Unsat if ir.completeness.proves_global_unsat() => {
-                GlobalSolveResult::ProvenNoFixedPoint(UnsatCertificate {
+                let Some(backend_proof) = solver.get_proof().map(|proof| format!("{proof:?}")) else {
+                    return GlobalSolveResult::Unknown {
+                        reason: "Z3 returned complete UNSAT without a proof term".to_string(),
+                        completeness: Some(ir.completeness),
+                        constraint_digest: Some(digest),
+                    };
+                };
+                let evidence_bytes = unsat_evidence_bytes(&solver_smt, &backend_proof);
+                if backend_proof.is_empty() {
+                    return GlobalSolveResult::Unknown {
+                        reason: "Z3 returned complete UNSAT with an empty proof term".to_string(),
+                        completeness: Some(ir.completeness),
+                        constraint_digest: Some(digest),
+                    };
+                }
+                if evidence_bytes > MAX_UNSAT_EVIDENCE_BYTES {
+                    return GlobalSolveResult::Unknown {
+                        reason: format!(
+                            "complete UNSAT evidence is {evidence_bytes} bytes, exceeding the {}-byte limit",
+                            MAX_UNSAT_EVIDENCE_BYTES
+                        ),
+                        completeness: Some(ir.completeness),
+                        constraint_digest: Some(digest),
+                    };
+                }
+                let certificate = UnsatCertificate {
+                    evidence_format: UNSAT_EVIDENCE_FORMAT_VERSION,
                     constraint_digest: digest,
                     backend: "Z3",
                     completeness: ir.completeness,
-                })
+                    solver_query: solver_smt,
+                    backend_proof,
+                };
+                if let Err(error) = certificate.verify_with_z3(config.solver_timeout_ms) {
+                    return GlobalSolveResult::Unknown {
+                        reason: format!("complete UNSAT evidence failed fresh replay: {error}"),
+                        completeness: Some(ir.completeness),
+                        constraint_digest: Some(digest),
+                    };
+                }
+                GlobalSolveResult::ProvenNoFixedPoint(certificate)
             }
             SatResult::Unsat => GlobalSolveResult::Unknown {
                 reason: format!(
@@ -888,15 +1083,18 @@ fn dense_memory_config_error(config: GlobalSolveConfig) -> Option<String> {
     })
 }
 
-fn source_program_bytecode(program: &Program) -> Result<BytecodeProgram, String> {
-    let hir = HirProgram::resolve(program).map_err(|errors| {
-        errors
-            .into_iter()
-            .map(|error| error.to_string())
-            .collect::<Vec<_>>()
-            .join("; ")
-    })?;
-    BytecodeProgram::compile(&hir).map_err(|error| error.to_string())
+fn source_program_bytecode(
+    program: &Program,
+    config: GlobalSolveConfig,
+) -> Result<BytecodeProgram, String> {
+    admit_program(
+        program,
+        AdmissionConfig {
+            memory_cells: config.memory_cells,
+        },
+    )
+    .map(|admitted| admitted.into_program())
+    .map_err(|error| format!("source admission failed: {error}"))
 }
 
 fn replay_bytecode(
@@ -1201,6 +1399,10 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
     hash
 }
 
+fn unsat_evidence_bytes(query: &str, proof: &str) -> usize {
+    query.len().saturating_add(proof.len())
+}
+
 fn artifact_json(kind: &str, status: &str, detail: &str) -> String {
     format!(
         "{{\"schema\":\"ourochronos.verification/v1\",\"kind\":\"{}\",\"status\":\"{}\",{}}}",
@@ -1221,12 +1423,19 @@ fn completeness_json(completeness: IrCompleteness) -> String {
     }
 }
 
+fn optional_completeness_json(completeness: Option<IrCompleteness>) -> String {
+    completeness.map_or_else(|| "null".to_string(), completeness_json)
+}
+
 fn certificate_json(certificate: &UnsatCertificate) -> String {
     format!(
-        "{{\"backend\":\"{}\",\"completeness\":{},\"constraint_digest\":\"{:016x}\"}}",
-        certificate.backend,
+        "{{\"evidence_format\":{},\"backend\":\"{}\",\"completeness\":{},\"constraint_digest\":\"{:016x}\",\"solver_query\":\"{}\",\"backend_proof\":\"{}\"}}",
+        certificate.evidence_format,
+        json_escape(certificate.backend),
         completeness_json(certificate.completeness),
-        certificate.constraint_digest
+        certificate.constraint_digest,
+        json_escape(&certificate.solver_query),
+        json_escape(&certificate.backend_proof)
     )
 }
 
@@ -1331,12 +1540,26 @@ pub(crate) fn inline_for_replay(program: &Program) -> Result<Program, String> {
     Ok(replay)
 }
 
-/// Conservative maximum number of statement dispatches on any acyclic replay
-/// path after safe procedure expansion. `None` means a reachable WHILE loop is
-/// present; loop-bearing IR is already marked bounded and cannot support
-/// complete UNSAT.
-fn replay_instruction_upper_bound_for(program: &BytecodeProgram) -> Result<Option<u64>, String> {
-    bytecode_instruction_upper_bound(program)
+/// Conservative fetched-record bound, including calls, returns and loop flow.
+/// The acyclic analysis handles arbitrary validated control flow. When it sees
+/// a loop, native lowering can supply a finite bound only if every encountered
+/// loop has an exact literal-counter summary. Dynamic loops remain unknown.
+fn replay_instruction_upper_bound_for(
+    program: &BytecodeProgram,
+    config: GlobalSolveConfig,
+) -> Result<Option<u64>, String> {
+    if let Some(bound) = bytecode_instruction_upper_bound(program)? {
+        return Ok(Some(bound));
+    }
+    summarized_instruction_upper_bound(
+        program,
+        TemporalIrConfig {
+            memory_cells: config.memory_cells,
+            loop_unroll_limit: config.loop_unroll_limit,
+            bounds_policy: config.bounds_policy,
+        },
+    )
+    .map_err(|error| error.to_string())
 }
 
 #[derive(Clone, Copy)]
@@ -1768,6 +1991,51 @@ mod tests {
     }
 
     #[test]
+    fn complete_unsat_evidence_replays_and_rejects_tampering() {
+        let program = parse("0 ORACLE NOT 0 PROPHECY").unwrap();
+        let certificate = match GlobalFixedPointSolver::solve(&program, small_config()) {
+            GlobalSolveResult::ProvenNoFixedPoint(certificate) => certificate,
+            result => panic!("unexpected result: {result:?}"),
+        };
+
+        assert_eq!(certificate.evidence_format, UNSAT_EVIDENCE_FORMAT_VERSION);
+        assert!(!certificate.solver_query.is_empty());
+        assert!(!certificate.backend_proof.is_empty());
+        assert!(!certificate.solver_query.contains("(set-logic"));
+        assert_eq!(
+            certificate.constraint_digest,
+            fnv1a64(certificate.solver_query.as_bytes())
+        );
+        certificate.verify_with_z3(5_000).unwrap();
+
+        let artifact = GlobalSolveResult::ProvenNoFixedPoint(certificate.clone()).to_json();
+        assert!(artifact.contains("\"evidence_format\":1"));
+        assert!(artifact.contains("\"solver_query\":"));
+        assert!(artifact.contains("\"backend_proof\":"));
+
+        let mut changed_query = certificate.clone();
+        changed_query.solver_query.push('\n');
+        assert!(matches!(
+            changed_query.verify_with_z3(5_000),
+            Err(UnsatEvidenceError::DigestMismatch { .. })
+        ));
+
+        let mut nul_query = certificate.clone();
+        nul_query.solver_query = "\0".to_string();
+        assert!(matches!(
+            nul_query.verify_with_z3(5_000),
+            Err(UnsatEvidenceError::QueryContainsNul)
+        ));
+
+        let mut changed_proof = certificate;
+        changed_proof.backend_proof.push_str(" corrupted");
+        assert!(matches!(
+            changed_proof.verify_with_z3(5_000),
+            Err(UnsatEvidenceError::ProofMismatch)
+        ));
+    }
+
+    #[test]
     fn low_gas_cannot_be_overclaimed_as_complete_unsat() {
         let program = parse("0 ORACLE NOT 0 PROPHECY").unwrap();
         let mut config = small_config();
@@ -1849,6 +2117,92 @@ mod tests {
             | GlobalSolveResult::Found(_) => {}
             result => panic!("bounded result was overclaimed: {:?}", result),
         }
+    }
+
+    #[test]
+    fn unknown_results_retain_structured_loop_bounds_across_all_quantifiers() {
+        let program =
+            parse("PROPERTY bounded { ALL_FIXED CELL 0 EQ 0; }\nWHILE { 1 } { NOP }").unwrap();
+        let config = GlobalSolveConfig {
+            memory_cells: 1,
+            loop_unroll_limit: 1,
+            ..small_config()
+        };
+        let expected = IrCompleteness::BoundedLoops {
+            loop_count: 1,
+            unroll_limit: 1,
+        };
+        let solve = GlobalFixedPointSolver::solve(&program, config);
+        let unique = GlobalFixedPointSolver::analyze_uniqueness(&program, config);
+        let property = GlobalFixedPointSolver::verify_property(
+            &program,
+            &program.temporal_properties[0],
+            config,
+        );
+        assert!(
+            matches!(&solve, GlobalSolveResult::Unknown { completeness: Some(bound), .. } if *bound == expected)
+        );
+        assert!(
+            matches!(&unique, GlobalUniquenessResult::Unknown { completeness: Some(bound), witness: None, .. } if *bound == expected)
+        );
+        assert!(
+            matches!(&property, PropertyVerificationResult::Unknown { completeness: Some(bound), exemplar: None, .. } if *bound == expected)
+        );
+        for json in [solve.to_json(), unique.to_json(), property.to_json()] {
+            assert!(json.contains("\"status\":\"unknown\""), "{json}");
+            assert!(json.contains("\"completeness\":{\"kind\":\"bounded-loops\",\"loop_count\":1,\"unroll_limit\":1}"), "{json}");
+        }
+    }
+
+    #[test]
+    fn property_and_uniqueness_unknown_keep_bounds_beside_an_exemplar() {
+        let program = parse(
+            "PROPERTY zero { ALL_FIXED CELL 0 EQ 0; }\n\
+             0 ORACLE WHILE { DUP 0 GT } { 1 SUB } POP",
+        )
+        .unwrap();
+        let config = GlobalSolveConfig {
+            memory_cells: 1,
+            loop_unroll_limit: 1,
+            ..small_config()
+        };
+        let unique = GlobalFixedPointSolver::analyze_uniqueness(&program, config);
+        let property = GlobalFixedPointSolver::verify_property(
+            &program,
+            &program.temporal_properties[0],
+            config,
+        );
+        assert!(matches!(
+            &unique,
+            GlobalUniquenessResult::Unknown {
+                completeness: Some(IrCompleteness::BoundedLoops {
+                    unroll_limit: 1,
+                    ..
+                }),
+                witness: Some(_),
+                ..
+            }
+        ));
+        assert!(matches!(
+            &property,
+            PropertyVerificationResult::Unknown {
+                completeness: Some(IrCompleteness::BoundedLoops {
+                    unroll_limit: 1,
+                    ..
+                }),
+                exemplar: Some(_),
+                ..
+            }
+        ));
+        for json in [unique.to_json(), property.to_json()] {
+            assert_eq!(json.matches("\"completeness\":").count(), 2, "{json}");
+        }
+        let unavailable = GlobalSolveResult::Unknown {
+            reason: "analysis metadata unavailable".into(),
+            completeness: None,
+            constraint_digest: None,
+        };
+        assert!(unavailable.to_json().contains("\"completeness\":null"));
     }
 
     #[test]

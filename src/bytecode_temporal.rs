@@ -1,19 +1,15 @@
 //! Conservative temporal-verification readiness analysis for bytecode.
 //!
-//! The existing [`TemporalIrCompiler`]
-//! still consumes the source AST.  This module does not pretend that running
-//! that compiler is bytecode lowering.  Instead it proves, directly over the
-//! validated bytecode CFG, when every executable instruction is in the exact
-//! subset understood by that compiler.  The resulting report is suitable for
-//! gating the legacy source lowering while a native bytecode IR builder is
-//! introduced.
+//! This module proves readiness directly over the validated bytecode CFG and
+//! builds temporal IR from that same executable representation. The retired
+//! source compiler is present only in test builds as a differential oracle.
 //!
 //! A report is deliberately stricter than structural bytecode validation:
 //! quotations have no finite-IR sort, foreign and runtime-only primitives
-//! have no symbolic semantics, nested temporal scopes are not implemented by
-//! the legacy compiler, and recursive calls are not total.  Bounded loops are
-//! compatible with legacy lowering, but always make the result unknown for a
-//! global UNSAT claim.
+//! have no symbolic semantics, nested temporal scopes are unsupported, and
+//! recursive calls are not total. CFG readiness conservatively flags loops;
+//! native lowering refines exact literal countdowns to complete summaries.
+//! Other loops remain bounded and cannot support a global UNSAT claim.
 
 use crate::ast::{OpCode, QuoteId};
 use crate::bytecode::{
@@ -22,9 +18,12 @@ use crate::bytecode::{
 use crate::bytecode_verifier::{BytecodeUnit, VerificationSite};
 use crate::core::BoundsPolicy;
 use crate::hir::{ForeignId, ProcedureId};
+#[cfg(test)]
+use crate::temporal::ir::TemporalIrCompiler;
 use crate::temporal::ir::{
-    CompareOp, ExprId, IrCompleteness, IrExpr, IrExprKind, IrObservation, IrType, ObservationKind,
-    TemporalIr, TemporalIrCompiler, TemporalIrConfig, WordBinaryOp, WordUnaryOp,
+    temporal_ir_supports_opcode, CompareOp, ExprId, IrCompleteness, IrExpr, IrExprKind,
+    IrObservation, IrType, ObservationKind, TemporalIr, TemporalIrConfig, WordBinaryOp,
+    WordUnaryOp,
 };
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::error::Error;
@@ -110,8 +109,9 @@ pub enum PrimitiveBoundary {
 /// A precise reason that complete bytecode temporal lowering is unavailable.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BytecodeTemporalIssueKind {
-    /// A WHILE back edge is represented only up to the configured unroll
-    /// bound by the legacy IR compiler.
+    /// CFG analysis cannot establish a WHILE variant from its incoming stack.
+    /// Legacy lowering uses the configured unroll bound; native lowering can
+    /// refine this issue with an exact summary for a literal countdown.
     BoundedLoop {
         /// First instruction of the loop condition.
         loop_start: u32,
@@ -206,7 +206,8 @@ pub struct BytecodeTemporalIssue {
 pub enum BytecodeTemporalDisposition {
     /// Every executable path is finite and has legacy-compatible semantics.
     Ready,
-    /// Lowering is supported only as a bounded/incomplete execution set.
+    /// CFG analysis needs a bound or further value analysis. Native literal
+    /// countdown summaries can refine an Unknown loop to Complete IR.
     Unknown,
     /// At least one executable instruction has no finite-IR semantics.
     Unsupported,
@@ -236,7 +237,9 @@ pub struct BytecodeTemporalAnalysis {
 }
 
 impl BytecodeTemporalAnalysis {
-    /// Conservative summary suitable for CLI/API policy decisions.
+    /// Conservative CFG summary suitable for CLI/API policy decisions. Unknown
+    /// loops can become Complete during native lowering when their incoming
+    /// counters are literals; this analysis does not track symbolic values.
     pub fn disposition(&self) -> BytecodeTemporalDisposition {
         if self.issues.iter().any(|issue| !issue.kind.is_unknown()) {
             BytecodeTemporalDisposition::Unsupported
@@ -256,9 +259,10 @@ impl BytecodeTemporalAnalysis {
             .all(|issue| issue.kind.legacy_compatible())
     }
 
-    /// Whether this report covers a complete supported CFG.  This is a
-    /// necessary, not sufficient, condition for global UNSAT: callers must
-    /// also require successful stack verification and typed-IR construction.
+    /// Whether CFG analysis alone covers a complete supported graph. Native
+    /// lowering can also establish completeness through exact loop summaries.
+    /// Global UNSAT requires the resulting IR completeness and executable gas
+    /// bound, rather than this conservative pre-lowering predicate alone.
     pub fn has_complete_supported_cfg(&self) -> bool {
         self.disposition() == BytecodeTemporalDisposition::Ready
     }
@@ -470,6 +474,22 @@ pub fn lower_bytecode_temporal_ir_with_limits(
     NativeCompiler::new(program, config, limits)?.compile()
 }
 
+/// A conservative fetched-bytecode bound for the same literal loop summaries
+/// used by native lowering. Unknown loops and arithmetic overflow return None.
+/// This is private solver support, not a source-step or public gas model.
+pub(crate) fn summarized_instruction_upper_bound(
+    program: &BytecodeProgram,
+    config: TemporalIrConfig,
+) -> Result<Option<u64>, BytecodeTemporalLoweringError> {
+    let limits = BytecodeTemporalLoweringLimits::default();
+    analyze_bytecode_temporal_with_limits(program, config, limits.analysis).map_err(|error| {
+        BytecodeTemporalLoweringError::global(BytecodeTemporalLoweringErrorKind::Analysis(error))
+    })?;
+    NativeCompiler::new(program, config, limits)?
+        .compile_with_instruction_bound()
+        .map(|(_, bound)| bound)
+}
+
 #[derive(Debug, Clone)]
 struct SymbolicState {
     stack: Vec<ExprId>,
@@ -577,6 +597,9 @@ struct NativeCompiler<'a> {
     loops: BTreeMap<(BytecodeUnit, u32), LoopShape>,
     loop_count: usize,
     anamnesis: ExprId,
+    /// Sum over both IF arms is conservative. None records an unsummarized
+    /// loop or checked arithmetic overflow, and can never become Some again.
+    instruction_bound: Option<u64>,
 }
 
 impl<'a> NativeCompiler<'a> {
@@ -596,10 +619,19 @@ impl<'a> NativeCompiler<'a> {
             loops,
             loop_count: 0,
             anamnesis: 0,
+            // The implicit main RETURN is fetched on normal completion.
+            // Counting it also on HALT/PARADOX is a safe overestimate.
+            instruction_bound: Some(1),
         })
     }
 
-    fn compile(mut self) -> Result<TemporalIr, BytecodeTemporalLoweringError> {
+    fn compile(self) -> Result<TemporalIr, BytecodeTemporalLoweringError> {
+        self.compile_with_instruction_bound().map(|(ir, _)| ir)
+    }
+
+    fn compile_with_instruction_bound(
+        mut self,
+    ) -> Result<(TemporalIr, Option<u64>), BytecodeTemporalLoweringError> {
         self.reserve_expressions(4, None)?;
         self.anamnesis = self.add(IrType::Memory, IrExprKind::Anamnesis);
         let zero_memory = self.add(IrType::Memory, IrExprKind::ZeroMemory);
@@ -688,6 +720,8 @@ impl<'a> NativeCompiler<'a> {
                     if state.stopped {
                         last = Some(state);
                     } else {
+                        // Callee blocks omit their closing RETURN record.
+                        self.count_instructions(Some(1));
                         tasks.push(LowerTask::Block {
                             unit,
                             pc,
@@ -897,16 +931,20 @@ impl<'a> NativeCompiler<'a> {
             }
         };
         self.validate_ir(state.present, state.valid)?;
-        Ok(TemporalIr {
-            expressions: self.expressions,
-            anamnesis: self.anamnesis,
-            final_memory: state.present,
-            valid: state.valid,
-            observations: self.observations,
-            memory_cells: self.config.memory_cells,
-            bounds_policy: self.config.bounds_policy,
-            completeness,
-        })
+        let instruction_bound = self.instruction_bound;
+        Ok((
+            TemporalIr {
+                expressions: self.expressions,
+                anamnesis: self.anamnesis,
+                final_memory: state.present,
+                valid: state.valid,
+                observations: self.observations,
+                memory_cells: self.config.memory_cells,
+                bounds_policy: self.config.bounds_policy,
+                completeness,
+            },
+            instruction_bound,
+        ))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -935,6 +973,11 @@ impl<'a> NativeCompiler<'a> {
                 .copied()
                 .filter(|shape| shape.end_target <= end)
             {
+                if self.summarize_literal_loop(unit, pc, shape, &mut state)? {
+                    pc = shape.end_target;
+                    continue;
+                }
+                self.instruction_bound = None;
                 tasks.push(LowerTask::ContinueBlock {
                     unit,
                     pc: shape.end_target,
@@ -955,6 +998,7 @@ impl<'a> NativeCompiler<'a> {
 
             let instruction = self.instruction(pc)?;
             let site = self.site(unit, pc);
+            self.count_instructions(Some(1));
             match instruction {
                 Instruction::Primitive(opcode) => {
                     if primitive_boundary(opcode).is_some() {
@@ -1053,6 +1097,8 @@ impl<'a> NativeCompiler<'a> {
                     cell_bits,
                     exit_target,
                 } => {
+                    // The owned scope block excludes its TEMPORAL_EXIT.
+                    self.count_instructions(Some(1));
                     if let Some(outer) = scope {
                         return Err(BytecodeTemporalLoweringError::at(
                             site,
@@ -1129,6 +1175,90 @@ impl<'a> NativeCompiler<'a> {
         Ok(())
     }
 
+    fn count_instructions(&mut self, cost: Option<u64>) {
+        self.instruction_bound = self
+            .instruction_bound
+            .and_then(|bound| cost.and_then(|cost| bound.checked_add(cost)));
+    }
+
+    /// Exact, framed summaries for two terminating countdown shapes. Requiring
+    /// a literal incoming counter supplies a natural variant and a finite gas
+    /// bound; a dynamic word remains on the existing bounded-unrolling path.
+    fn summarize_literal_loop(
+        &mut self,
+        unit: BytecodeUnit,
+        loop_start: u32,
+        shape: LoopShape,
+        state: &mut SymbolicState,
+    ) -> Result<bool, BytecodeTemporalLoweringError> {
+        let condition = &self.program.instructions[loop_start as usize..shape.marker as usize];
+        if !matches!(condition, [Instruction::Primitive(OpCode::Dup)])
+            && !matches!(
+                condition,
+                [
+                    Instruction::Primitive(OpCode::Dup),
+                    Instruction::PushWord(0),
+                    Instruction::Primitive(OpCode::Gt)
+                ]
+            )
+        {
+            return Ok(false);
+        }
+        if !matches!(self.instruction(shape.end_target - 1)?, Instruction::LoopBack { target } if target == loop_start)
+        {
+            return Ok(false);
+        }
+        let body =
+            &self.program.instructions[shape.marker as usize + 1..shape.end_target as usize - 1];
+        let delta = match body {
+            [Instruction::PushWord(1), Instruction::Primitive(OpCode::Sub)] => None,
+            [Instruction::Primitive(OpCode::Swap), Instruction::PushWord(delta), Instruction::Primitive(OpCode::Add), Instruction::Primitive(OpCode::Swap), Instruction::PushWord(1), Instruction::Primitive(OpCode::Sub)] => {
+                Some(*delta)
+            }
+            _ => return Ok(false),
+        };
+        let Some(&counter) = state.stack.last() else {
+            return Ok(false);
+        };
+        let IrExprKind::WordConst(iterations) = self.expressions[counter].kind else {
+            return Ok(false);
+        };
+        let site = self.site(unit, shape.marker);
+        self.require_stack(
+            state,
+            site,
+            "WHILE summary",
+            if delta.is_some() { 2 } else { 1 },
+        )?;
+        // Every iteration fetches condition + WHILE_FALSE and body + LOOP_BACK;
+        // the final zero test fetches only condition + WHILE_FALSE.
+        let cost = iterations
+            .checked_add(1)
+            .and_then(|tests| tests.checked_mul(condition.len() as u64 + 1))
+            .and_then(|tests| {
+                iterations
+                    .checked_mul(body.len() as u64 + 1)
+                    .and_then(|bodies| tests.checked_add(bodies))
+            });
+        self.count_instructions(cost);
+        if let Some(delta) = delta {
+            let index = state.stack.len() - 2;
+            let accumulator = state.stack[index];
+            let increment = self.word_const(iterations.wrapping_mul(delta));
+            state.stack[index] = self.add(
+                IrType::Word64,
+                IrExprKind::WordBinary {
+                    op: WordBinaryOp::Add,
+                    lhs: accumulator,
+                    rhs: increment,
+                },
+            );
+        }
+        let zero = self.word_const(0);
+        *state.stack.last_mut().expect("required countdown counter") = zero;
+        Ok(true)
+    }
+
     fn start_if(
         &mut self,
         unit: BytecodeUnit,
@@ -1161,6 +1291,9 @@ impl<'a> NativeCompiler<'a> {
         else_state.valid = parent_valid;
 
         let then_end = if has_else {
+            // The then block omits the jump over the ELSE arm. Counting it
+            // even when the then arm terminates is a safe overestimate.
+            self.count_instructions(Some(1));
             else_target.checked_sub(1).ok_or_else(|| {
                 BytecodeTemporalLoweringError::at(
                     site,
@@ -2194,6 +2327,8 @@ impl Analyzer<'_> {
                     loop_start,
                     end_target,
                 } => {
+                    // No incoming value analysis here: leave exact literal
+                    // countdown refinement to the native symbolic compiler.
                     self.issues.push(BytecodeTemporalIssue {
                         site,
                         kind: BytecodeTemporalIssueKind::BoundedLoop {
@@ -2727,7 +2862,7 @@ fn choose_excess(
 }
 
 fn primitive_boundary(opcode: OpCode) -> Option<PrimitiveBoundary> {
-    if TemporalIrCompiler::supports_opcode(opcode) {
+    if temporal_ir_supports_opcode(opcode) {
         return None;
     }
     Some(match opcode {
@@ -3099,7 +3234,7 @@ mod tests {
         for &opcode in OpCode::ALL {
             assert_eq!(
                 primitive_boundary(opcode).is_none(),
-                TemporalIrCompiler::supports_opcode(opcode),
+                temporal_ir_supports_opcode(opcode),
                 "temporal boundary drifted for {}",
                 opcode.name()
             );
@@ -3304,7 +3439,7 @@ mod tests {
                 _ => None,
             };
             let Some(required) = required else {
-                assert!(!TemporalIrCompiler::supports_opcode(opcode));
+                assert!(!temporal_ir_supports_opcode(opcode));
                 continue;
             };
             let mut program = Program::new();
@@ -3369,5 +3504,44 @@ mod tests {
         let native = lower_bytecode_temporal_ir(&artifact, TemporalIrConfig::default()).unwrap();
         let source = TemporalIrCompiler::compile(&program, TemporalIrConfig::default()).unwrap();
         assert_eq!(native.to_smt2(false), source.to_smt2(false));
+    }
+
+    #[test]
+    fn summary_gas_counts_scope_markers_and_frames_terminal_calls() {
+        let config = TemporalIrConfig {
+            memory_cells: 1,
+            loop_unroll_limit: 1,
+            bounds_policy: BoundsPolicy::Error,
+        };
+        for (source, bound, fetched) in [
+            (
+                "TEMPORAL 0 1 BITS 1 { 23 WHILE { DUP } { 1 SUB } POP }",
+                122,
+                122,
+            ),
+            (
+                "PROCEDURE stop { HALT } 23 WHILE { DUP } { 1 SUB } POP stop WHILE { 1 } { NOP }",
+                122,
+                121,
+            ),
+        ] {
+            let program = crate::parser::parse(source).unwrap();
+            let artifact = bytecode(&program);
+            assert_eq!(
+                summarized_instruction_upper_bound(&artifact, config).unwrap(),
+                Some(bound)
+            );
+            let execution = BytecodeVm::new()
+                .run(&artifact, &PagedMemory::with_size(1).unwrap())
+                .unwrap();
+            assert_eq!(execution.instructions_executed, fetched);
+            assert!(fetched <= bound);
+            assert_eq!(
+                lower_bytecode_temporal_ir(&artifact, config)
+                    .unwrap()
+                    .completeness,
+                IrCompleteness::Complete
+            );
+        }
     }
 }

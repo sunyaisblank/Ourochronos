@@ -7,8 +7,11 @@
 //! memory expressions distinct so an unsupported source construct cannot be
 //! smuggled into a verifier as an untyped string.
 
-use crate::ast::{OpCode, Procedure, Program, Stmt};
+use crate::ast::OpCode;
+#[cfg(test)]
+use crate::ast::{Procedure, Program, Stmt};
 use crate::core::BoundsPolicy;
+#[cfg(test)]
 use std::collections::HashMap;
 use std::fmt;
 use std::fmt::Write;
@@ -324,7 +327,7 @@ pub struct TemporalIrError {
 }
 
 impl TemporalIrError {
-    fn new(message: impl Into<String>) -> Self {
+    pub(crate) fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
         }
@@ -356,6 +359,7 @@ impl Default for TemporalIrConfig {
     }
 }
 
+#[cfg(test)]
 #[derive(Clone)]
 struct SymbolicState {
     stack: Vec<ExprId>,
@@ -364,6 +368,7 @@ struct SymbolicState {
     stopped: bool,
 }
 
+#[cfg(test)]
 #[derive(Clone, Copy)]
 struct ActiveTemporalScope {
     base: u64,
@@ -371,7 +376,58 @@ struct ActiveTemporalScope {
     cell_bits: u8,
 }
 
-/// Lowers supported source programs into the finite typed IR.
+/// Whether an opcode has total deterministic lowering in the finite temporal
+/// IR. Structured control and calls are checked separately.
+pub const fn temporal_ir_supports_opcode(op: OpCode) -> bool {
+    matches!(
+        op,
+        OpCode::Nop
+            | OpCode::Halt
+            | OpCode::Pop
+            | OpCode::Dup
+            | OpCode::Swap
+            | OpCode::Over
+            | OpCode::Rot
+            | OpCode::Depth
+            | OpCode::Add
+            | OpCode::Sub
+            | OpCode::Mul
+            | OpCode::Div
+            | OpCode::Mod
+            | OpCode::Neg
+            | OpCode::Abs
+            | OpCode::Min
+            | OpCode::Max
+            | OpCode::Sign
+            | OpCode::Not
+            | OpCode::And
+            | OpCode::Or
+            | OpCode::Xor
+            | OpCode::Shl
+            | OpCode::Shr
+            | OpCode::Eq
+            | OpCode::Neq
+            | OpCode::Lt
+            | OpCode::Gt
+            | OpCode::Lte
+            | OpCode::Gte
+            | OpCode::Slt
+            | OpCode::Sgt
+            | OpCode::Slte
+            | OpCode::Sgte
+            | OpCode::Oracle
+            | OpCode::Prophecy
+            | OpCode::PresentRead
+            | OpCode::Paradox
+            | OpCode::Index
+            | OpCode::Store
+            | OpCode::Output
+            | OpCode::Emit
+    )
+}
+
+/// Test-only source compiler used as an independent differential oracle.
+#[cfg(test)]
 pub struct TemporalIrCompiler<'a> {
     config: TemporalIrConfig,
     expressions: Vec<IrExpr>,
@@ -383,59 +439,11 @@ pub struct TemporalIrCompiler<'a> {
     active_scope: Option<ActiveTemporalScope>,
 }
 
+#[cfg(test)]
 impl<'a> TemporalIrCompiler<'a> {
-    /// Whether an opcode has total deterministic lowering in the finite
-    /// temporal IR. Structured control and procedure calls are checked
-    /// separately by the region validator/compiler.
-    pub fn supports_opcode(op: OpCode) -> bool {
-        matches!(
-            op,
-            OpCode::Nop
-                | OpCode::Halt
-                | OpCode::Pop
-                | OpCode::Dup
-                | OpCode::Swap
-                | OpCode::Over
-                | OpCode::Rot
-                | OpCode::Depth
-                | OpCode::Add
-                | OpCode::Sub
-                | OpCode::Mul
-                | OpCode::Div
-                | OpCode::Mod
-                | OpCode::Neg
-                | OpCode::Abs
-                | OpCode::Min
-                | OpCode::Max
-                | OpCode::Sign
-                | OpCode::Not
-                | OpCode::And
-                | OpCode::Or
-                | OpCode::Xor
-                | OpCode::Shl
-                | OpCode::Shr
-                | OpCode::Eq
-                | OpCode::Neq
-                | OpCode::Lt
-                | OpCode::Gt
-                | OpCode::Lte
-                | OpCode::Gte
-                | OpCode::Slt
-                | OpCode::Sgt
-                | OpCode::Slte
-                | OpCode::Sgte
-                | OpCode::Oracle
-                | OpCode::Prophecy
-                | OpCode::PresentRead
-                | OpCode::Paradox
-                | OpCode::Index
-                | OpCode::Store
-                | OpCode::Output
-                | OpCode::Emit
-        )
-    }
-
-    pub fn compile(
+    /// Private source-semantics oracle retained only for differential tests.
+    /// Public proof/export paths lower admitted linked bytecode instead.
+    pub(crate) fn compile(
         program: &'a Program,
         config: TemporalIrConfig,
     ) -> Result<TemporalIr, TemporalIrError> {
@@ -1233,6 +1241,7 @@ impl<'a> TemporalIrCompiler<'a> {
     }
 }
 
+#[cfg(test)]
 fn validate_scope(
     base: u64,
     size: u64,

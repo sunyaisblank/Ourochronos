@@ -1,0 +1,4 @@
+# A deterministic classical query: 32 fetched records, output [42].
+# halt-slice/halt-resume can share a fixed ceiling of 64 with memory width 1.
+5 WHILE { DUP } { 1 SUB } POP
+42 OUTPUT

@@ -39,7 +39,9 @@ facades are replaced by one explicit toolchain.
   policies; no backend may silently substitute one for another.
 - Complete finite UNSAT requires complete executable lowering under the actual
   machine bounds. Bounded loops, gas truncation, solver timeout, or unsupported
-  effects produce UNKNOWN or UNSUPPORTED, never a global proof.
+  effects produce UNKNOWN or UNSUPPORTED, never a global proof. The exact query
+  and backend proof term must also fit the evidence ceiling and reproduce in a
+  fresh solver context.
 
 The baseline was re-derived on 2026-07-13 from
 `c5fed129098f3c2019b329fb8decadada3a896a0` on `main`. The worktree already
@@ -87,6 +89,8 @@ confirmed against the current code or executable.
 | INV-017 | `src/bytecode_temporal.rs`, `src/temporal/global_solver.rs`, `src/temporal/transition_graph.rs` | Global, all-fixed, property, SMT, and exhaustive recurrent modes execute/lower linked bytecode and replay through the bytecode VM; bounded loops remain honestly incomplete and complete proof requires a bytecode gas bound. | Resolved for point-state verification and recurrent enumeration |
 | INV-018 | `src/temporal/transaction.rs`, `src/temporal/effect_adapter.rs`, `src/bytecode_timeloop.rs` | Exact input/clock/random/file/endpoint/process transcripts participate in candidate equality and receipts. Selected intents are whole-batch capability/precondition checked; file identity/content is verified; the idempotency claim precedes mutation; exact replay returns the stored success/failure without reapplication. File/socket/process/sleep opcodes use frozen virtual inputs and selected-only intents. | Resolved transaction and system-opcode boundary; no cross-host atomicity claim |
 | INV-019 | `src/vm/executor.rs`, `src/vm/mod.rs`, `src/lib.rs` | The public source-shaped single-epoch `Executor` is now a compatibility facade that performs type checking, HIR resolution, mandatory semantic analysis, bytecode compilation, independent CFG verification, and bytecode-VM dispatch. Unsupported legacy mutable host contexts fail closed. The retired direct AST walker is private `cfg(test)` differential machinery. | Resolved public execution authority |
+| INV-020 | `src/admission.rs`, `build.rs`, all source-facing facades | One exact-width admission judgment now gates executor, fast, time-loop, halting, global/all-fixed/property, SMT, recurrence, and object-build APIs. Successful admission owns a sealed `PreparedBytecode`; graph object emission additionally links and seals the complete set. The build gate rejects reintroduced raw compiler calls in production facades. | Resolved cross-facade admission divergence |
+| INV-021 | `src/family_verifier.rs`, `src/uniform_family.rs`, `src/temporal/transition_graph.rs`, `src/bytecode_vm.rs`, `src/main.rs` | A `FAMILY` declaration cannot become evidence by assertion alone. The finite verifier binds an exact immutable Boolean input, exhausts the exact domain, fails closed on partial/non-closed/unmodeled/effectful transitions, measures resources, and requires one recurrent decision. The restricted generator retains exact linked acyclic bytecode, proves its width polynomial below `CTC_CELLS` for every nonempty length, and proves canonical linear specialization bounds. The sparse projection/routing subclass additionally proves all-input totality, resource bounds, and state-independent recurrent readout for ordered multi-cell copy/constant/bitwise/right-shift assignments; emits an explicit polynomial-size Boolean circuit; regenerates its topology; and must agree with every finite VM edge and readout. | Resolved concrete boundary, constant-template uniformity, sparse-routing/bitwise theorem, and circuit lowering; general arithmetic/control family induction/circuit lowering and ideal selection remain |
 
 ## Approach-family registry
 
@@ -180,8 +184,9 @@ before a working path is rerouted.
    diagnostic orbits, and deterministic Deutsch cycles also execute linked
    bytecode. Specialized stochastic/quantum declarations remain separate exact
    declarative analyzers; action selection executes the linked bytecode and
-   retains the selected transaction batch. The raw source-AST `SmtEncoder`
-   survives only as a backwards-compatible parity oracle, not a proof path.
+   retains the selected transaction batch. The public `SmtEncoder` now uses
+   canonical admission and bytecode lowering; raw source lowering survives
+   only in `cfg(test)` differential machinery.
 8. **Persistent temporal memory (implemented for the production orbit).** Paged COW state has 65,536- and
    million-cell, collision, exact-provenance, equality, diff, and limit tests,
    and backs the standard bytecode orbit. Dense compatibility/proof structures

@@ -13,15 +13,14 @@
 //! and selects the solution with minimum action (cost), preferring non-trivial,
 //! output-producing solutions.
 
+use crate::admission::{admit_program, AdmissionConfig};
 use crate::ast::{EffectClass, OpCode, Program};
 use crate::bytecode::{BytecodeProgram, Instruction};
 use crate::bytecode_action::{BytecodeActionConfig, BytecodeActionRunner, MAX_ACTION_SEEDS};
 use crate::bytecode_timeloop::{is_trivially_consistent, BytecodeTimeLoop, BytecodeTimeLoopConfig};
-use crate::bytecode_verifier::verify_default as verify_bytecode;
 use crate::bytecode_vm::BytecodeVmConfig;
 use crate::core::error::ErrorConfig;
 use crate::core::{Address, Memory, OutputItem};
-use crate::hir::HirProgram;
 use crate::temporal::action::ActionConfig;
 use crate::temporal::cache::CacheStats;
 use crate::vm::EffectsPolicy;
@@ -237,8 +236,9 @@ impl TimeLoopConfig {
 ///
 /// `Program` remains the stable library input type, but it is never executed
 /// directly: every run resolves typed HIR, compiles and independently verifies
-/// one bytecode artifact, then selects a bytecode-only orbit policy. Source
-/// tooling performs stricter mandatory static admission separately.
+/// one fully admitted bytecode artifact, then selects a bytecode-only orbit
+/// policy. The library facade and CLI therefore enforce the same static
+/// contract.
 pub struct TimeLoop {
     config: TimeLoopConfig,
     last_cache_stats: CacheStats,
@@ -277,7 +277,7 @@ impl TimeLoop {
     /// fixed-point policy. No source-AST executor is reachable from this API.
     pub fn run(&mut self, program: &Program) -> ConvergenceStatus {
         self.last_cache_stats = CacheStats::default();
-        let bytecode = match compile_program(program) {
+        let bytecode = match compile_program(program, self.config.memory_cells) {
             Ok(bytecode) => bytecode,
             Err(message) => return ConvergenceStatus::Error { message, epoch: 0 },
         };
@@ -368,27 +368,16 @@ impl TimeLoop {
             seed: self.config.seed,
             initial_state: Vec::new(),
             vm,
+            diagnostic_sources: Vec::new(),
         })
         .map(|driver| driver.config)
     }
 }
 
-fn compile_program(program: &Program) -> Result<BytecodeProgram, String> {
-    let hir = HirProgram::resolve(program).map_err(|errors| {
-        format!(
-            "typed name resolution failed: {}",
-            errors
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join("; ")
-        )
-    })?;
-    let bytecode = BytecodeProgram::compile(&hir)
-        .map_err(|error| format!("bytecode compilation failed: {error}"))?;
-    verify_bytecode(&bytecode)
-        .map_err(|error| format!("independent bytecode verification failed: {error}"))?;
-    Ok(bytecode)
+fn compile_program(program: &Program, memory_cells: usize) -> Result<BytecodeProgram, String> {
+    admit_program(program, AdmissionConfig { memory_cells })
+        .map(|admitted| admitted.into_program())
+        .map_err(|error| format!("source admission failed: {error}"))
 }
 
 /// Return the first effect reachable from main. Direct procedure calls are

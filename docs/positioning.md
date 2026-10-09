@@ -48,11 +48,15 @@ The present verifier is credible within that niche because it distinguishes:
 - complete UNSAT from loop-bounded UNKNOWN;
 - existence from uniqueness and all-fixed safety;
 - point fixed states from recurrent/stationary classes;
-- a complete explicit domain from a non-closed or oversized request.
+- a complete explicit domain from a non-closed or oversized request; and
+- a proved restricted uniform `FAMILY` generator, an all-input projection
+  theorem, a verified exact-input specialization, and an ideal-selector
+  assumption.
 
 To compete directly with the broad formal-methods family, future work needs a
 richer property logic, compositional region contracts, mechanized metatheory,
-proof-producing/checkable UNSAT certificates, incremental/portfolio solvers,
+an independent proof-kernel checker for the retained Z3 proof terms,
+generalized family-wide semantic certificates, incremental/portfolio solvers,
 concurrency, and larger independently reviewed case studies.
 
 ## The strongest three applications

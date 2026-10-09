@@ -4,8 +4,10 @@
 
 FAMILY identity_family {
     CTC_CELLS POLY 2 1 1;
-    CHRONOLOGY_BITS POLY 1 1 0;
-    TRANSITION_STEPS POLY 4 2 1;
+    # Conservative concrete verifier budget for input, Boolean decision,
+    # operand/control workspace, and any dynamic state.
+    CHRONOLOGY_BITS POLY 256 1 64;
+    TRANSITION_STEPS POLY 16 2 16;
     UNIFORM;
     TOTAL;
     READOUT_INVARIANT;
@@ -13,4 +15,6 @@ FAMILY identity_family {
     EFFECTS_FROZEN;
 }
 
-0 ORACLE DUP 0 PROPHECY OUTPUT
+# Identity transition has two one-bit recurrent classes. Both deliberately
+# produce the same Boolean decision, so all stationary mixtures agree.
+0 ORACLE DUP 0 PROPHECY POP 1 OUTPUT

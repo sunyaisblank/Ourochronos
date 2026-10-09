@@ -6,7 +6,9 @@
 //! - **IO**: File, network, and process I/O operations
 
 pub mod ffi;
+pub mod host_manifest;
 pub mod io;
+pub mod isolation;
 
 // Re-export from ffi
 pub use ffi::{

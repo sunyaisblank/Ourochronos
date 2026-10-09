@@ -42,6 +42,12 @@ pub enum ForeignHostError {
     UnknownTarget { id: ForeignId },
     /// The process binding does not exactly match the artifact descriptor.
     SignatureMismatch { id: ForeignId },
+    /// The caller supplied a different scalar argument count; no callback ran.
+    ArgumentMismatch {
+        id: ForeignId,
+        expected: usize,
+        got: usize,
+    },
     /// A callback returned a value for `void`, or omitted a declared result.
     ReturnMismatch { id: ForeignId, expected_value: bool },
     /// The trusted host callback declined or failed the call.
@@ -61,6 +67,10 @@ impl std::fmt::Display for ForeignHostError {
                     "foreign target {id} has a different host signature"
                 )
             }
+            Self::ArgumentMismatch { id, expected, got } => write!(
+                formatter,
+                "foreign target {id} expects {expected} scalar arguments, got {got}"
+            ),
             Self::ReturnMismatch { id, expected_value } => write!(
                 formatter,
                 "foreign target {id} {} a scalar result",
@@ -157,7 +167,13 @@ impl ForeignHostTable {
         if binding.descriptor != *descriptor {
             return Err(ForeignHostError::SignatureMismatch { id: descriptor.id });
         }
-        debug_assert_eq!(arguments.len(), descriptor.parameters.len());
+        if arguments.len() != descriptor.parameters.len() {
+            return Err(ForeignHostError::ArgumentMismatch {
+                id: descriptor.id,
+                expected: descriptor.parameters.len(),
+                got: arguments.len(),
+            });
+        }
         let result =
             (binding.callback)(arguments).map_err(|message| ForeignHostError::CallbackFailed {
                 id: descriptor.id,
@@ -852,8 +868,8 @@ impl FFICaller {
 
 /// Manager for dynamically loaded external libraries.
 ///
-/// This provides a safe way to load and call functions from shared libraries
-/// (.so on Linux, .dll on Windows, .dylib on macOS).
+/// Loading and resolving native code require explicit unsafe caller guarantees;
+/// prefer the safe [`ForeignHostTable`] for ordinary scalar embedding.
 #[derive(Default)]
 pub struct DynamicLibraryManager {
     /// Loaded libraries by name.
@@ -950,8 +966,16 @@ impl DynamicLibraryManager {
     }
 
     /// Load a library by name.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that the resolved library is trusted and that its
+    /// initialization and termination routines are safe to execute. Loading can
+    /// run arbitrary native constructors before any symbol is called; dropping
+    /// the final retained library can run native destructors. Search paths and
+    /// the current directory are host authority, never portable manifest data.
     #[cfg(feature = "dynamic-ffi")]
-    pub fn load(&mut self, name: &str) -> OuroResult<()> {
+    pub unsafe fn load(&mut self, name: &str) -> OuroResult<()> {
         if self.libraries.contains_key(name) {
             return Ok(()); // Already loaded
         }
@@ -974,8 +998,14 @@ impl DynamicLibraryManager {
     }
 
     /// Report that dynamic loading is unavailable in this build.
+    ///
+    /// # Safety
+    ///
+    /// The same trusted-library initialization/termination guarantee as the
+    /// feature-enabled method is required, keeping its API consistent across
+    /// feature configurations. This disabled build performs no native loading.
     #[cfg(not(feature = "dynamic-ffi"))]
-    pub fn load(&mut self, name: &str) -> OuroResult<()> {
+    pub unsafe fn load(&mut self, name: &str) -> OuroResult<()> {
         Err(OuroError::FFI {
             message: format!(
                 "Dynamic FFI is disabled. Cannot load library '{}'. \
@@ -1073,8 +1103,14 @@ impl ExtendedFFIContext {
     }
 
     /// Load a library and register its functions.
-    pub fn load_library(&mut self, name: &str) -> OuroResult<()> {
-        self.library_manager.load(name)
+    ///
+    /// # Safety
+    ///
+    /// The caller must satisfy [`DynamicLibraryManager::load`]'s trusted
+    /// library initialization and termination guarantees.
+    pub unsafe fn load_library(&mut self, name: &str) -> OuroResult<()> {
+        // SAFETY: this public unsafe boundary forwards the caller guarantees.
+        unsafe { self.library_manager.load(name) }
     }
 
     /// Register a dynamically loaded scalar function from a declaration.
@@ -1087,6 +1123,12 @@ impl ExtendedFFIContext {
     ///
     /// A shared library does not expose machine-checkable C signatures. The
     /// caller must guarantee that the selected symbol has the declared C ABI.
+    /// The registered safe callback accepts every supported u64 argument vector
+    /// and may be called concurrently: the native function must remain safe
+    /// under those calls. Any native resource or global-state preconditions must
+    /// hold for the full registered callback lifetime, including cloned functions.
+    /// If loading is needed, the library's initialization and termination
+    /// routines must also satisfy [`DynamicLibraryManager::load`]'s guarantees.
     /// Prefer [`ForeignHostTable`] when a safe process-local binding is
     /// available.
     pub unsafe fn register_from_declaration(
@@ -1100,17 +1142,26 @@ impl ExtendedFFIContext {
 
         // Ensure library is loaded
         if !self.library_manager.is_loaded(&library) {
-            self.library_manager.load(&library)?;
+            // SAFETY: registration requires both exact symbol ABI and the
+            // library initialization/termination guarantees from its caller.
+            unsafe {
+                self.library_manager.load(&library)?;
+            }
         }
 
         #[cfg(feature = "dynamic-ffi")]
         {
             let loaded = self.library_manager.library(&library)?;
+            // Capture the validated ABI independently of the public signature
+            // on any later FFIFunction clone or direct call.
+            let argument_count = sig.params.len();
             let has_result = !sig.returns.is_empty() && sig.returns != [FFIType::Void];
             let id = self.base.registry.register(sig, move |_state, args| {
-                // SAFETY: registration is itself unsafe and documents that the
-                // caller vouches for the selected symbol's exact C signature.
-                unsafe { call_dynamic_scalar(&loaded, &symbol, args, has_result) }
+                with_dynamic_arity(argument_count, args, || {
+                    // SAFETY: registration supplies the exact symbol ABI;
+                    // immutable arity validation precedes every direct call.
+                    unsafe { call_dynamic_scalar(&loaded, &symbol, args, has_result) }
+                })
             });
             Ok(id)
         }
@@ -1123,6 +1174,22 @@ impl ExtendedFFIContext {
             })
         }
     }
+}
+
+#[cfg(any(feature = "dynamic-ffi", test))]
+fn with_dynamic_arity<T>(
+    expected: usize,
+    args: &[Value],
+    invoke: impl FnOnce() -> OuroResult<T>,
+) -> OuroResult<T> {
+    if args.len() != expected {
+        return Err(FFIError::ArgumentMismatch {
+            expected,
+            got: args.len(),
+        }
+        .into());
+    }
+    invoke()
 }
 
 fn validate_dynamic_signature(signature: &FFISignature) -> OuroResult<()> {
@@ -1347,6 +1414,41 @@ mod tests {
                 .returns_type(FFIType::I64)
         )
         .is_err());
+    }
+
+    #[test]
+    fn immutable_native_arity_guards_direct_calls_and_mutated_signature_clones() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        for expected in 0..=6 {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let count = calls.clone();
+            let mut signature = FFISignature::new("native", "passive-test-identity");
+            for _ in 0..expected {
+                signature = signature.param("word", FFIType::U64);
+            }
+            let function = FFIFunction::new(signature, 0, move |_state, args| {
+                // Same immutable ABI guard used by dynamic registration, with
+                // a pure observer instead of loading or calling native code.
+                with_dynamic_arity(expected, args, || {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    Ok(vec![])
+                })
+            });
+            let mut changed = function.clone();
+            changed.signature.params.clear();
+            let mut state = VmState::new(Memory::new());
+            for got in 0..=7 {
+                let args = vec![Value::new(1); got];
+                let result = changed.call(&mut state, &args);
+                if got == expected {
+                    assert!(result.is_ok());
+                } else {
+                    assert!(matches!(result, Err(OuroError::FFI { .. })));
+                }
+            }
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+        }
     }
 
     #[test]

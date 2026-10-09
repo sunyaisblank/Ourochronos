@@ -11,12 +11,13 @@
 //! dependency-first initializer order under the version-4 linker's stable
 //! name ordering.
 
+use crate::admission::{analyze_resolved_program, seal_analyzed, AdmissionConfig, AdmissionError};
 use crate::ast::{Effect, Procedure, Program, ProgramLocations};
 use crate::bytecode::{BytecodeError, BytecodeProgram, Instruction};
 use crate::hir::{HirError, HirProgram, ProcedureId};
 use crate::linker::{
-    ObjectError, ObjectExport, ObjectImport, ObjectModule, ObjectRelocation, RelocationKind,
-    SymbolKind, SymbolSignature, SymbolTarget, MAX_OBJECT_NAME_BYTES,
+    LinkError, ObjectError, ObjectExport, ObjectImport, ObjectModule, ObjectRelocation,
+    RelocationKind, SymbolKind, SymbolSignature, SymbolTarget, MAX_OBJECT_NAME_BYTES,
 };
 use crate::module_graph::{ModuleGraph, SourceModule};
 use crate::source::{SourceError, SourceId, SourceManager};
@@ -31,6 +32,24 @@ use std::fmt;
 /// produces the same initializer order if the caller permutes it because the
 /// stable object names carry their graph ordinal.
 pub fn compile_objects(graph: &ModuleGraph) -> Result<Vec<ObjectModule>, ObjectCompileError> {
+    compile_objects_with_memory(graph, crate::core::MEMORY_SIZE)
+}
+
+/// Compile a graph under the same configured temporal-memory contract used by
+/// execution and proof modes. The complete graph is admitted before lowering,
+/// then linked and independently sealed once before any objects are returned.
+pub fn compile_objects_with_memory(
+    graph: &ModuleGraph,
+    memory_cells: usize,
+) -> Result<Vec<ObjectModule>, ObjectCompileError> {
+    let hir = graph
+        .resolve_hir()
+        .map_err(|errors| ObjectCompileError::Hir {
+            module: "<linked-graph>".to_string(),
+            errors,
+        })?;
+    let source = analyze_resolved_program(graph.program(), hir, AdmissionConfig { memory_cells })
+        .map_err(ObjectCompileError::Admission)?;
     let effective_prelude = effective_prelude(graph);
     let names = object_names(graph)?;
     let anchors = anchor_names(graph);
@@ -56,6 +75,8 @@ pub fn compile_objects(graph: &ModuleGraph) -> Result<Vec<ObjectModule>, ObjectC
     if !effective_prelude.is_empty() {
         objects.push(compile_prelude(graph.modules().len(), effective_prelude)?);
     }
+    let linked = crate::linker::link(&objects).map_err(ObjectCompileError::Link)?;
+    seal_analyzed(source, linked).map_err(ObjectCompileError::Admission)?;
     Ok(objects)
 }
 
@@ -63,6 +84,14 @@ impl ModuleGraph {
     /// Convenience method for [`compile_objects`].
     pub fn compile_objects(&self) -> Result<Vec<ObjectModule>, ObjectCompileError> {
         compile_objects(self)
+    }
+
+    /// Compile objects under an explicit temporal-memory contract.
+    pub fn compile_objects_with_memory(
+        &self,
+        memory_cells: usize,
+    ) -> Result<Vec<ObjectModule>, ObjectCompileError> {
+        compile_objects_with_memory(self, memory_cells)
     }
 }
 
@@ -592,6 +621,8 @@ fn internal(source: SourceId, message: impl Into<String>) -> ObjectCompileError 
 /// Failure while lowering a canonical source graph into relocatable objects.
 #[derive(Debug)]
 pub enum ObjectCompileError {
+    /// Whole-graph mandatory source admission failed.
+    Admission(AdmissionError),
     /// A retained source could no longer be read from its graph.
     Source(SourceError),
     /// Typed name/quotation resolution failed for one source-local unit.
@@ -606,6 +637,8 @@ pub enum ObjectCompileError {
     },
     /// The constructed relocation-aware object failed validation.
     Object { module: String, error: ObjectError },
+    /// The complete emitted object set did not form one valid linked program.
+    Link(LinkError),
     /// A typed artifact index exceeded its stable representation.
     IndexOverflow { module: String, what: &'static str },
     /// A retained graph invariant was unexpectedly absent.
@@ -615,6 +648,7 @@ pub enum ObjectCompileError {
 impl fmt::Display for ObjectCompileError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Admission(error) => write!(formatter, "source graph admission failed: {error}"),
             Self::Source(error) => error.fmt(formatter),
             Self::Hir { module, errors } => {
                 write!(formatter, "module {module:?} HIR resolution failed")?;
@@ -635,6 +669,7 @@ impl fmt::Display for ObjectCompileError {
                     "module {module:?} object construction failed: {error}"
                 )
             }
+            Self::Link(error) => write!(formatter, "source graph link validation failed: {error}"),
             Self::IndexOverflow { module, what } => {
                 write!(formatter, "module {module:?} {what} index overflow")
             }
@@ -651,9 +686,11 @@ impl fmt::Display for ObjectCompileError {
 impl Error for ObjectCompileError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
+            Self::Admission(error) => Some(error),
             Self::Source(error) => Some(error),
             Self::Bytecode { error, .. } => Some(error),
             Self::Object { error, .. } => Some(error),
+            Self::Link(error) => Some(error),
             _ => None,
         }
     }
@@ -708,6 +745,21 @@ mod tests {
                 OutputItem::Char(value) => u64::from(value),
             })
             .collect()
+    }
+
+    #[test]
+    fn object_emission_cannot_bypass_whole_graph_admission() {
+        let temp = TempDir::new();
+        let root = temp.write("root.ouro", "PROCEDURE hidden PURE { 1 OUTPUT } 0\n");
+        let graph = ModuleGraph::load(root, Vec::new()).unwrap();
+        let error = compile_objects(&graph).unwrap_err();
+        assert!(matches!(
+            error,
+            ObjectCompileError::Admission(AdmissionError {
+                phase: crate::admission::AdmissionPhase::Types,
+                ..
+            })
+        ));
     }
 
     #[test]

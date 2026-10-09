@@ -281,6 +281,21 @@ pub enum CommitOutcome {
     AlreadyCommitted(CommitReceipt),
 }
 
+/// Application evidence retained separately from the selected-batch receipt.
+/// Recording a batch does not establish that its effects reached the host.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EffectApplicationStatus {
+    /// No adapter has been called for this exact batch.
+    NotAttempted,
+    /// Dispatch began without a recorded acknowledgment. Its outcome is
+    /// unresolved, including when a callback unwinds after applying a prefix.
+    Applying,
+    /// The adapter acknowledged successful application.
+    Applied,
+    /// The adapter's terminal failure, which can follow a partial application.
+    Failed(String),
+}
+
 /// Explicit host boundary for a complete selected effect batch.
 ///
 /// The adapter is called only after the exact batch has entered the commit
@@ -306,12 +321,80 @@ pub trait EffectCommitAdapter {
 pub struct CommitLog {
     batches: Vec<CommittedBatch>,
     tokens: BTreeMap<CommitToken, usize>,
+    applications: BTreeMap<CommitToken, EffectApplicationStatus>,
 }
 
 impl CommitLog {
+    /// Borrow the one application ledger used by the bounded durable profile.
+    pub(crate) fn durable_entries(
+        &self,
+    ) -> impl Iterator<Item = (&CommittedBatch, &EffectApplicationStatus)> {
+        self.batches.iter().map(|batch| {
+            let status = self
+                .applications
+                .get(&batch.receipt.token)
+                .expect("every recorded batch has application evidence");
+            (batch, status)
+        })
+    }
+
+    pub(crate) fn set_durable_application(
+        &mut self,
+        token: CommitToken,
+        status: EffectApplicationStatus,
+    ) -> Result<(), TransactionError> {
+        if !self.tokens.contains_key(&token) {
+            return Err(TransactionError::Invariant(
+                "durable status has no exact recorded batch".into(),
+            ));
+        }
+        self.applications.insert(token, status);
+        Ok(())
+    }
+
+    /// Restore only after the profile's decoder has bounded the full image.
+    /// Receipts are checked against exact candidate data; digest collisions
+    /// never substitute for full equality on a later commit.
+    pub(crate) fn restore_durable(
+        entries: Vec<(CommittedBatch, EffectApplicationStatus)>,
+    ) -> Result<Self, TransactionError> {
+        let mut log = Self::default();
+        for (batch, status) in entries {
+            let candidate = TimelineCandidate {
+                state: batch.state.clone(),
+                output: batch.output.clone(),
+                effects: batch.effects.clone(),
+                inputs_consumed: batch.inputs_consumed.clone(),
+                observations: batch.observations.clone(),
+            };
+            let digest = candidate_digest(&candidate);
+            if batch.receipt.sequence != log.batches.len()
+                || batch.receipt.batch_digest != digest
+                || batch.receipt.timeline != TimelineId(digest)
+                || batch.inputs_consumed != batch.observations.input
+                || log.tokens.contains_key(&batch.receipt.token)
+            {
+                return Err(TransactionError::Invariant(
+                    "invalid durable receipt, sequence, token, or input transcript".into(),
+                ));
+            }
+            let token = batch.receipt.token;
+            log.tokens.insert(token, batch.receipt.sequence);
+            log.applications.insert(token, status);
+            log.batches.push(batch);
+        }
+        Ok(log)
+    }
+
     /// Recorded batches in first-commit order.
     pub fn batches(&self) -> &[CommittedBatch] {
         &self.batches
+    }
+
+    /// Inspect host-application evidence without confusing it with ledger
+    /// membership. This is in-memory evidence, not a durable recovery record.
+    pub fn application_status(&self, token: CommitToken) -> Option<&EffectApplicationStatus> {
+        self.applications.get(&token)
     }
 
     fn record(
@@ -354,6 +437,8 @@ impl CommitLog {
             observations: candidate.observations.clone(),
         });
         self.tokens.insert(token, sequence);
+        self.applications
+            .insert(token, EffectApplicationStatus::NotAttempted);
         Ok(CommitOutcome::Committed(receipt))
     }
 }
@@ -516,13 +601,19 @@ pub enum TransactionError {
         /// Conflicting token.
         token: CommitToken,
     },
-    /// The selected batch was durably ledgered but its authorized adapter
-    /// failed. It will not be invoked again by this transaction/log pair.
+    /// The selected batch was recorded in memory but its authorized adapter
+    /// failed. Replays return this same failure without invoking it again.
     EffectAdapterFailed {
         /// Commit identity already present in the ledger.
         token: CommitToken,
         /// Adapter-provided failure detail.
         message: String,
+    },
+    /// An adapter call began without a saved acknowledgment. Retrying could
+    /// repeat an irreversible prefix, so this log cannot dispatch it again.
+    EffectAdapterUnresolved {
+        /// Commit identity already present in the ledger.
+        token: CommitToken,
     },
     /// Internal ledger invariant failure.
     Invariant(String),
@@ -563,6 +654,10 @@ impl fmt::Display for TransactionError {
             Self::EffectAdapterFailed { token, message } => {
                 write!(formatter, "effect adapter failed for {token:?}: {message}")
             }
+            Self::EffectAdapterUnresolved { token } => write!(
+                formatter,
+                "effect application outcome is unresolved for {token:?}; automatic redispatch is withheld"
+            ),
             Self::Invariant(message) => write!(formatter, "transaction invariant: {message}"),
         }
     }
@@ -708,6 +803,19 @@ impl TemporalTransaction {
         token: CommitToken,
         log: &mut CommitLog,
     ) -> Result<CommitOutcome, TransactionError> {
+        let (selected, candidate) = self.selected_candidate_for_commit(token)?;
+        let outcome = log.record(token, selected, candidate)?;
+        self.committed = Some(token);
+        Ok(outcome)
+    }
+
+    /// Borrow the frozen selected candidate for bounded durable preflight.
+    /// This shares commit authority checks and neither clones nor marks a
+    /// commit; the profile measures the full encoding before copying data.
+    pub(crate) fn selected_candidate_for_commit(
+        &self,
+        token: CommitToken,
+    ) -> Result<(TimelineId, &TimelineCandidate), TransactionError> {
         if self.rolled_back {
             return Err(TransactionError::RolledBack);
         }
@@ -721,15 +829,14 @@ impl TemporalTransaction {
             .candidates
             .get(&selected)
             .ok_or(TransactionError::UnknownTimeline(selected))?;
-        let outcome = log.record(token, selected, candidate)?;
-        self.committed = Some(token);
-        Ok(outcome)
+        Ok((selected, candidate))
     }
 
     /// Ledger and dispatch the selected effect batch at most once.
     ///
-    /// Replaying an already committed exact token returns
-    /// [`CommitOutcome::AlreadyCommitted`] without invoking `adapter`.
+    /// A receipt recorded without an adapter remains eligible for its first
+    /// dispatch. After dispatch, replays preserve the exact success/failure;
+    /// unacknowledged calls remain unresolved. No attempted batch is retried.
     pub fn commit_selected_with_adapter(
         &mut self,
         token: CommitToken,
@@ -737,18 +844,48 @@ impl TemporalTransaction {
         adapter: &mut (impl EffectCommitAdapter + ?Sized),
     ) -> Result<CommitOutcome, TransactionError> {
         let outcome = self.commit_selected(token, log)?;
-        let CommitOutcome::Committed(receipt) = &outcome else {
-            return Ok(outcome);
+        let receipt = match &outcome {
+            CommitOutcome::Committed(receipt) | CommitOutcome::AlreadyCommitted(receipt) => receipt,
         };
+        match log.application_status(token) {
+            Some(EffectApplicationStatus::Applied) => return Ok(outcome),
+            Some(EffectApplicationStatus::Failed(message)) => {
+                return Err(TransactionError::EffectAdapterFailed {
+                    token,
+                    message: message.clone(),
+                });
+            }
+            Some(EffectApplicationStatus::Applying) => {
+                return Err(TransactionError::EffectAdapterUnresolved { token });
+            }
+            Some(EffectApplicationStatus::NotAttempted) => {}
+            None => {
+                return Err(TransactionError::Invariant(
+                    "commit receipt has no application status".to_string(),
+                ));
+            }
+        };
+        // Claim before entering the callback. If it unwinds after a real host
+        // mutation, Applying survives and blocks blind replay.
+        log.applications
+            .insert(token, EffectApplicationStatus::Applying);
         let batch = log.batches().get(receipt.sequence).ok_or_else(|| {
             TransactionError::Invariant(
                 "new commit receipt references a missing effect batch".to_string(),
             )
         })?;
-        adapter
-            .apply_selected(receipt, &batch.effects)
-            .map_err(|message| TransactionError::EffectAdapterFailed { token, message })?;
-        Ok(outcome)
+        match adapter.apply_selected(receipt, &batch.effects) {
+            Ok(()) => {
+                log.applications
+                    .insert(token, EffectApplicationStatus::Applied);
+                Ok(outcome)
+            }
+            Err(message) => {
+                log.applications
+                    .insert(token, EffectApplicationStatus::Failed(message.clone()));
+                Err(TransactionError::EffectAdapterFailed { token, message })
+            }
+        }
     }
 
     /// Discard every candidate and make future selection/commit impossible.
@@ -1114,17 +1251,134 @@ mod tests {
             })
         ));
         assert_eq!(failing_adapter.calls.len(), 1);
-        assert!(matches!(
+        assert_eq!(
             failed
                 .commit_selected_with_adapter(CommitToken(72), &mut log, &mut failing_adapter)
-                .unwrap(),
-            CommitOutcome::AlreadyCommitted(_)
-        ));
+                .unwrap_err(),
+            TransactionError::EffectAdapterFailed {
+                token: CommitToken(72),
+                message: "injected adapter failure".into(),
+            }
+        );
         assert_eq!(
             failing_adapter.calls.len(),
             1,
             "failed dispatch was replayed"
         );
+    }
+
+    #[test]
+    fn recording_before_dispatch_does_not_lose_effects() {
+        let mut transaction =
+            TemporalTransaction::new(vec![7], TransactionLimits::default()).unwrap();
+        let timeline = transaction
+            .stage_candidate(candidate(&transaction, 9))
+            .unwrap();
+        transaction.select(timeline).unwrap();
+        let token = CommitToken(73);
+        let mut log = CommitLog::default();
+        transaction.commit_selected(token, &mut log).unwrap();
+        assert_eq!(
+            log.application_status(token),
+            Some(&EffectApplicationStatus::NotAttempted)
+        );
+
+        let mut adapter = RecordingAdapter::default();
+        transaction
+            .commit_selected_with_adapter(token, &mut log, &mut adapter)
+            .unwrap();
+        assert_eq!(adapter.calls.len(), 1);
+        assert_eq!(log.batches().len(), 1);
+        assert_eq!(
+            log.application_status(token),
+            Some(&EffectApplicationStatus::Applied)
+        );
+
+        let mut replay = TemporalTransaction::new(vec![7], TransactionLimits::default()).unwrap();
+        let replay_id = replay.stage_candidate(candidate(&replay, 9)).unwrap();
+        replay.select(replay_id).unwrap();
+        replay
+            .commit_selected_with_adapter(token, &mut log, &mut adapter)
+            .unwrap();
+        assert_eq!(adapter.calls.len(), 1);
+    }
+
+    #[test]
+    fn adapter_failure_is_retained_across_transactions_and_adapter_replacement() {
+        let mut transaction =
+            TemporalTransaction::new(vec![7], TransactionLimits::default()).unwrap();
+        let timeline = transaction
+            .stage_candidate(candidate(&transaction, 9))
+            .unwrap();
+        transaction.select(timeline).unwrap();
+        let token = CommitToken(74);
+        let mut log = CommitLog::default();
+        let mut adapter = RecordingAdapter {
+            fail: true,
+            ..RecordingAdapter::default()
+        };
+        let failure = transaction
+            .commit_selected_with_adapter(token, &mut log, &mut adapter)
+            .unwrap_err();
+        assert_eq!(
+            log.application_status(token),
+            Some(&EffectApplicationStatus::Failed(
+                "injected adapter failure".into()
+            ))
+        );
+
+        let mut replay = TemporalTransaction::new(vec![7], TransactionLimits::default()).unwrap();
+        let replay_id = replay.stage_candidate(candidate(&replay, 9)).unwrap();
+        replay.select(replay_id).unwrap();
+        let mut replacement = RecordingAdapter::default();
+        assert_eq!(
+            replay
+                .commit_selected_with_adapter(token, &mut log, &mut replacement)
+                .unwrap_err(),
+            failure
+        );
+        assert_eq!(adapter.calls.len(), 1);
+        assert!(replacement.calls.is_empty());
+    }
+
+    #[test]
+    fn callback_unwind_leaves_an_unresolved_outcome_and_never_repeats_a_prefix() {
+        struct InterruptedAdapter(usize);
+        impl EffectCommitAdapter for InterruptedAdapter {
+            fn apply_selected(
+                &mut self,
+                _: &CommitReceipt,
+                _: &[EffectIntent],
+            ) -> Result<(), String> {
+                self.0 += 1;
+                panic!("lost acknowledgment after synthetic prefix");
+            }
+        }
+
+        let mut transaction =
+            TemporalTransaction::new(vec![7], TransactionLimits::default()).unwrap();
+        let timeline = transaction
+            .stage_candidate(candidate(&transaction, 9))
+            .unwrap();
+        transaction.select(timeline).unwrap();
+        let token = CommitToken(75);
+        let mut log = CommitLog::default();
+        let mut adapter = InterruptedAdapter(0);
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            transaction.commit_selected_with_adapter(token, &mut log, &mut adapter)
+        }))
+        .is_err());
+        assert_eq!(
+            log.application_status(token),
+            Some(&EffectApplicationStatus::Applying)
+        );
+        assert_eq!(
+            transaction
+                .commit_selected_with_adapter(token, &mut log, &mut adapter)
+                .unwrap_err(),
+            TransactionError::EffectAdapterUnresolved { token }
+        );
+        assert_eq!(adapter.0, 1);
     }
 
     #[test]
