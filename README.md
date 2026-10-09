@@ -361,7 +361,7 @@ because no single chronology has been selected.
 
 ## Documentation and examples
 
-The [specification](docs/specification.md) defines the abstract machine, typed finite IR, solver proof obligations, instruction set, and runtime behavior. The [alignment contract](docs/alignment_contract.md) defines the formal admission judgment and cross-mode invariants. The [theory guide](docs/theory.md) gives the Turing-completeness construction, deterministic/stochastic/quantum fixed-point distinctions, exact PSPACE conditions, all implemented forms, and the finite barrier to `Delta^0_2` and halting. [Positioning](docs/positioning.md) compares the language with esolangs, constraint/data-flow tools, and the broader formal-methods family without overclaiming. The [case studies](docs/case_studies.md) cover the three strongest applications: bounded self-consistency model checking, circular data flow, and retrocausal simulation/game rules. The [completion audit](docs/completion_audit.md) maps claims to code and tests.
+The [specification](docs/specification.md) defines the abstract machine, typed finite IR, solver proof obligations, instruction set, and runtime behavior. The [alignment contract](docs/alignment_contract.md) defines the formal admission judgment and cross-mode invariants. The [theory guide](docs/theory.md) gives the Turing-completeness construction, deterministic/stochastic/quantum fixed-point distinctions, exact PSPACE conditions, all implemented forms, and the finite barrier to `Delta^0_2` and halting. [Positioning](docs/positioning.md) compares the language with esolangs, constraint/data-flow tools, and the broader formal-methods family without overclaiming. The [case studies](docs/case_studies.md) cover the three strongest applications: bounded self-consistency model checking, circular data flow, and retrocausal simulation/game rules.
 
 ## Development and local release qualification
 
@@ -373,8 +373,9 @@ The configurable `application_studies` example accepts exclusion eligibility,
 modular dataflow gains/biases and rule-game successor tables, with `--save` for
 a new result file. Its ordinary Linux invocation includes process supervision.
 
-Use the locked Rust 1.85 toolchain with clang/libclang and native Z3 development
-headers. On Debian/Ubuntu these come from `clang libclang-dev libz3-dev`.
+The repository pins Rust 1.85.0 in `rust-toolchain.toml`; rustup selects it
+automatically. Use clang/libclang and native Z3 development headers. Z3 is
+mandatory for this release, including builds without optional features. On Debian/Ubuntu these come from `clang libclang-dev libz3-dev`.
 Optional `lsp` builds the stdio language server; optional `dynamic-ffi` adds the
 explicitly unsafe native library adapter. Neither restores retired execution
 facades. For a focused change, run the affected targets, then these integration
@@ -393,6 +394,16 @@ lean formal/CounterMachine.lean  # exact toolchain in formal/lean-toolchain
 python3 scripts/check_solver_usage.py
 cargo audit --ignore RUSTSEC-2026-0295
 ```
+
+Track changes in [GitHub issues](https://github.com/sunyaisblank/Ourochronos/issues).
+Each issue should state the affected behavior, expected contract, observed
+problem, and finite acceptance checks. Implement a coherent repair on a branch,
+link its pull request to the issue, and attach the relevant checks and supported
+limits. Review the combined change and require CI to pass on its final revision
+before merging. After merge, fast-forward local `main` to `origin/main` and
+verify a clean worktree. Keep temporary experiments outside tracked source;
+retain only tests, specifications and tools that future changes need. Toolchain
+upgrades follow the same review and verification process.
 
 For an intentionally dirty local candidate, `cargo package --allow-dirty`
 preserves the supplied worktree; CI uses a clean checkout. The packaged `.crate`

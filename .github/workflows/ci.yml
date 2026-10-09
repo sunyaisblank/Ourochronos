@@ -17,7 +17,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.85.0
         with:
           components: rustfmt, clippy
 
@@ -31,7 +31,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-rust-1.85.0-cargo-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Run cargo check
         run: cargo check --all-targets --all-features --locked
@@ -66,6 +66,14 @@ jobs:
       - name: Run the explicitly excluded release stress gates
         run: cargo test --release --test main --all-features --locked -- --ignored
 
+      - name: Retain interface evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-interface-evidence
+          path: target/interface-qualification-report.json
+          if-no-files-found: ignore
+
   format:
     runs-on: ubuntu-latest
 
@@ -73,7 +81,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.85.0
         with:
           components: rustfmt
 
@@ -93,7 +101,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.85.0
 
       - name: Install native solver dependencies
         run: sudo apt-get update && sudo apt-get install -y clang libclang-dev libz3-dev
@@ -201,6 +209,14 @@ jobs:
           "$RUNNER_TEMP/quantum-venv/bin/python" -m pip install --only-binary=:all: --require-hashes -r "$RUNNER_TEMP/quantum.lock"
           "$RUNNER_TEMP/quantum-venv/bin/python" tests/quantum_research.py --report target/quantum-research-report.json
 
+      - name: Retain bounded numerical evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: quantum-research-evidence
+          path: target/quantum-research-report.json
+          if-no-files-found: ignore
+
   windows-build:
     runs-on: ubuntu-24.04
     steps:
@@ -229,3 +245,10 @@ jobs:
       - name: Execute the actual Windows portable workflows
         shell: powershell
         run: ./scripts/qualify_windows.ps1 -Runtime (Resolve-Path windows-runtime/ourochronos.exe) -Report windows-runtime/qualification.json
+      - name: Retain Windows workflow evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-portable-evidence
+          path: windows-runtime/qualification.json
+          if-no-files-found: ignore

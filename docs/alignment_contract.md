@@ -164,4 +164,5 @@ A new source-facing mode is incomplete until it:
 3. defines effects, gas, state-domain, and result-completeness behavior;
 4. adds an adversarial rejection case to the cross-facade matrix;
 5. adds its architecture marker to the build gate; and
-6. records claim-to-evidence coverage in `completion_audit.md`.
+6. links the contract, relevant checks, and final CI revision in its GitHub issue
+   and pull request.
